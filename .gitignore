@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+.env
+
+# build artifacts
+dist/
+build/
+*.egg-info/
+
+# local test tools
+test_tool/
+
