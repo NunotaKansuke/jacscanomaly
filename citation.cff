@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+
+message: >
+  If you use this software in academic work, including journal articles,
+  conference proceedings, or theses, please cite it using the following
+  metadata.
+
+title: "jacscanomaly: JAX-based residual anomaly detection for time-series data"
+
+authors:
+  - family-names: "Nunota"
+    given-names: "Kansuke"
+    affiliation: "University of Osaka"
+    email: "nunota@iral.ess.sci.osaka-u.ac.jp"
+
+repository-code: "https://github.com/NunotaKansuke/jacscanomaly"
+url: "https://github.com/NunotaKansuke/jacscanomaly"
+
+license: "MIT"
+
+date-released: "2026-01-21"
+
+keywords:
+  - planetary detection
+  - JAX
+  - microlensing
+

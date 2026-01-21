@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jacscanomaly"
+version = "0.1.0"
+description = "JAX-based scan anomaly detection for time-series residuals"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Kansuke Nunota" }]
+dependencies = [
+  "numpy",
+  "jax",
+  "jaxopt",
+  "matplotlib",
+]
+
+[project.urls]
+Homepage = "https://github.com/NunotaKansuke/jacscanomaly"
+Repository = "https://github.com/NunotaKansuke/jacscanomaly"
+Issues = "https://github.com/NunotaKansuke/jacscanomaly/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["jacscanomaly.test_tool*"]
+

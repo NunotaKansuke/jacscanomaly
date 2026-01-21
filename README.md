@@ -13,7 +13,6 @@ while remaining fast and differentiable thanks to JAX.
 
 *  **JAX-powered**: fast, vectorized grid scans with JIT compilation
 *  **Scan-based anomaly detection** on residuals
-*  **Model-agnostic design**: anomaly scan works on residuals of any baseline model
 *  **Built-in visualization**: PSPL fit, residuals, and anomaly scan summary
 *  Designed for **research-grade workflows** (clear statistics & reproducibility)
 
@@ -24,8 +23,6 @@ while remaining fast and differentiable thanks to JAX.
 ```bash
 pip install jacscanomaly
 ```
-
-> For local development (without pip), see the example notebook.
 
 ---
 
@@ -140,7 +137,6 @@ Key parameters are controlled via `FinderConfig`:
 from jacscanomaly import FinderConfig
 
 config = FinderConfig(
-    gap=100.0,          # season gap
     teff_init=0.3,      # initial anomaly timescale
     teff_grid_n=5,      # number of teff grid points
     sigma=3.0,          # threshold for outlier counting
@@ -148,6 +144,16 @@ config = FinderConfig(
 ```
 
 See `FinderConfig` for the full list of options.
+
+---
+
+## Citation
+
+If you use **jacscanomaly** in academic work, including journal articles,
+conference proceedings, or theses, please cite the software.
+
+Citation metadata is provided in the `citation.cff` file in this repository,
+which can be used directly by GitHub and reference managers.
 
 ---
 
