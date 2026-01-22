@@ -42,7 +42,7 @@ class FinderConfig:
     common_ratio: float = 4.0 / 3.0
     """Common ratio for the geometric series of teff values."""
 
-    teff_grid_n: int = 5
+    teff_grid_n: int = 20
     """Number of teff values in the grid."""
 
     dt0_coeff: float = 0.17

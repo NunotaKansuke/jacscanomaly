@@ -1,27 +1,53 @@
 cff-version: 1.2.0
 
 message: >
-  If you use this software in academic work, including journal articles,
-  conference proceedings, or theses, please cite it using the following
-  metadata.
+If you use this software in academic work, including journal articles,
+conference proceedings, or theses, please cite this software.
+If relevant, please also cite the associated methodological reference
+listed below.
 
 title: "jacscanomaly: JAX-based residual anomaly detection for time-series data"
 
 authors:
-  - family-names: "Nunota"
-    given-names: "Kansuke"
-    affiliation: "University of Osaka"
-    email: "nunota@iral.ess.sci.osaka-u.ac.jp"
 
-repository-code: "https://github.com/NunotaKansuke/jacscanomaly"
-url: "https://github.com/NunotaKansuke/jacscanomaly"
+* family-names: "Nunota"
+  given-names: "Kansuke"
+  affiliation: "University of Osaka"
+  email: "[nunota@iral.ess.sci.osaka-u.ac.jp](mailto:nunota@iral.ess.sci.osaka-u.ac.jp)"
+
+repository-code: "[https://github.com/NunotaKansuke/jacscanomaly](https://github.com/NunotaKansuke/jacscanomaly)"
+url: "[https://github.com/NunotaKansuke/jacscanomaly](https://github.com/NunotaKansuke/jacscanomaly)"
 
 license: "MIT"
 
 date-released: "2026-01-21"
 
 keywords:
-  - planetary detection
-  - JAX
-  - microlensing
 
+* anomaly detection
+* time-series analysis
+* microlensing
+* JAX
+* residual analysis
+
+references:
+
+* type: article
+  authors:
+
+  * family-names: "Zang"
+    given-names: "W."
+  * family-names: "Jung"
+    given-names: "Y."
+  * family-names: "Yee"
+    given-names: "J."
+  * family-names: "et al."
+    title: >
+    Systematic KMTNet Planetary Anomaly Search, Paper I:
+    OGLE-2019-BLG-1053Lb, A Buried Terrestrial Planet
+    journal: "The Astronomical Journal"
+    volume: "162"
+    issue: "4"
+    year: 2021
+    doi: "10.3847/1538-3881/ac12d4"
+    url: "[https://ui.adsabs.harvard.edu/abs/2021AJ....162..163Z/abstract](https://ui.adsabs.harvard.edu/abs/2021AJ....162..163Z/abstract)"
