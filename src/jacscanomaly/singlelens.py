@@ -6,7 +6,8 @@ import jax.numpy as jnp
 
 from jaxopt import LevenbergMarquardt
 
-from .utils import calc_A_pspl, linear_fit, calc_res_norm, calc_chi2
+from .utils import calc_A_pspl, calc_res_norm, calc_chi2
+from .photometry import solve_fs_fb
 from .plot import PSPLPlotter
 
 @dataclass(frozen=True)
@@ -112,7 +113,7 @@ class PSPLFitter:
         # best-fit model
         A = calc_A_pspl(params[0], params[1], params[2], time)
         w = ferr ** (-2)
-        fs, fb = linear_fit(A, flux, w)
+        fs, fb = solve_fs_fb(A, flux, ferr)
         model_flux = fs * A + fb
         residual = flux - model_flux
 
