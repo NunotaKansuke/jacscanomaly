@@ -5,7 +5,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from .pspl import PSPLFitResult
+from .singlelens import PSPLFitResult
 
 
 @dataclass(frozen=True)

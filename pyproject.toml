@@ -29,3 +29,5 @@ package-dir = {"" = "src"}
 where = ["src"]
 exclude = ["jacscanomaly.test_tool*"]
 
+[tool.setuptools.package-data]
+jacscanomaly = ["data/*"]
