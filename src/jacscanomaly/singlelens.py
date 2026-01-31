@@ -11,32 +11,32 @@ from .photometry import solve_fs_fb
 from .plot import PSPLPlotter
 from jaxopt import LevenbergMarquardt
 from .objective import residual_norm_from_A, chi2_from_res
-from .singlelens_model import A_pspl_func, A_fspl_logrho_func
+from .singlelens_model import A_pspl_func, A_fspl_logrho_func, A_pspl_parallax_func
+from .trajectory import make_parallax_projector
 
 @dataclass(frozen=True)
 class PSPLFitResult:
     """
-    Result container for PSPL model fitting.
-
-    This object intentionally stores the input data so that
-    plotting can be performed directly via PSPLPlotter.
+    Result container for single-lens model fitting.
 
     Attributes
     ----------
     time, flux, ferr : np.ndarray
         Input light-curve data (stored on CPU for plotting).
     params : jnp.ndarray
-        Best-fit nonlinear PSPL parameters (t0, tE, u0).
+        Best-fit nonlinear parameters.
+    param_names : tuple[str, ...]
+        Names of nonlinear parameters corresponding to `params`.
     chi2 : jnp.ndarray
         Total chi-square of the best-fit model.
     chi2_dof : jnp.ndarray
-        Reduced chi-square (chi2 / degrees of freedom).
+        Reduced chi-square.
     fs, fb : jnp.ndarray
         Best-fit linear flux parameters.
     model_flux : jnp.ndarray
         Model flux evaluated at input times.
     residual : jnp.ndarray
-        Flux residuals: (observed flux - model_flux).
+        Flux residuals.
     """
 
     # input data (CPU, for plotting)
@@ -46,6 +46,7 @@ class PSPLFitResult:
 
     # fit results
     params: jnp.ndarray
+    param_names: Tuple[str, ...]
     chi2: jnp.ndarray
     chi2_dof: jnp.ndarray
     fs: jnp.ndarray
@@ -142,6 +143,7 @@ class PSPLFitter:
             flux=flux_np,
             ferr=ferr_np,
             params=params,
+            param_names=("t0", "tE", "u0"),
             chi2=chi2,
             chi2_dof=chi2_dof,
             fs=fs,
@@ -220,6 +222,85 @@ class FSPLFitter:
             flux=np.asarray(flux),
             ferr=np.asarray(ferr),
             params=params_phys,
+            param_names=("t0", "tE", "u0", "rho"),
+            chi2=chi2,
+            chi2_dof=chi2_dof,
+            fs=fs,
+            fb=fb,
+            model_flux=model_flux,
+            residual=residual,
+        )
+        self._last_fit = fit
+        return fit
+
+@dataclass
+class PSPLParallaxFitter:
+    RA: float
+    Dec: float
+    tref: float
+
+    maxiter: int = 1000
+    damping_parameter: float = 1e-6
+    tol: float = 1e-3
+
+    def __post_init__(self):
+        self._P = make_parallax_projector(self.RA, self.Dec, self.tref)
+        self._last_fit = None
+
+    def fit(
+        self,
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        ferr: jnp.ndarray,
+        p0: jnp.ndarray,
+    ) -> PSPLFitResult:
+        """
+        Fit PSPL + annual parallax.
+
+        params = (t0, tE, u0, piEN, piEE)
+        """
+        n = int(time.shape[0])
+        if n < 6:
+            raise ValueError(f"Need at least 6 data points, got {n}.")
+
+        eps = 1e-12
+        ferr = jnp.maximum(ferr, eps)
+        data = (time, flux, ferr)
+
+        P = self._P
+
+        def residual_fun(params, data):
+            t, f, fe = data
+            A = A_pspl_parallax_func(params, t, P)
+            return residual_norm_from_A(A, f, fe)
+
+        solver = LevenbergMarquardt(
+            residual_fun=residual_fun,
+            maxiter=self.maxiter,
+            damping_parameter=self.damping_parameter,
+            tol=self.tol,
+        )
+        sol = solver.run(p0, data=data)
+        params = sol.params
+
+        # best-fit model
+        A = A_pspl_parallax_func(params, time, P)
+
+        fs, fb = solve_fs_fb(A, flux, ferr)
+        model_flux = fs * A + fb
+        residual = flux - model_flux
+
+        resn = residual_norm_from_A(A, flux, ferr)
+        chi2 = chi2_from_res(resn)
+        dof = n - 5
+        chi2_dof = chi2 / dof
+
+        fit = PSPLFitResult(
+            time=np.asarray(time),
+            flux=np.asarray(flux),
+            ferr=np.asarray(ferr),
+            params=params,
+            param_names=("t0", "tE", "u0", "piEN", "piEE"),
             chi2=chi2,
             chi2_dof=chi2_dof,
             fs=fs,
