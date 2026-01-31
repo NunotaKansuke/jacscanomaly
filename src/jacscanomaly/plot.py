@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 
-from .singlelens_model import A_pspl_func
 from .anomaly_models import predict_flat_model, predict_anom_model
 
 
@@ -88,13 +87,13 @@ class AnomalyPlotter:
 
         elif width_mode == "anomaly":
             if getattr(result, "best", None) is None:
-                t0, tE, u0 = map(float, np.asarray(result.fit.params))
+                t0, tE, u0 = map(float, np.asarray(result.fit.params)[:3])
                 hw = float(a * abs(tE * u0))
             else:
                 hw = float(a * result.best.teff)
 
         else:  # "pspl"
-            t0, tE, u0 = map(float, np.asarray(result.fit.params))
+            t0, tE, u0 = map(float, np.asarray(result.fit.params)[:3])
             hw = float(a * abs(tE * u0))
 
         return (t_center - hw, t_center + hw)
@@ -300,20 +299,11 @@ class AnomalyPlotter:
         e = np.asarray(result.ferr)
         res = np.asarray(result.residual)
         clusters = np.asarray(result.clusters_all)
-
-        # best params
-        best_params = list(map(float, np.asarray(result.fit.params)))
-        fs_b = float(np.asarray(result.fit.fs))
-        fb_b = float(np.asarray(result.fit.fb))
+        m = result.model_flux
 
         xl = self._compute_xlim(
             result, center=center, width_mode=width_mode, a=a, xlim=xlim, half_width=half_width
         )
-
-        # model curve in that x-range
-        t_plot = np.linspace(xl[0], xl[1], 1000)
-        A_plot = np.asarray(A_pspl_func(best_params, t_plot))
-        f_plot = A_plot * fs_b + fb_b
 
         fig, axes = plt.subplots(
             3, 1, figsize=figsize, sharex=True, height_ratios=height_ratios
@@ -322,7 +312,7 @@ class AnomalyPlotter:
         # 1) data + model
         ax = axes[0]
         ax.errorbar(t, f, yerr=e, fmt="o", markersize=2, alpha=0.7, label="data", zorder=0)
-        ax.plot(t_plot, f_plot, lw=2, label="best model", zorder=1)
+        ax.plot(t, m, lw=2, label="best model", zorder=1)
         ax.set_xlim(xl)
         ax.set_ylabel("flux")
         ax.minorticks_on()

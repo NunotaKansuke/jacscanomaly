@@ -37,10 +37,10 @@ data = np.load("example_data.npy")
 time, flux, ferr = data[:, 0], data[:, 1], data[:, 2]
 
 # initial guess for PSPL parameters
-p0 = np.array([9826.56, 8.61, 0.353])
+p0 = np.array([10000, 10, 0.3])
 
 # run anomaly finder
-config = FinderConfig()
+config = FinderConfig(fitter_kind="pspl")
 finder = Finder(config)
 result = finder.run(time, flux, ferr, p0)
 
@@ -64,8 +64,8 @@ print(f"  score       = {b.score:.2f}")
 ## Visualization
 
 ```python
-finder.plot_result(result)
-finder.plot_anomaly_window(result)
+finder.plot_result()
+finder.plot_anomaly_window()
 plt.show()
 ```
 

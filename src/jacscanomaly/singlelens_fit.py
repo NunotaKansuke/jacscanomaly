@@ -1,48 +1,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Tuple, Optional, Callable
+
 import numpy as np
 import jax.numpy as jnp
-from typing import Tuple, Optional, Any
+from jaxopt import LevenbergMarquardt
 
 from .photometry import solve_fs_fb
 from .plot import SingleLensPlotter
-from jaxopt import LevenbergMarquardt
 from .objective import residual_norm_from_A, chi2_from_res
-from .singlelens_model import A_pspl_func, A_fspl_logrho_func, A_pspl_parallax_func, A_fspl_parallax_logrho_func
+from .singlelens_model import (
+    A_pspl_func,
+    A_fspl_logrho_func,
+    A_pspl_parallax_func,
+    A_fspl_parallax_logrho_func,
+)
 from .trajectory import make_parallax_projector
+
 
 @dataclass(frozen=True)
 class SingleLensFitResult:
     """
-    Result container for single-lens model fitting.
+    Result of a single-lens microlensing fit.
 
-    Attributes
-    ----------
-    time, flux, ferr : np.ndarray
-        Input light-curve data (stored on CPU for plotting).
-    params : jnp.ndarray
-        Best-fit nonlinear parameters.
-    param_names : tuple[str, ...]
-        Names of nonlinear parameters corresponding to `params`.
-    chi2 : jnp.ndarray
-        Total chi-square of the best-fit model.
-    chi2_dof : jnp.ndarray
-        Reduced chi-square.
-    fs, fb : jnp.ndarray
-        Best-fit linear flux parameters.
-    model_flux : jnp.ndarray
-        Model flux evaluated at input times.
-    residual : jnp.ndarray
-        Flux residuals.
+    Stores the input light curve on CPU (NumPy) for plotting convenience, while
+    keeping fitted arrays as JAX arrays for downstream computation.
     """
 
-    # input data (CPU, for plotting)
     time: np.ndarray
     flux: np.ndarray
     ferr: np.ndarray
 
-    # fit results
     params: jnp.ndarray
     param_names: Tuple[str, ...]
     chi2: jnp.ndarray
@@ -51,7 +40,10 @@ class SingleLensFitResult:
     fb: jnp.ndarray
     model_flux: jnp.ndarray
     residual: jnp.ndarray
+
+    # Optional: raw optimizer parameters (e.g. logrho), if different from `params`.
     raw_params: Optional[jnp.ndarray] = None
+
 
 def _fit_single_lens(
     *,
@@ -59,16 +51,29 @@ def _fit_single_lens(
     flux: jnp.ndarray,
     ferr: jnp.ndarray,
     x0: jnp.ndarray,
-    build_A,
+    build_A: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
     dof: int,
     param_names: Tuple[str, ...],
-    x_to_params=None,
+    x_to_params: Optional[Callable[[jnp.ndarray], jnp.ndarray]] = None,
     maxiter: int = 1000,
     damping_parameter: float = 1e-6,
     tol: float = 1e-3,
     min_points: int = 4,
     store_raw_params: bool = False,
 ) -> SingleLensFitResult:
+    """
+    Shared fitting routine used by all single-lens fitters.
+
+    This optimizes nonlinear parameters using Levenberg–Marquardt, while solving
+    linear flux parameters (fs, fb) analytically at each evaluation via
+    weighted linear regression.
+
+    Notes
+    -----
+    `build_A` must be a pure function of (params, time). If it needs extra
+    objects (e.g. a parallax projector), capture them via closure (do not pass
+    them through JAX as arguments).
+    """
     n = int(time.shape[0])
     if n < min_points:
         raise ValueError(f"Need at least {min_points} data points, got {n}.")
@@ -91,7 +96,6 @@ def _fit_single_lens(
     sol = solver.run(x0, data=data)
     x = sol.params
 
-    # A, linear photometry, residuals
     A = build_A(x, time)
     fs, fb = solve_fs_fb(A, flux, ferr)
     model_flux = fs * A + fb
@@ -101,12 +105,8 @@ def _fit_single_lens(
     chi2 = chi2_from_res(resn)
     chi2_dof = chi2 / (n - dof)
 
-    if x_to_params is None:
-        params_phys = x
-        raw = x if store_raw_params else None
-    else:
-        params_phys = x_to_params(x)
-        raw = x if store_raw_params else None
+    params_phys = x if x_to_params is None else x_to_params(x)
+    raw = x if store_raw_params else None
 
     return SingleLensFitResult(
         time=np.asarray(time),
@@ -127,21 +127,21 @@ def _fit_single_lens(
 @dataclass
 class PSPLFitter:
     """
-    PSPL (Point-Source Point-Lens) light-curve fitter.
+    PSPL fitter (Point-Source Point-Lens).
 
-    Fits nonlinear PSPL parameters (t0, tE, u0) using
-    Levenberg–Marquardt, while solving linear flux parameters
-    (fs, fb) analytically by weighted linear regression.
+    Nonlinear parameters: (t0, tE, u0)
     """
+
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
-        self._last_fit: SingleLensFitResult | None = None
+        self._last_fit: Optional[SingleLensFitResult] = None
 
-    def fit(self, time, flux, ferr, p0) -> SingleLensFitResult:
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, p0: jnp.ndarray) -> SingleLensFitResult:
+        """Fit PSPL to a light curve."""
         def build_A(p, t):
             return A_pspl_func(p, t)
 
@@ -159,32 +159,37 @@ class PSPLFitter:
         return fit
 
     def plot_lc(self, **kwargs):
-        """
-        Plot light curve with model using the last fit result.
-        """
+        """Plot the light curve and best-fit model from the last fit."""
         if self._last_fit is None:
-            raise RuntimeError("No PSPL fit has been run yet.")
+            raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_lc(self._last_fit, **kwargs)
 
     def plot_residual(self, **kwargs):
-        """
-        Plot residuals using the last fit result.
-        """
+        """Plot residuals from the last fit."""
         if self._last_fit is None:
-            raise RuntimeError("No PSPL fit has been run yet.")
+            raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_residual(self._last_fit, **kwargs)
+
 
 @dataclass
 class FSPLFitter:
+    """
+    FSPL fitter (Finite-Source Point-Lens).
+
+    Optimizer parameters: (t0, tE, u0, logrho)
+    Reported parameters:  (t0, tE, u0, rho)
+    """
+
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
-        self._last_fit: SingleLensFitResult | None = None
+        self._last_fit: Optional[SingleLensFitResult] = None
 
-    def fit(self, time, flux, ferr, q0) -> SingleLensFitResult:
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        """Fit FSPL to a light curve (uses logrho parameterization)."""
         def build_A(q, t):
             return A_fspl_logrho_func(q, t)
 
@@ -209,23 +214,30 @@ class FSPLFitter:
         return fit
 
     def plot_lc(self, **kwargs):
-        """
-        Plot light curve with model using the last fit result.
-        """
+        """Plot the light curve and best-fit model from the last fit."""
         if self._last_fit is None:
-            raise RuntimeError("No PSPL fit has been run yet.")
+            raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_lc(self._last_fit, **kwargs)
 
     def plot_residual(self, **kwargs):
-        """
-        Plot residuals using the last fit result.
-        """
+        """Plot residuals from the last fit."""
         if self._last_fit is None:
-            raise RuntimeError("No PSPL fit has been run yet.")
+            raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_residual(self._last_fit, **kwargs)
+
 
 @dataclass
 class PSPLParallaxFitter:
+    """
+    PSPL + annual parallax fitter.
+
+    Parameters: (t0, tE, u0, piEN, piEE)
+
+    Notes
+    -----
+    The parallax projector is constructed once in `__post_init__`.
+    """
+
     RA: float
     Dec: float
     tref: float
@@ -236,10 +248,12 @@ class PSPLParallaxFitter:
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
         self._P = make_parallax_projector(self.RA, self.Dec, self.tref)
-        self._last_fit: SingleLensFitResult | None = None
+        self._last_fit: Optional[SingleLensFitResult] = None
 
-    def fit(self, time, flux, ferr, p0) -> SingleLensFitResult:
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, p0: jnp.ndarray) -> SingleLensFitResult:
+        """Fit PSPL+parallax to a light curve."""
         P = self._P
+
         def build_A(p, t):
             return A_pspl_parallax_func(p, t, P)
 
@@ -257,23 +271,27 @@ class PSPLParallaxFitter:
         return fit
 
     def plot_lc(self, **kwargs):
-        """
-        Plot light curve with model using the last fit result.
-        """
+        """Plot the light curve and best-fit model from the last fit."""
         if self._last_fit is None:
-            raise RuntimeError("No PSPL fit has been run yet.")
+            raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_lc(self._last_fit, **kwargs)
 
     def plot_residual(self, **kwargs):
-        """
-        Plot residuals using the last fit result.
-        """
+        """Plot residuals from the last fit."""
         if self._last_fit is None:
-            raise RuntimeError("No PSPL fit has been run yet.")
+            raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_residual(self._last_fit, **kwargs)
+
 
 @dataclass
 class FSPLParallaxFitter:
+    """
+    FSPL + annual parallax fitter.
+
+    Optimizer parameters: (t0, tE, u0, logrho, piEN, piEE)
+    Reported parameters:  (t0, tE, u0, rho,  piEN, piEE)
+    """
+
     RA: float
     Dec: float
     tref: float
@@ -284,10 +302,12 @@ class FSPLParallaxFitter:
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
         self._P = make_parallax_projector(self.RA, self.Dec, self.tref)
-        self._last_fit: SingleLensFitResult | None = None
+        self._last_fit: Optional[SingleLensFitResult] = None
 
-    def fit(self, time, flux, ferr, q0) -> SingleLensFitResult:
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        """Fit FSPL+parallax to a light curve (uses logrho parameterization)."""
         P = self._P
+
         def build_A(q, t):
             return A_fspl_parallax_logrho_func(q, t, P)
 
@@ -312,17 +332,13 @@ class FSPLParallaxFitter:
         return fit
 
     def plot_lc(self, **kwargs):
-        """
-        Plot light curve with model using the last fit result.
-        """
+        """Plot the light curve and best-fit model from the last fit."""
         if self._last_fit is None:
-            raise RuntimeError("No PSPL fit has been run yet.")
+            raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_lc(self._last_fit, **kwargs)
 
     def plot_residual(self, **kwargs):
-        """
-        Plot residuals using the last fit result.
-        """
+        """Plot residuals from the last fit."""
         if self._last_fit is None:
-            raise RuntimeError("No PSPL fit has been run yet.")
+            raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_residual(self._last_fit, **kwargs)
