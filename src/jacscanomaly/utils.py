@@ -2,6 +2,9 @@ import jax
 import jax.numpy as jnp
 from jax import jit
 
+from .trajectory import u_rectilinear
+from .magnification import A_pspl_from_u
+
 @jit
 def linear_fit(x, y, w):
     x_mean = jnp.sum(w * x) / jnp.sum(w)
@@ -18,10 +21,9 @@ def linear_fit(x, y, w):
     return a, b
 
 @jit
-def calc_A_pspl(t0,tE,u0,t):
-    u = jnp.sqrt(u0**2 + ((t-t0)/tE)**2)
-    A = (u**2 + 2)/(u*jnp.sqrt(u**2+4))
-    return A
+def calc_A_pspl(t0, tE, u0, t):
+    u = u_rectilinear(t0, tE, u0, t)
+    return A_pspl_from_u(u)
 
 @jit
 def calc_chi2(params, data):
