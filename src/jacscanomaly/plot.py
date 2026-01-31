@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 
-from .utils import calc_A_pspl
-from .utils import predict_flat_model, predict_anom_model
+from .singlelens_model import A_pspl_func
+from .anomaly_models import predict_flat_model, predict_anom_model
 
 
 @dataclass
@@ -301,8 +301,8 @@ class AnomalyPlotter:
         res = np.asarray(result.residual)
         clusters = np.asarray(result.clusters_all)
 
-        # PSPL best params
-        t0_b, tE_b, u0_b = map(float, np.asarray(result.fit.params))
+        # best params
+        best_params = list(map(float, np.asarray(result.fit.params)))
         fs_b = float(np.asarray(result.fit.fs))
         fb_b = float(np.asarray(result.fit.fb))
 
@@ -312,7 +312,7 @@ class AnomalyPlotter:
 
         # model curve in that x-range
         t_plot = np.linspace(xl[0], xl[1], 1000)
-        A_plot = np.asarray(calc_A_pspl(t0_b, tE_b, u0_b, t_plot))
+        A_plot = np.asarray(A_pspl_func(best_params, t_plot))
         f_plot = A_plot * fs_b + fb_b
 
         fig, axes = plt.subplots(
@@ -322,7 +322,7 @@ class AnomalyPlotter:
         # 1) data + model
         ax = axes[0]
         ax.errorbar(t, f, yerr=e, fmt="o", markersize=2, alpha=0.7, label="data", zorder=0)
-        ax.plot(t_plot, f_plot, lw=2, label="PSPL best-fit", zorder=1)
+        ax.plot(t_plot, f_plot, lw=2, label="best model", zorder=1)
         ax.set_xlim(xl)
         ax.set_ylabel("flux")
         ax.minorticks_on()
@@ -356,9 +356,9 @@ class AnomalyPlotter:
         return fig, axes
 
 @dataclass
-class PSPLPlotter:
+class SingleLensPlotter:
     """
-    Plot utilities for PSPL fitting results only.
+    Plot utilities for single lens fitting results only.
 
     This plotter mirrors the interface philosophy of AnomalyPlotter,
     but operates directly on PSPLFitResult.
@@ -384,18 +384,18 @@ class PSPLPlotter:
         half_width: float | None = None,
     ) -> tuple[float, float]:
         """
-        Compute xlim for PSPL plots.
+        Compute xlim for single lens plots.
         """
         if xlim is not None:
             return xlim
 
-        t0, tE, u0 = map(float, np.asarray(fit.params))
+        t0, tE, u0 = map(float, np.asarray(fit.params)[:3])
 
         if width_mode == "custom":
             if half_width is None:
                 raise ValueError("width_mode='custom' requires half_width.")
             hw = float(half_width)
-        else:  # "pspl"
+        else:
             hw = float(a * abs(tE * u0))
 
         return (t0 - hw, t0 + hw)
@@ -415,7 +415,7 @@ class PSPLPlotter:
         half_width: float | None = None,
     ):
         """
-        Plot light curve with PSPL best-fit model.
+        Plot light curve with single lens best-fit model.
 
         API-consistent with AnomalyPlotter.plot_lc_with_model.
         """
@@ -430,7 +430,7 @@ class PSPLPlotter:
             fig = ax.figure
 
         ax.errorbar(t, f, yerr=e, fmt=".", label="data", zorder=0)
-        ax.plot(t, m, lw=2, label="PSPL model", zorder=1)
+        ax.plot(t, m, lw=2, label="model", zorder=1)
 
         ax.set_xlabel("time")
         ax.set_ylabel("flux")
@@ -463,7 +463,7 @@ class PSPLPlotter:
         use_errorbar: bool = True,
     ):
         """
-        Plot PSPL residual (flux - model_flux).
+        Plot single lens residual (flux - model_flux).
 
         API-consistent with AnomalyPlotter.plot_residual.
         """

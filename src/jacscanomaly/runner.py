@@ -15,7 +15,7 @@ from .config import FinderConfig
 from .models import SeasonSummary
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
-from .utils import get_chi2_anom, get_chi2_flat
+from .anomaly_models import get_chi2_anom, get_chi2_flat
 
 logger = logging.getLogger(__name__)
 

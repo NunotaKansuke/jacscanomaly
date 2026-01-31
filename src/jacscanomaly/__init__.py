@@ -7,7 +7,13 @@ jax_config.update("jax_enable_x64", True)
 from .config import FinderConfig
 from .finder import Finder
 from .plot import AnomalyPlotter
-from .singlelens import PSPLFitter, FSPLFitter, PSPLParallaxFitter, FSPLParallaxFitter, PSPLFitResult
+from .singlelens_fit import (
+    SingleLensFitResult,
+    PSPLFitter,
+    FSPLFitter,
+    PSPLParallaxFitter,
+    FSPLParallaxFitter,
+)
 
 __all__ = [
     "FinderConfig",
@@ -17,7 +23,7 @@ __all__ = [
     "FSPLFitter",
     "PSPLParallaxFitter",
     "FSPLParallaxFitter",
-    "PSPLFitResult",
+    "SingleLensFitResult",
 ]
 
 __version__ = "0.1.1"

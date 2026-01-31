@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 
 from .config import FinderConfig
-from .singlelens import PSPLFitter
+from .singlelens_fit import PSPLFitter
 from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor

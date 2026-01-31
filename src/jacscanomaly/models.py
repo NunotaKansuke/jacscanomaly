@@ -5,9 +5,6 @@ from typing import List, Optional
 
 import numpy as np
 
-from .singlelens import PSPLFitResult
-
-
 @dataclass(frozen=True)
 class BestCandidate:
     """
