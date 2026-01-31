@@ -177,6 +177,20 @@ scans events for localized deviations relative to a baseline model and
 quantifies the significance of detected signals — an idea that is central
 to the grid-scan and Δχ² evaluation in `jacscanomaly`.
 
+### Finite-source magnification (FSPL)
+
+Finite-source magnifications are computed using an external JAX-based
+implementation.
+
+The original FFT-based extended-source algorithm is from  
+https://github.com/git-sunao/fft-extended-source
+
+This algorithm is provided in JAX form by  
+https://github.com/ShotaMiyazaki94/microjax
+
+Specifically, `scanomaly` uses the FFT disk-integration implementation
+available via `microjax.fastlens.mag_fft_jax`.
+
 ## Citation
 
 If you use **jacscanomaly** in academic work, including journal articles,
