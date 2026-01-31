@@ -11,7 +11,7 @@ from .photometry import solve_fs_fb
 from .plot import PSPLPlotter
 from jaxopt import LevenbergMarquardt
 from .objective import residual_norm_from_A, chi2_from_res
-from .singlelens_model import A_pspl_func, A_fspl_logrho_func, A_pspl_parallax_func
+from .singlelens_model import A_pspl_func, A_fspl_logrho_func, A_pspl_parallax_func, A_fspl_parallax_logrho_func
 from .trajectory import make_parallax_projector
 
 @dataclass(frozen=True)
@@ -301,6 +301,89 @@ class PSPLParallaxFitter:
             ferr=np.asarray(ferr),
             params=params,
             param_names=("t0", "tE", "u0", "piEN", "piEE"),
+            chi2=chi2,
+            chi2_dof=chi2_dof,
+            fs=fs,
+            fb=fb,
+            model_flux=model_flux,
+            residual=residual,
+        )
+        self._last_fit = fit
+        return fit
+
+@dataclass
+class FSPLParallaxFitter:
+    RA: float
+    Dec: float
+    tref: float
+
+    maxiter: int = 1000
+    damping_parameter: float = 1e-6
+    tol: float = 1e-3
+
+    def __post_init__(self):
+        self._P = make_parallax_projector(self.RA, self.Dec, self.tref)
+        self._last_fit = None
+
+    def fit(
+        self,
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        ferr: jnp.ndarray,
+        q0: jnp.ndarray,
+    ) -> PSPLFitResult:
+        """
+        Fit FSPL + annual parallax.
+
+        LM params q = (t0, tE, u0, logrho, piEN, piEE)
+        Stored params = (t0, tE, u0, rho, piEN, piEE)
+        """
+        n = int(time.shape[0])
+        if n < 7:
+            raise ValueError(f"Need at least 7 data points, got {n}.")
+
+        eps = 1e-12
+        ferr = jnp.maximum(ferr, eps)
+        data = (time, flux, ferr)
+
+        P = self._P  # fixed
+
+        def residual_fun(q, data):
+            t, f, fe = data
+            A = A_fspl_parallax_logrho_func(q, t, P)
+            return residual_norm_from_A(A, f, fe)
+
+        solver = LevenbergMarquardt(
+            residual_fun=residual_fun,
+            maxiter=self.maxiter,
+            damping_parameter=self.damping_parameter,
+            tol=self.tol,
+        )
+        sol = solver.run(q0, data=data)
+        q = sol.params  # (t0, tE, u0, logrho, piEN, piEE)
+
+        # convert to physical params
+        t0, tE, u0, logrho, piEN, piEE = q
+        rho = jnp.exp(logrho)
+        params_phys = jnp.array([t0, tE, u0, rho, piEN, piEE])
+
+        # evaluate best-fit model
+        A = A_fspl_parallax_logrho_func(q, time, P)
+        fs, fb = solve_fs_fb(A, flux, ferr)
+        model_flux = fs * A + fb
+        residual = flux - model_flux
+
+        resn = residual_norm_from_A(A, flux, ferr)
+        chi2 = chi2_from_res(resn)
+        dof = n - 6  # nonlinear: t0,tE,u0,logrho,piEN,piEE
+        chi2_dof = chi2 / dof
+
+        fit = PSPLFitResult(
+            time=np.asarray(time),
+            flux=np.asarray(flux),
+            ferr=np.asarray(ferr),
+            params=params_phys,
+            param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
             chi2=chi2,
             chi2_dof=chi2_dof,
             fs=fs,
