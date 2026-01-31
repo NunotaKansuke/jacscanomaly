@@ -10,7 +10,7 @@ from .utils import calc_A_pspl, calc_res_norm, calc_chi2
 from .photometry import solve_fs_fb
 from .plot import PSPLPlotter
 from jaxopt import LevenbergMarquardt
-from .objective import residual_norm, chi2
+from .objective import residual_norm_from_A, chi2_from_res
 from .singlelens_model import A_pspl_func
 
 @dataclass(frozen=True)
@@ -103,13 +103,19 @@ class PSPLFitter:
         ferr = jnp.maximum(ferr, eps)
 
         data = (time, flux, ferr)
+        
+        def residual_fun(params, data):
+            t, f, fe = data
+            A = A_pspl_func(params, t)
+            return residual_norm_from_A(A, f, fe)
+        
         solver = LevenbergMarquardt(
-            residual_fun=residual_norm,
+            residual_fun=residual_fun,
             maxiter=self.maxiter,
             damping_parameter=self.damping_parameter,
             tol=self.tol,
         )
-        sol = solver.run(p0, data=data, A_func=A_pspl_func)
+        sol = solver.run(p0, data=data)
         params = sol.params
 
         # best-fit model
@@ -119,7 +125,10 @@ class PSPLFitter:
         model_flux = fs * A + fb
         residual = flux - model_flux
 
-        chi2 = chi2(params, data, A_pspl_func)
+        t, f, fe = data
+        A = A_pspl_func(params, t)
+        res = residual_norm_from_A(A, f, fe)
+        chi2 = chi2_from_res(res)
         dof = n - 3
         chi2_dof = chi2 / dof
 
