@@ -161,7 +161,11 @@ class EarthOrbitalParallaxProjector:
         dtype = eph.t.dtype
         self.t0 = eph.t[0]
         self.dt = eph.t[1] - eph.t[0]
-        self.tref = jnp.asarray(tref, dtype=dtype)
+
+        tref_user = jnp.asarray(tref, dtype=dtype)
+        origin = jnp.asarray(2450000.0, dtype=dtype)
+        self.time_add = jnp.where(tref_user < origin, origin, jnp.asarray(0.0, dtype=dtype))
+        self.tref = tref_user + self.time_add
 
         self.use_HJD = bool(use_HJD)
         self.light_time_iters = int(light_time_iters)
@@ -172,7 +176,6 @@ class EarthOrbitalParallaxProjector:
 
         self.rv = jnp.concatenate([eph.r, eph.v], axis=-1)
 
-        # reference evaluation
         if self.use_HJD:
             tref_eval = light_time_corrected_time(
                 self.tref[None], self.t0, self.dt, self.rv, self.n_hat,
@@ -189,7 +192,7 @@ class EarthOrbitalParallaxProjector:
 
     def tree_flatten(self):
         children = (
-            self.t0, self.dt, self.tref, self.au_c_day,
+            self.t0, self.dt, self.tref, self.au_c_day, self.time_add,
             self.sky_north, self.sky_east, self.n_hat,
             self.rv, self.E_ref, self.V_ref
         )
@@ -200,19 +203,18 @@ class EarthOrbitalParallaxProjector:
     def tree_unflatten(cls, aux, children):
         obj = object.__new__(cls)
         (
-            obj.t0, obj.dt, obj.tref, obj.au_c_day,
+            obj.t0, obj.dt, obj.tref, obj.au_c_day, obj.time_add,
             obj.sky_north, obj.sky_east, obj.n_hat,
             obj.rv, obj.E_ref, obj.V_ref
         ) = children
         (obj.use_HJD, obj.light_time_iters) = aux
         return obj
 
-
 # ----------------------------
 # 7) dtau, dbeta computation
 # ----------------------------
 def earth_orbital_parallax_offsets(t, piEN, piEE, P: EarthOrbitalParallaxProjector):
-    t = jnp.asarray(t, dtype=P.tref.dtype)
+    t = jnp.asarray(t, dtype=P.tref.dtype) + P.time_add
 
     if P.use_HJD:
         t_eval = light_time_corrected_time(
@@ -228,7 +230,7 @@ def earth_orbital_parallax_offsets(t, piEN, piEE, P: EarthOrbitalParallaxProject
     E_t = -jnp.stack([r_t @ P.sky_east, r_t @ P.sky_north], axis=-1)
     ds = -((P.E_ref[None] - E_t) + P.V_ref[None] * (t - P.tref)[:, None])
 
-    d_tau = piEN * ds[:, 1] + piEE * ds[:, 0]
+    d_tau  = piEN * ds[:, 1] + piEE * ds[:, 0]
     d_beta = -piEE * ds[:, 1] + piEN * ds[:, 0]
     return d_tau, d_beta
 
