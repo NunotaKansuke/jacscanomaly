@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 
-from .anomaly_models import predict_flat_model, predict_anom_model
+from .anomaly_models import get_flat_plot_model, get_anom_plot_model
 
 
 @dataclass
@@ -119,7 +119,8 @@ class AnomalyPlotter:
         Returns (fig, ax).
         """
         t, f, e = result.time, result.flux, result.ferr
-        m = result.model_flux
+        t_plot = result.fit.plot_time
+        m_plot = result.fit.plot_flux
 
         if ax is None:
             fig, ax = plt.subplots()
@@ -127,7 +128,7 @@ class AnomalyPlotter:
             fig = ax.figure
 
         ax.errorbar(t, f, yerr=e, fmt=".", label="data", zorder=0)
-        ax.plot(t, m, label="PSPL model", zorder=1)
+        ax.plot(t_plot, m_plot, label="PSPL model", zorder=1)
         ax.set_xlabel("time")
         ax.set_ylabel("flux")
         ax.legend()
@@ -208,32 +209,34 @@ class AnomalyPlotter:
         if getattr(result, "best", None) is None:
             return None, None
 
+        t0 = float(result.best.t0)
+        teff = float(result.best.teff)
+        w = teff_coeff * teff
+
         # CPU arrays
         t_np = np.asarray(result.time)
         r_np = np.asarray(result.residual)
         e_np = np.asarray(result.ferr)
-
-        t0 = float(result.best.t0)
-        teff = float(result.best.teff)
+        t_plot_np = np.arange(t0 - w, t0 + w + 0.1, 0.1)
 
         # x window for chi2 evaluation
-        w = teff_coeff * teff
         mask = (t_np >= (t0 - w)) & (t_np <= (t0 + w))
 
         # JAX arrays for prediction
         t = jnp.asarray(t_np)
         r = jnp.asarray(r_np)
         e = jnp.asarray(e_np)
+        t_plot = jnp.asarray(t_plot_np)
 
         y_flat = None
         y_anom = None
 
         if show_flat:
             # predict_flat_model should accept (data_flux, data_ferr) or (r,e) depending on your definition
-            y_flat = np.asarray(jax.device_get(predict_flat_model(r, e)))
+            y_flat = np.asarray(jax.device_get(get_flat_plot_model(t_plot, r, e)))
 
         if show_anom:
-            y_anom_j, _choose = predict_anom_model(t0, teff, t, r, e)
+            y_anom_j, _choose = get_anom_plot_model(t_plot, t0, teff, t, r, e)
             y_anom = np.asarray(jax.device_get(y_anom_j))
 
         if ax is None:
@@ -248,10 +251,10 @@ class AnomalyPlotter:
 
         # Draw model lines ONLY within the chi2 window
         if y_flat is not None:
-            ax.plot(t_np[mask], y_flat[mask], label="flat", c="C1")
+            ax.plot(t_plot_np, y_flat, label="flat", c="C1")
 
         if y_anom is not None:
-            ax.plot(t_np[mask], y_anom[mask], label="anomaly", c="r")
+            ax.plot(t_plot_np, y_anom, label="anomaly", c="r")
 
         # range
         if xlim is None:
@@ -299,7 +302,8 @@ class AnomalyPlotter:
         e = np.asarray(result.ferr)
         res = np.asarray(result.residual)
         clusters = np.asarray(result.clusters_all)
-        m = result.model_flux
+        t_plot = result.fit.plot_time
+        m_plot = result.fit.plot_flux
 
         xl = self._compute_xlim(
             result, center=center, width_mode=width_mode, a=a, xlim=xlim, half_width=half_width
@@ -312,7 +316,7 @@ class AnomalyPlotter:
         # 1) data + model
         ax = axes[0]
         ax.errorbar(t, f, yerr=e, fmt="o", markersize=2, alpha=0.7, label="data", zorder=0)
-        ax.plot(t, m, lw=2, label="best model", zorder=1)
+        ax.plot(t_plot, m_plot, lw=2, label="best model", zorder=1)
         ax.set_xlim(xl)
         ax.set_ylabel("flux")
         ax.minorticks_on()
@@ -412,7 +416,8 @@ class SingleLensPlotter:
         t = np.asarray(fit.time)
         f = np.asarray(fit.flux)
         e = np.asarray(fit.ferr)
-        m = np.asarray(fit.model_flux)
+        t_plot = np.asarray(fit.plot_time)
+        m_plot = np.asarray(fit.plot_flux)
 
         if ax is None:
             fig, ax = plt.subplots()
@@ -420,7 +425,7 @@ class SingleLensPlotter:
             fig = ax.figure
 
         ax.errorbar(t, f, yerr=e, fmt=".", label="data", zorder=0)
-        ax.plot(t, m, lw=2, label="model", zorder=1)
+        ax.plot(t_plot, m_plot, lw=2, label="model", zorder=1)
 
         ax.set_xlabel("time")
         ax.set_ylabel("flux")

@@ -1,181 +1,77 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
+import numpy as np
 import jax
 import jax.numpy as jnp
 
-"""
-Parallax utilities (JAX).
-
-This module provides shared routines to project an observer ephemeris onto a
-local (east, north) tangent plane at a fixed event sky position, and to
-compute microlensing parallax offsets in (tau, beta).
-
-Implemented:
-- Earth-orbital ("annual") parallax.
-
-Planned:
-- Space-orbital parallax (same formalism with a spacecraft ephemeris).
-
-Not included:
-- Multi-observer baseline parallax (ground–space / space–space).
-"""
-
-# ============================================================
-# Constants / units
-# ============================================================
-AU_KM = 149_597_870.700
-DAY_S = 86400.0
-ARCSEC_TO_RAD = jnp.deg2rad(1.0 / 3600.0)
-
-
-def ang_arcsec_per_hour_to_rad_per_day(x):
-    """Convert angular rate from arcsec/hour to rad/day."""
-    return x * ARCSEC_TO_RAD * 24.0
-
-
-# ============================================================
-# Sky basis utilities (Earth/space common)
-# ============================================================
-def get_north_east(RA_deg, Dec_deg):
+# ----------------------------
+# 1) Horizons vectors loader
+# ----------------------------
+def load_horizons_vectors_file(path: str) -> np.ndarray:
     """
-    Construct local sky basis vectors (north, east) at a given sky position.
+    Read a Horizons 'GEOMETRIC cartesian states' table (CSV-like) and return
+    a numeric array with columns:
+        [t_jdtdb, x, y, z, vx, vy, vz]
+    Units: t in days (JD TDB), position in AU, velocity in AU/day.
 
-    Parameters
-    ----------
-    RA_deg, Dec_deg : float
-        Event right ascension / declination in degrees.
+    Expected Horizons line format (example):
+    2451544.500000000, A.D. 2000-Jan-01 00:00:00.0000, -1.7E-01, 8.8E-01, ... , RR,
 
-    Returns
-    -------
-    sky_north, sky_east : ndarray, shape (3,), (3,)
-        Orthonormal tangent-plane basis at the event direction.
-
-    Notes
-    -----
-    Undefined at the celestial poles (|Dec| = 90 deg).
+    Notes:
+    - Skips everything outside $$SOE ... $$EOE.
+    - Ignores the Calendar Date column.
+    - Ignores LT/RG/RR.
     """
-    lam = jnp.deg2rad(RA_deg)
-    bet = jnp.deg2rad(Dec_deg)
+    rows = []
+    in_block = False
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            s = line.strip()
+            if not in_block:
+                if s.startswith("$$SOE"):
+                    in_block = True
+                continue
+            else:
+                if s.startswith("$$EOE"):
+                    break
+                if not s or s.startswith("*"):
+                    continue
 
-    earth_north = jnp.array([0.0, 0.0, 1.0], dtype=lam.dtype)
-    event = jnp.array(
-        [
-            jnp.cos(lam) * jnp.cos(bet),
-            jnp.sin(lam) * jnp.cos(bet),
-            jnp.sin(bet),
-        ],
-        dtype=lam.dtype,
-    )
+                # Split CSV-ish line. Expect at least 11 columns; last may be empty due to trailing comma.
+                parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+                # After removing empty, typical length is 11:
+                # [JDTDB, 'A.D....', X, Y, Z, VX, VY, VZ, LT, RG, RR]
+                if len(parts) < 8:
+                    continue  # skip malformed lines safely
 
-    sky_east = jnp.cross(earth_north, event)
-    sky_east = sky_east / jnp.linalg.norm(sky_east)
-    sky_north = jnp.cross(event, sky_east)
-    return sky_north, sky_east
+                try:
+                    t = float(parts[0])
+                    # parts[1] is calendar date string; ignore it
+                    x = float(parts[2]); y = float(parts[3]); z = float(parts[4])
+                    vx = float(parts[5]); vy = float(parts[6]); vz = float(parts[7])
+                except ValueError:
+                    continue
 
+                rows.append((t, x, y, z, vx, vy, vz))
 
-# ============================================================
-# Horizons -> Cartesian utilities (Earth/space common)
-# ============================================================
-def r_from_radec_delta(ra_deg, dec_deg, delta_au):
-    """Convert (RA, Dec, Delta) to Cartesian position vector(s) in AU."""
-    ra = jnp.deg2rad(ra_deg)
-    dec = jnp.deg2rad(dec_deg)
-    cd, sd = jnp.cos(dec), jnp.sin(dec)
-    ca, sa = jnp.cos(ra), jnp.sin(ra)
-    u = jnp.stack([cd * ca, cd * sa, sd], axis=-1)
-    return delta_au[..., None] * u
-
-
-def rdot_from_horizons_cols(
-    ra_deg,
-    dec_deg,
-    delta_au,
-    deldot_km_s,
-    dRAcosD_arcsec_per_hour,
-    dDecdt_arcsec_per_hour,
-):
-    """
-    Build Cartesian velocity from Horizons-style columns.
-
-    Notes
-    -----
-    Horizons reports d(RA*cosDec)/dt. We convert to dRA/dt by dividing by cosDec.
-    Near |Dec| ~ 90 deg this becomes ill-defined; this implementation inserts NaNs.
-    """
-    ra = jnp.deg2rad(ra_deg)
-    dec = jnp.deg2rad(dec_deg)
-    cd, sd = jnp.cos(dec), jnp.sin(dec)
-    ca, sa = jnp.cos(ra), jnp.sin(ra)
-
-    u = jnp.stack([cd * ca, cd * sa, sd], axis=-1)
-
-    dDec = ang_arcsec_per_hour_to_rad_per_day(dDecdt_arcsec_per_hour)
-    dRAcosD = ang_arcsec_per_hour_to_rad_per_day(dRAcosD_arcsec_per_hour)
-
-    cd_safe = jnp.where(jnp.abs(cd) < 1e-15, jnp.nan, cd)
-    dRA = dRAcosD / cd_safe
-
-    du = jnp.stack(
-        [
-            -cd * sa * dRA - sd * ca * dDec,
-            cd * ca * dRA - sd * sa * dDec,
-            cd * dDec,
-        ],
-        axis=-1,
-    )
-
-    deldot_au_per_day = deldot_km_s * (DAY_S / AU_KM)
-    return deldot_au_per_day[..., None] * u + delta_au[..., None] * du
+    if not rows:
+        raise ValueError("No ephemeris rows parsed. Check file format and $$SOE/$$EOE markers.")
+    return np.asarray(rows, dtype=np.float64)
 
 
-# ============================================================
-# Interpolation utilities (Earth/space common)
-# ============================================================
-def interp_uniform_linear(xq, x0, dt, y):
-    """
-    Linear interpolation on a uniform grid.
-
-    Notes
-    -----
-    Out-of-range queries are clamped to edge segments.
-    """
-    xq = jnp.atleast_1d(xq)
-    u = (xq - x0) / dt
-    i0 = jnp.floor(u).astype(jnp.int32)
-    i0 = jnp.clip(i0, 0, y.shape[0] - 2)
-    w = u - i0.astype(u.dtype)
-
-    y0 = y[i0]
-    y1 = y[i0 + 1]
-    return y0 + (y1 - y0) * (w[:, None] if y.ndim == 2 else w)
-
-
-# ============================================================
-# Ephemeris container (Earth/space common)
-# ============================================================
+# ----------------------------
+# 2) Ephemeris constructor
+# ----------------------------
 @jax.tree_util.register_pytree_node_class
-@dataclass
 class HeliocentricEphemeris:
     """
-    Uniform ephemeris container.
-
-    Attributes
-    ----------
-    t : (N,) time array (uniform spacing assumed)
-    r : (N,3) position vectors [AU]
-    v : (N,3) velocity vectors [AU/day]
-
-    Notes
-    -----
-    The interpretation of (r, v) depends on how you queried Horizons (e.g.,
-    Sun->Earth, Sun->spacecraft, etc.). Use a consistent inertial frame/units.
+    Uniform ephemeris container (t must be uniform grid for interp_uniform_linear).
+    Here it can be barycentric too; the name is legacy.
     """
-
-    t: jnp.ndarray
-    r: jnp.ndarray
-    v: jnp.ndarray
+    def __init__(self, t: jnp.ndarray, r: jnp.ndarray, v: jnp.ndarray):
+        self.t = t
+        self.r = r
+        self.v = v
 
     def tree_flatten(self):
         return (self.t, self.r, self.v), None
@@ -185,110 +81,158 @@ class HeliocentricEphemeris:
         return cls(*children)
 
     @staticmethod
-    def from_horizons_table(table_np):
+    def from_horizons_vectors_table(table_np: np.ndarray) -> "HeliocentricEphemeris":
         """
-        Build ephemeris from a numeric table with columns:
-        [t, RA_deg, Dec_deg, dRA*cosDec (arcsec/hr), dDec (arcsec/hr), Delta (AU), dDelta (km/s)].
+        table_np columns: [t, x, y, z, vx, vy, vz]
         """
         tab = jnp.asarray(table_np)
-        t, ra, dec, dRAcosD, dDecdt, delta, deldot = [tab[:, i] for i in range(7)]
+        t = tab[:, 0]
+        r = tab[:, 1:4]
+        v = tab[:, 4:7]
         order = jnp.argsort(t)
-
-        t = t[order]
-        ra = ra[order]
-        dec = dec[order]
-        dRAcosD = dRAcosD[order]
-        dDecdt = dDecdt[order]
-        delta = delta[order]
-        deldot = deldot[order]
-
-        r = r_from_radec_delta(ra, dec, delta)
-        v = rdot_from_horizons_cols(ra, dec, delta, deldot, dRAcosD, dDecdt)
-        return HeliocentricEphemeris(t, r, v)
+        return HeliocentricEphemeris(t[order], r[order], v[order])
 
 
-# ============================================================
-# Earth-orbital parallax projector
-# ============================================================
+# ----------------------------
+# 3) Interp (your existing one)
+# ----------------------------
+def interp_uniform_linear(xq, x0, dt, y):
+    xq = jnp.atleast_1d(xq)
+    u = (xq - x0) / dt
+    i0 = jnp.floor(u).astype(jnp.int32)
+    i0 = jnp.clip(i0, 0, y.shape[0] - 2)
+    w = u - i0.astype(u.dtype)
+    y0 = y[i0]
+    y1 = y[i0 + 1]
+    return y0 + (y1 - y0) * (w[:, None] if y.ndim == 2 else w)
+
+
+# ----------------------------
+# 4) Sky basis + LOS unit vector
+# ----------------------------
+ARCSEC_TO_RAD = jnp.deg2rad(1.0 / 3600.0)
+AU_C_DAY = 0.005775518331436995  # AU/c in days
+
+def get_north_east(RA_deg, Dec_deg):
+    lam = jnp.deg2rad(RA_deg)
+    bet = jnp.deg2rad(Dec_deg)
+
+    earth_north = jnp.array([0.0, 0.0, 1.0], dtype=lam.dtype)
+    event = jnp.array(
+        [jnp.cos(lam) * jnp.cos(bet), jnp.sin(lam) * jnp.cos(bet), jnp.sin(bet)],
+        dtype=lam.dtype,
+    )
+    sky_east = jnp.cross(earth_north, event)
+    sky_east = sky_east / jnp.linalg.norm(sky_east)
+    sky_north = jnp.cross(event, sky_east)
+    return sky_north, sky_east
+
+def event_unit_vector(RA_deg, Dec_deg, dtype=jnp.float64):
+    ra = jnp.deg2rad(jnp.asarray(RA_deg, dtype=dtype))
+    dec = jnp.deg2rad(jnp.asarray(Dec_deg, dtype=dtype))
+    cd, sd = jnp.cos(dec), jnp.sin(dec)
+    ca, sa = jnp.cos(ra), jnp.sin(ra)
+    return jnp.array([cd * ca, cd * sa, sd], dtype=dtype)
+
+
+# ----------------------------
+# 5) Light-time (optional, if you want HJD-style)
+# ----------------------------
+def light_time_corrected_time(t, t0, dt, rv, n_hat, au_c_day=AU_C_DAY, n_iter=5):
+    t = jnp.asarray(t)
+    t_emit = t
+
+    def body(_, t_emit_curr):
+        rv_curr = interp_uniform_linear(t_emit_curr, t0, dt, rv)
+        r_curr = rv_curr[..., :3]
+        lt = jnp.sum(r_curr * n_hat, axis=-1) * au_c_day
+        return t - lt
+
+    return jax.lax.fori_loop(0, n_iter, body, t_emit)
+
+
+# ----------------------------
+# 6) Projector: static use_HJD (jit/grad friendly)
+# ----------------------------
 @jax.tree_util.register_pytree_node_class
 class EarthOrbitalParallaxProjector:
-    """
-    Precompute projections for Earth-orbital ("annual") parallax offsets.
-
-    Supply an Earth ephemeris (typically Sun->Earth in AU and AU/day) and an
-    event sky position (RA, Dec). The same math can be reused for spacecraft
-    by defining a separate wrapper (see bottom of file).
-    """
-
-    def __init__(self, eph: HeliocentricEphemeris, RA_deg, Dec_deg, tref):
+    def __init__(self, eph: HeliocentricEphemeris, RA_deg, Dec_deg, tref, *,
+                 use_HJD: bool = True, light_time_iters: int = 5, au_c_day: float = AU_C_DAY):
         dtype = eph.t.dtype
         self.t0 = eph.t[0]
         self.dt = eph.t[1] - eph.t[0]
         self.tref = jnp.asarray(tref, dtype=dtype)
 
+        self.use_HJD = bool(use_HJD)
+        self.light_time_iters = int(light_time_iters)
+        self.au_c_day = jnp.asarray(au_c_day, dtype=dtype)
+
         self.sky_north, self.sky_east = get_north_east(RA_deg, Dec_deg)
+        self.n_hat = event_unit_vector(RA_deg, Dec_deg, dtype=dtype)
+
         self.rv = jnp.concatenate([eph.r, eph.v], axis=-1)
 
-        rv_ref = interp_uniform_linear(self.tref[None], self.t0, self.dt, self.rv)[0]
+        # reference evaluation
+        if self.use_HJD:
+            tref_eval = light_time_corrected_time(
+                self.tref[None], self.t0, self.dt, self.rv, self.n_hat,
+                au_c_day=self.au_c_day, n_iter=self.light_time_iters
+            )[0]
+        else:
+            tref_eval = self.tref
+
+        rv_ref = interp_uniform_linear(tref_eval[None], self.t0, self.dt, self.rv)[0]
         r_ref, v_ref = rv_ref[:3], rv_ref[3:]
 
         self.E_ref = -jnp.stack([r_ref @ self.sky_east, r_ref @ self.sky_north])
         self.V_ref = -jnp.stack([v_ref @ self.sky_east, v_ref @ self.sky_north])
 
     def tree_flatten(self):
-        return (
-            self.t0,
-            self.dt,
-            self.tref,
-            self.sky_north,
-            self.sky_east,
-            self.rv,
-            self.E_ref,
-            self.V_ref,
-        ), None
+        children = (
+            self.t0, self.dt, self.tref, self.au_c_day,
+            self.sky_north, self.sky_east, self.n_hat,
+            self.rv, self.E_ref, self.V_ref
+        )
+        aux = (self.use_HJD, self.light_time_iters)
+        return children, aux
 
     @classmethod
     def tree_unflatten(cls, aux, children):
         obj = object.__new__(cls)
         (
-            obj.t0,
-            obj.dt,
-            obj.tref,
-            obj.sky_north,
-            obj.sky_east,
-            obj.rv,
-            obj.E_ref,
-            obj.V_ref,
+            obj.t0, obj.dt, obj.tref, obj.au_c_day,
+            obj.sky_north, obj.sky_east, obj.n_hat,
+            obj.rv, obj.E_ref, obj.V_ref
         ) = children
+        (obj.use_HJD, obj.light_time_iters) = aux
         return obj
 
 
-# ============================================================
-# Earth-orbital parallax API (main)
-# ============================================================
+# ----------------------------
+# 7) dtau, dbeta computation
+# ----------------------------
 def earth_orbital_parallax_offsets(t, piEN, piEE, P: EarthOrbitalParallaxProjector):
-    """
-    Compute Earth-orbital parallax offsets (d_tau, d_beta) at times `t`.
-
-    Uses the standard microlensing transform:
-      d_tau  =  pi_E,N * ds_N + pi_E,E * ds_E
-      d_beta = -pi_E,E * ds_N + pi_E,N * ds_E
-    """
     t = jnp.asarray(t, dtype=P.tref.dtype)
 
-    rv_t = interp_uniform_linear(t, P.t0, P.dt, P.rv)
+    if P.use_HJD:
+        t_eval = light_time_corrected_time(
+            t, P.t0, P.dt, P.rv, P.n_hat,
+            au_c_day=P.au_c_day, n_iter=P.light_time_iters
+        )
+    else:
+        t_eval = t
+
+    rv_t = interp_uniform_linear(t_eval, P.t0, P.dt, P.rv)
     r_t = rv_t[:, :3]
 
     E_t = -jnp.stack([r_t @ P.sky_east, r_t @ P.sky_north], axis=-1)
-    ds = (P.E_ref[None] - E_t) + P.V_ref[None] * (t - P.tref)[:, None]
+    ds = -((P.E_ref[None] - E_t) + P.V_ref[None] * (t - P.tref)[:, None])
 
     d_tau = piEN * ds[:, 1] + piEE * ds[:, 0]
     d_beta = -piEE * ds[:, 1] + piEN * ds[:, 0]
     return d_tau, d_beta
 
-
 earth_orbital_parallax_offsets_jit = jax.jit(earth_orbital_parallax_offsets)
-
 
 # ============================================================
 # Space-orbital parallax (placeholder / thin wrapper)

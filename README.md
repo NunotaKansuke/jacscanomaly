@@ -177,6 +177,8 @@ scans events for localized deviations relative to a baseline model and
 quantifies the significance of detected signals — an idea that is central
 to the grid-scan and Δχ² evaluation in `jacscanomaly`.
 
+---
+
 ### Finite-source magnification (FSPL)
 
 Finite-source magnifications are computed using an external JAX-based

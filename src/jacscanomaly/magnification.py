@@ -3,8 +3,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import jit
 
-from microjax.fastlens.mag_fft_jax import magnification_disk
-_mag_fspl = magnification_disk()
+from microjax.fastlens import fspl_disk
+_mag_fspl = fspl_disk()
 
 @jit
 def A_pspl_from_u(u: jnp.ndarray) -> jnp.ndarray:

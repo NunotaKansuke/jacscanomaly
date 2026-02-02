@@ -40,6 +40,8 @@ class SingleLensFitResult:
     fb: jnp.ndarray
     model_flux: jnp.ndarray
     residual: jnp.ndarray
+    plot_flux: np.ndarray
+    plot_time: np.ndarray
 
     # Optional: raw optimizer parameters (e.g. logrho), if different from `params`.
     raw_params: Optional[jnp.ndarray] = None
@@ -101,6 +103,10 @@ def _fit_single_lens(
     model_flux = fs * A + fb
     residual = flux - model_flux
 
+    plot_time = np.arange(np.min(time), np.max(time) + 0.5, 0.5)
+    plot_A = build_A(x, plot_time)
+    plot_flux = fs * plot_A + fb
+
     resn = residual_norm_from_A(A, flux, ferr)
     chi2 = chi2_from_res(resn)
     chi2_dof = chi2 / (n - dof)
@@ -120,6 +126,8 @@ def _fit_single_lens(
         fb=fb,
         model_flux=model_flux,
         residual=residual,
+        plot_time = plot_time,
+        plot_flux = plot_flux,
         raw_params=raw,
     )
 
