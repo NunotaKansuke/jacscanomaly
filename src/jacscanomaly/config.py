@@ -154,3 +154,41 @@ class FinderConfig:
     Stop extracting clusters once the number of remaining grid points
     falls below this value.
     """
+    # ==================================================
+    # 5) Grid execution mode
+    # ==================================================
+    
+    grid_chunked: bool = False
+    """
+    Force chunked execution of the grid scan.
+    
+    Instead of evaluating the entire (t0, teff) grid in a single ``vmap``,
+    the grid is split into smaller chunks and processed sequentially.
+    
+    This reduces JAX compilation size and peak memory usage at the cost
+    of a small runtime overhead.
+    """
+    
+    grid_chunk_auto: bool = False
+    """
+    Automatically switch to chunked execution for large grids.
+    
+    If enabled, the runner uses chunked evaluation only when the total
+    number of grid points exceeds ``grid_chunk_threshold``. Smaller grids
+    continue to use the standard fully-vectorized execution.
+    """
+    
+    grid_chunk_size: int = 4096
+    """
+    Number of grid points evaluated in each chunk when chunked execution
+    is enabled.
+    
+    Larger values improve runtime performance but increase compilation
+    size and memory usage.
+    """
+    
+    grid_chunk_threshold: int = 100_000
+    """
+    Minimum number of grid points required to activate automatic chunking
+    when ``grid_chunk_auto`` is enabled.
+    """

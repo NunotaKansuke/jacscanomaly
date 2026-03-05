@@ -40,11 +40,10 @@ class GridRunner:
     -----
     - The actual chi2 computation is delegated to:
         get_chi2_anom_masked(t0, teff, time, flux, w, mask) -> (chi2_total, chi2s_per_point)
-        get_chi2_flat_masked(flux, w, mask)           -> (chi2_total, chi2s_per_point)
-      where chi2s_per_point is expected to be (residual / error)^2 per datum.
+        get_chi2_flat_masked(flux, w, mask)                 -> (chi2_total, chi2s_per_point)
 
-    - Outside the evaluation window, we "ignore" points by inflating uncertainties
-      (ferr -> big), so their contribution to chi2 becomes negligible.
+    - Outside the evaluation window, we ignore points by zeroing their weights
+      via mask (w * mask).
     """
 
     @staticmethod
@@ -105,6 +104,95 @@ class GridRunner:
 
         return t0_flat, teff_flat, dchi2, n_out
 
+    @staticmethod
+    @partial(jit, static_argnames=("sigma", "teff_coeff", "min_pts"))
+    def _run_vmap(
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        w: jnp.ndarray,
+        t0_flat: jnp.ndarray,
+        teff_flat: jnp.ndarray,
+        *,
+        sigma: float,
+        teff_coeff: float,
+        min_pts: int,
+    ):
+        return vmap(
+            lambda t0_ref, teff_ref: GridRunner._grid_point(
+                t0_ref, teff_ref, time, flux, w,
+                sigma=sigma, teff_coeff=teff_coeff, min_pts=min_pts
+            )
+        )(t0_flat, teff_flat)
+
+    @staticmethod
+    @partial(jit, static_argnames=("sigma", "teff_coeff", "min_pts", "chunk_size"))
+    def run_chunked(
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        w: jnp.ndarray,
+        t0_flat: jnp.ndarray,
+        teff_flat: jnp.ndarray,
+        *,
+        sigma: float = 3.0,
+        teff_coeff: float = 3.0,
+        min_pts: int = 4,
+        chunk_size: int = 4096,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        n = t0_flat.shape[0]
+        n_chunks = (n + chunk_size - 1) // chunk_size
+        n_pad = n_chunks * chunk_size
+        pad = n_pad - n
+
+        t0p = jnp.pad(t0_flat, (0, pad))
+        tep = jnp.pad(teff_flat, (0, pad))
+
+        dchi2_buf = jnp.zeros((n_pad,), dtype=jnp.float32)
+        nout_buf = jnp.zeros((n_pad,), dtype=jnp.int32)
+
+        def body(i, carry):
+            dchi2_buf, nout_buf = carry
+            s = i * chunk_size
+
+            t0c = lax.dynamic_slice(t0p, (s,), (chunk_size,))
+            tec = lax.dynamic_slice(tep, (s,), (chunk_size,))
+
+            dchi2_c, nout_c = GridRunner._run_vmap(
+                time, flux, w, t0c, tec,
+                sigma=sigma, teff_coeff=teff_coeff, min_pts=min_pts
+            )
+
+            dchi2_buf = lax.dynamic_update_slice(dchi2_buf, dchi2_c.astype(jnp.float32), (s,))
+            nout_buf = lax.dynamic_update_slice(nout_buf, nout_c.astype(jnp.int32), (s,))
+            return (dchi2_buf, nout_buf)
+
+        dchi2_buf, nout_buf = lax.fori_loop(0, n_chunks, body, (dchi2_buf, nout_buf))
+        return t0_flat, teff_flat, dchi2_buf[:n], nout_buf[:n]
+
+    @staticmethod
+    def run_auto(
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        w: jnp.ndarray,
+        t0_flat: jnp.ndarray,
+        teff_flat: jnp.ndarray,
+        *,
+        sigma: float = 3.0,
+        teff_coeff: float = 3.0,
+        min_pts: int = 4,
+        chunk_size: int = 4096,
+        threshold: int = 200_000,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        if int(t0_flat.shape[0]) >= int(threshold):
+            return GridRunner.run_chunked(
+                time, flux, w, t0_flat, teff_flat,
+                sigma=sigma, teff_coeff=teff_coeff, min_pts=min_pts,
+                chunk_size=chunk_size,
+            )
+        return GridRunner.run(
+            time, flux, w, t0_flat, teff_flat,
+            sigma=sigma, teff_coeff=teff_coeff, min_pts=min_pts,
+        )
+
 
 @dataclass
 class SeasonGridRunner:
@@ -121,6 +209,10 @@ class SeasonGridRunner:
         time_np: np.ndarray,
         verbose: bool = True,
         log: Optional[logging.Logger] = None,
+        chunked: bool = False,
+        chunk_size: int = 4096,
+        chunk_threshold: int = 200_000,
+        chunk_auto: bool = False,
     ) -> Tuple[List[SeasonSummary], np.ndarray]:
 
         log = logger if log is None else log
@@ -206,13 +298,41 @@ class SeasonGridRunner:
 
             # ---- timed block: grid run
             t_grid0 = time.perf_counter()
-            t0_out, teff_out, dchi2, n_out = GridRunner.run(
-                t_season, r_season, w_season,
-                t0_flat, teff_flat,
-                sigma=self.config.sigma,
-                teff_coeff=self.config.teff_coeff,
-                min_pts=self.config.min_pts_in_window,
-            )
+
+            if self.config.grid_chunk_auto:
+                if verbose:
+                    log.info("  -> grid exec: chunked(auto,size=%d)", self.config.grid_chunk_size)
+                t0_out, teff_out, dchi2, n_out = GridRunner.run_auto(
+                    t_season, r_season, w_season,
+                    t0_flat, teff_flat,
+                    sigma=self.config.sigma,
+                    teff_coeff=self.config.teff_coeff,
+                    min_pts=self.config.min_pts_in_window,
+                    chunk_size=self.config.grid_chunk_size,
+                    threshold=self.config.grid_chunk_threshold,
+                )
+            elif self.config.grid_chunked:
+                if verbose:
+                    log.info("  -> grid exec: chunked(forced,size=%d)", self.config.grid_chunk_size)
+                t0_out, teff_out, dchi2, n_out = GridRunner.run_chunked(
+                    t_season, r_season, w_season,
+                    t0_flat, teff_flat,
+                    sigma=self.config.sigma,
+                    teff_coeff=self.config.teff_coeff,
+                    min_pts=self.config.min_pts_in_window,
+                    chunk_size=self.config.grid_chunk_size,
+                )
+            else:
+                if verbose:
+                    log.info("  -> grid exec: vmap")
+                t0_out, teff_out, dchi2, n_out = GridRunner.run(
+                    t_season, r_season, w_season,
+                    t0_flat, teff_flat,
+                    sigma=self.config.sigma,
+                    teff_coeff=self.config.teff_coeff,
+                    min_pts=self.config.min_pts_in_window,
+                )
+
             block_until_ready(dchi2)
             dt_grid = time.perf_counter() - t_grid0
 
