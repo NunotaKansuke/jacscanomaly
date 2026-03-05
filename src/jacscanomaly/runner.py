@@ -15,7 +15,7 @@ from .config import FinderConfig
 from .models import SeasonSummary
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
-from .anomaly_models import get_chi2_anom, get_chi2_flat
+from .anomaly_models import get_chi2_anom_masked, get_chi2_flat_masked
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,8 @@ class GridRunner:
     Notes
     -----
     - The actual chi2 computation is delegated to:
-        get_chi2_anom(t0, teff, time, flux, ferr) -> (chi2_total, chi2s_per_point)
-        get_chi2_flat(time, flux, ferr)           -> (chi2_total, chi2s_per_point)
+        get_chi2_anom_masked(t0, teff, time, flux, w, mask) -> (chi2_total, chi2s_per_point)
+        get_chi2_flat_masked(flux, w, mask)           -> (chi2_total, chi2s_per_point)
       where chi2s_per_point is expected to be (residual / error)^2 per datum.
 
     - Outside the evaluation window, we "ignore" points by inflating uncertainties
@@ -54,7 +54,7 @@ class GridRunner:
         teff_ref: jnp.ndarray,
         time: jnp.ndarray,
         flux: jnp.ndarray,
-        ferr: jnp.ndarray,
+        w: jnp.ndarray,
         *,
         sigma: float = 3.0,
         teff_coeff: float = 3.0,
@@ -64,17 +64,18 @@ class GridRunner:
         n_pts = jnp.sum(mask.astype(jnp.int32))
 
         def valid(_):
-            big = jnp.asarray(1e12, dtype=ferr.dtype)
-            ferr_eff = jnp.where(mask, ferr, big)
-
-            chi2_anom, chi2s_anom = get_chi2_anom(t0_ref, teff_ref, time, flux, ferr_eff)
-            chi2_flat, chi2s_flat = get_chi2_flat(time, flux, ferr_eff)
+            chi2_anom, chi2s_anom = get_chi2_anom_masked(t0_ref, teff_ref, time, flux, w, mask)
+            chi2_flat, chi2s_flat = get_chi2_flat_masked(flux, w, mask)
 
             dchi2 = chi2_flat - chi2_anom
 
-            diff = chi2s_flat - chi2s_anom
-            n_out = jnp.sum((diff > (sigma**2)) & mask).astype(jnp.int32)
+            wm = w * mask.astype(w.dtype)
+            eps = jnp.asarray(1e-30, wm.dtype)
+            norm_flat = chi2s_flat / jnp.maximum(wm, eps)
+            norm_anom = chi2s_anom / jnp.maximum(wm, eps)
+            diff = norm_flat - norm_anom
 
+            n_out = jnp.sum((diff > (sigma**2)) & mask).astype(jnp.int32)
             return dchi2.astype(jnp.float32), n_out
 
         def invalid(_):
@@ -87,7 +88,7 @@ class GridRunner:
     def run(
         time: jnp.ndarray,
         flux: jnp.ndarray,
-        ferr: jnp.ndarray,
+        w: jnp.ndarray,
         t0_flat: jnp.ndarray,
         teff_flat: jnp.ndarray,
         *,
@@ -97,7 +98,7 @@ class GridRunner:
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         dchi2, n_out = vmap(
             lambda t0_ref, teff_ref: GridRunner._grid_point(
-                t0_ref, teff_ref, time, flux, ferr,
+                t0_ref, teff_ref, time, flux, w,
                 sigma=sigma, teff_coeff=teff_coeff, min_pts=min_pts
             )
         )(t0_flat, teff_flat)
@@ -154,6 +155,7 @@ class SeasonGridRunner:
             t_season = time_j[idx]
             r_season = residual_j[idx]
             e_season = ferr_j[idx]
+            w_season = 1.0 / (e_season ** 2)
 
             if verbose:
                 log.info(
@@ -205,7 +207,7 @@ class SeasonGridRunner:
             # ---- timed block: grid run
             t_grid0 = time.perf_counter()
             t0_out, teff_out, dchi2, n_out = GridRunner.run(
-                t_season, r_season, e_season,
+                t_season, r_season, w_season,
                 t0_flat, teff_flat,
                 sigma=self.config.sigma,
                 teff_coeff=self.config.teff_coeff,

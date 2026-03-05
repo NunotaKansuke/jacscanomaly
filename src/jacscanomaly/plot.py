@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 
-from .anomaly_models import get_flat_plot_model, get_anom_plot_model
+from .anomaly_models import get_flat_plot_model_masked, get_anom_plot_model_masked
 
 
 @dataclass
@@ -217,15 +217,17 @@ class AnomalyPlotter:
         t_np = np.asarray(result.time)
         r_np = np.asarray(result.residual)
         e_np = np.asarray(result.ferr)
-        t_plot_np = np.arange(t0 - w, t0 + w + 0.1, 0.1)
+        t_plot_np = np.arange(t0 - w, t0 + w + 0.01, 0.01)
 
         # x window for chi2 evaluation
         mask = (t_np >= (t0 - w)) & (t_np <= (t0 + w))
+        mask_j = jnp.asarray(mask)
 
         # JAX arrays for prediction
         t = jnp.asarray(t_np)
         r = jnp.asarray(r_np)
         e = jnp.asarray(e_np)
+        w_j = 1.0 / (e ** 2)
         t_plot = jnp.asarray(t_plot_np)
 
         y_flat = None
@@ -233,10 +235,10 @@ class AnomalyPlotter:
 
         if show_flat:
             # predict_flat_model should accept (data_flux, data_ferr) or (r,e) depending on your definition
-            y_flat = np.asarray(jax.device_get(get_flat_plot_model(t_plot, r, e)))
+            y_flat = np.asarray(jax.device_get(get_flat_plot_model_masked(t_plot, r, w_j, mask_j)))
 
         if show_anom:
-            y_anom_j, _choose = get_anom_plot_model(t_plot, t0, teff, t, r, e)
+            y_anom_j, _ = get_anom_plot_model_masked(t_plot, t0, teff, t, r, w_j, mask_j)
             y_anom = np.asarray(jax.device_get(y_anom_j))
 
         if ax is None:

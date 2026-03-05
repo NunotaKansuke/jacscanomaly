@@ -12,6 +12,19 @@ def get_chi2_flat(data_time, data_flux, data_ferr):
     return jnp.sum(chi2s), chi2s
 
 @jit
+def get_chi2_flat_masked(
+    data_flux: jnp.ndarray,
+    w: jnp.ndarray,
+    mask: jnp.ndarray,
+):
+    wm = w * mask.astype(w.dtype)
+    den = jnp.sum(wm)
+    den = jnp.where(den > 0, den, jnp.asarray(1.0, den.dtype))
+    mu = jnp.sum(wm * data_flux) / den
+    chi2s = (data_flux - mu) ** 2 * wm
+    return jnp.sum(chi2s), chi2s
+
+@jit
 def calc_A_j_0(t0, teff, t):
     Q = 1 + ((t - t0) / teff) ** 2
     return 1 / jnp.sqrt(Q)
@@ -33,6 +46,34 @@ def get_chi2_anom(t0, teff, data_time, data_flux, data_ferr):
     fs1, fb1 = linear_fit(A1, data_flux, (1 / data_ferr) ** 2)
     m1 = A1 * fs1 + fb1
     chi2s1 = ((data_flux - m1) / data_ferr) ** 2
+    chi2_1 = jnp.sum(chi2s1)
+
+    choose0 = chi2_0 < chi2_1
+    chi2_best = jnp.where(choose0, chi2_0, chi2_1)
+    chi2s_best = jnp.where(choose0, chi2s0, chi2s1)
+    return chi2_best, chi2s_best
+
+@jit
+def get_chi2_anom_masked(
+    t0: jnp.ndarray,
+    teff: jnp.ndarray,
+    data_time: jnp.ndarray,
+    data_flux: jnp.ndarray,
+    w: jnp.ndarray,
+    mask: jnp.ndarray,
+):
+    wm = w * mask.astype(w.dtype)
+
+    A0 = calc_A_j_0(t0, teff, data_time)
+    fs0, fb0 = linear_fit(A0, data_flux, wm)
+    m0 = A0 * fs0 + fb0
+    chi2s0 = (data_flux - m0) ** 2 * wm
+    chi2_0 = jnp.sum(chi2s0)
+
+    A1 = calc_A_j_1(t0, teff, data_time)
+    fs1, fb1 = linear_fit(A1, data_flux, wm)
+    m1 = A1 * fs1 + fb1
+    chi2s1 = (data_flux - m1) ** 2 * wm
     chi2_1 = jnp.sum(chi2s1)
 
     choose0 = chi2_0 < chi2_1
@@ -68,6 +109,14 @@ def get_flat_plot_model(t_plot, data_flux, data_ferr):
     return jnp.full_like(t_plot, mu)
 
 @jit
+def get_flat_plot_model_masked(t_plot, data_flux, w, mask):
+    wm = w * mask.astype(w.dtype)
+    den = jnp.sum(wm)
+    den = jnp.where(den > 0, den, jnp.asarray(1.0, den.dtype))
+    mu = jnp.sum(wm * data_flux) / den
+    return jnp.full_like(t_plot, mu)
+
+@jit
 def get_anom_plot_model(t_plot, t0, teff, data_time, data_flux, data_ferr):
     A0 = calc_A_j_0(t0, teff, data_time)
     fs0, fb0 = linear_fit(A0, data_flux, (1.0 / data_ferr) ** 2)
@@ -80,8 +129,25 @@ def get_anom_plot_model(t_plot, t0, teff, data_time, data_flux, data_ferr):
     fs1, fb1 = linear_fit(A1, data_flux, (1.0 / data_ferr) ** 2)
     m1 = A1 * fs1 + fb1
     chi2_1 = jnp.sum(((data_flux - m1) / data_ferr) ** 2)
-    A1_plot = calc_A_j_0(t0, teff, t_plot)
+    A1_plot = calc_A_j_1(t0, teff, t_plot)
     m1_plot = A1_plot * fs0 + fb0
 
     choose0 = chi2_0 < chi2_1
     return jnp.where(choose0, m0_plot, m1_plot), choose0
+
+@jit
+def get_anom_plot_model_masked(t_plot, t0, teff, data_time, data_flux, w, mask):
+    wm = w * mask.astype(w.dtype)
+
+    A0 = calc_A_j_0(t0, teff, data_time)
+    fs0, fb0 = linear_fit(A0, data_flux, wm)
+    m0 = calc_A_j_0(t0, teff, t_plot) * fs0 + fb0
+    chi2_0 = jnp.sum((data_flux - (A0 * fs0 + fb0)) ** 2 * wm)
+
+    A1 = calc_A_j_1(t0, teff, data_time)
+    fs1, fb1 = linear_fit(A1, data_flux, wm)
+    m1 = calc_A_j_1(t0, teff, t_plot) * fs1 + fb1
+    chi2_1 = jnp.sum((data_flux - (A1 * fs1 + fb1)) ** 2 * wm)
+
+    choose0 = chi2_0 < chi2_1
+    return jnp.where(choose0, m0, m1), choose0
