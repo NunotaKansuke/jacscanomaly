@@ -103,7 +103,7 @@ def _fit_single_lens(
     model_flux = fs * A + fb
     residual = flux - model_flux
 
-    plot_time = np.arange(np.min(time), np.max(time) + 0.5, 0.5)
+    plot_time = np.arange(np.min(time), np.max(time) + 0.1, 0.1)
     plot_A = build_A(x, plot_time)
     plot_flux = fs * plot_A + fb
 

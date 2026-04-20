@@ -217,7 +217,7 @@ class AnomalyPlotter:
         t_np = np.asarray(result.time)
         r_np = np.asarray(result.residual)
         e_np = np.asarray(result.ferr)
-        t_plot_np = np.arange(t0 - w, t0 + w + 0.01, 0.01)
+        t_plot_np = np.arange(t0 - w, t0 + w + 0.001, 0.001)
 
         # x window for chi2 evaluation
         mask = (t_np >= (t0 - w)) & (t_np <= (t0 + w))
@@ -247,16 +247,16 @@ class AnomalyPlotter:
             fig = ax.figure
 
         if use_errorbar:
-            ax.errorbar(t_np, r_np, yerr=e_np, fmt=".")
+            ax.errorbar(t_np, r_np, yerr=e_np, fmt=".", zorder=2)
         else:
-            ax.plot(t_np, r_np, ".")
+            ax.plot(t_np, r_np, ".", zorder=2)
 
         # Draw model lines ONLY within the chi2 window
         if y_flat is not None:
-            ax.plot(t_plot_np, y_flat, label="flat", c="C1")
+            ax.plot(t_plot_np, y_flat, label="flat", c="C1", zorder=3)
 
         if y_anom is not None:
-            ax.plot(t_plot_np, y_anom, label="anomaly", c="r")
+            ax.plot(t_plot_np, y_anom, label="anomaly", c="r", zorder=3)
 
         # range
         if xlim is None:
