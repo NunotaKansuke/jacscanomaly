@@ -40,6 +40,7 @@ class AnomalyPlotter:
         a: float = 3.0,
         xlim: Tuple[float, float] | None = None,
         half_width: float | None = None,
+        min_hw: float | None = None,
     ) -> Tuple[float, float]:
         """
         Compute xlim for plots.
@@ -59,6 +60,9 @@ class AnomalyPlotter:
             If provided, returned as-is.
         half_width : float | None
             Used only when width_mode="custom".
+        min_hw : float | None
+            Minimum half-width enforced after the normal calculation.
+            Prevents degenerate (u0≈0) fits from producing a near-zero window.
 
         Returns
         -------
@@ -96,7 +100,28 @@ class AnomalyPlotter:
             t0, tE, u0 = map(float, np.asarray(result.fit.params)[:3])
             hw = float(a * abs(tE * u0))
 
-        return (t_center - hw, t_center + hw)
+        # Apply minimum half-width (prevents degenerate u0≈0 from collapsing window)
+        if min_hw is not None:
+            hw = max(hw, float(min_hw))
+
+        xmin = t_center - hw
+        xmax = t_center + hw
+
+        # If the best anomaly candidate is just outside the window, extend to include it.
+        # Only extend when the anomaly is within 3×hw (i.e., not a completely different season).
+        best = getattr(result, "best", None)
+        if best is not None:
+            ano_t0 = float(best.t0)
+            if not (xmin <= ano_t0 <= xmax):
+                dist = min(abs(ano_t0 - xmin), abs(ano_t0 - xmax))
+                if dist <= 2.0 * hw:
+                    buf = max(float(best.teff) * 5.0, 5.0)
+                    if ano_t0 < xmin:
+                        xmin = ano_t0 - buf
+                    else:
+                        xmax = ano_t0 + buf
+
+        return (xmin, xmax)
 
     # ----------------------------
     # basic plots
@@ -264,6 +289,26 @@ class AnomalyPlotter:
             xlim = (t0 - hw, t0 + hw)
         ax.set_xlim(xlim)
 
+        # Set ylim from the visible x-window only so out-of-window points
+        # do not inflate the vertical range.
+        vis = (t_np >= xlim[0]) & (t_np <= xlim[1])
+        if vis.any():
+            y_samples = [r_np[vis] - e_np[vis], r_np[vis] + e_np[vis]]
+
+            line_vis = (t_plot_np >= xlim[0]) & (t_plot_np <= xlim[1])
+            if line_vis.any():
+                if y_flat is not None:
+                    y_samples.append(y_flat[line_vis])
+                if y_anom is not None:
+                    y_samples.append(y_anom[line_vis])
+
+            y_all = np.concatenate(y_samples)
+            y_lo = np.percentile(y_all, 1)
+            y_hi = np.percentile(y_all, 99)
+            if y_hi > y_lo:
+                mg = 0.15 * (y_hi - y_lo)
+                ax.set_ylim(y_lo - mg, y_hi + mg)
+
         ax.set_xlabel("time")
         ax.set_ylabel("residual")
         ax.legend()
@@ -284,6 +329,7 @@ class AnomalyPlotter:
         a: float = 3.0,
         xlim: Tuple[float, float] | None = None,
         half_width: float | None = None,
+        min_hw: float = 30.0,
         show: bool = True,
         figsize=(10, 8),
         height_ratios=(3, 1, 1),
@@ -298,6 +344,8 @@ class AnomalyPlotter:
 
         Range control:
           - center/width_mode/a OR xlim/half_width
+          - min_hw: minimum half-width in time units (default 30 days);
+            prevents degenerate u0≈0 fits from collapsing the window.
         """
         t = np.asarray(result.time)
         f = np.asarray(result.flux)
@@ -308,7 +356,8 @@ class AnomalyPlotter:
         m_plot = result.fit.plot_flux
 
         xl = self._compute_xlim(
-            result, center=center, width_mode=width_mode, a=a, xlim=xlim, half_width=half_width
+            result, center=center, width_mode=width_mode, a=a, xlim=xlim,
+            half_width=half_width, min_hw=min_hw,
         )
 
         fig, axes = plt.subplots(
@@ -346,6 +395,26 @@ class AnomalyPlotter:
         ax.set_xlabel("time")
         ax.set_ylabel("dchi2")
         ax.minorticks_on()
+
+        # Set data-based ylim for flux and residual panels.
+        # Prevents the PSPL model spike (which is huge when u0≈0) from
+        # dominating the y-axis and hiding all the data.
+        vis = (t >= xl[0]) & (t <= xl[1])
+        if vis.any():
+            f_vis = f[vis]
+            e_vis = e[vis]
+            f_lo = np.percentile(f_vis - e_vis, 1)
+            f_hi = np.percentile(f_vis + e_vis, 99)
+            if f_hi > f_lo:
+                mg = 0.15 * (f_hi - f_lo)
+                axes[0].set_ylim(f_lo - mg, f_hi + mg)
+
+            r_vis = res[vis]
+            r_lo = np.percentile(r_vis - e_vis, 1)
+            r_hi = np.percentile(r_vis + e_vis, 99)
+            if r_hi > r_lo:
+                mg = 0.15 * (r_hi - r_lo)
+                axes[1].set_ylim(r_lo - mg, r_hi + mg)
 
         if show:
             plt.show()
