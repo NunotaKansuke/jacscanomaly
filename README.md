@@ -124,6 +124,11 @@ we define a **score**:
 score = (Δχ²_best − median(Δχ²_others)) / std(Δχ²_others)
 ```
 
+In practice, `jacscanomaly` estimates `median(Δχ²_others)` and
+`std(Δχ²_others)` from the bulk of the other cluster peaks, trimming values
+above `best_score_trim_percentile` first when possible. This makes the score
+less sensitive to a few strong secondary peaks.
+
 This measures how strongly the best candidate stands out from the rest of the grid.
 
 ---
@@ -138,7 +143,8 @@ from jacscanomaly import FinderConfig
 config = FinderConfig(
     teff_init=0.03,      # initial anomaly timescale
     teff_grid_n=20,      # number of teff grid points
-    sigma=3.0,          # threshold for outlier counting
+    sigma=3.0,           # threshold for outlier counting
+    best_score_trim_percentile=95.0,  # trim upper tail for best-candidate score
 )
 ```
 

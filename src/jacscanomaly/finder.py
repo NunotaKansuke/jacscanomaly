@@ -309,8 +309,29 @@ class Finder:
         others = np.delete(clusters_all, max_ind, axis=0)
 
         if others.shape[0] >= 2:
-            med = float(np.median(others[:, 2]))
-            std = float(np.std(others[:, 2]))
+            other_dchi2 = others[:, 2]
+
+            # Estimate the background spread from the bulk of the distribution.
+            # A few large-dchi2 secondary peaks can otherwise inflate std and
+            # suppress the best-candidate score.
+            trim_percentile = float(self.config.best_score_trim_percentile)
+            if not (0.0 < trim_percentile <= 100.0):
+                raise ValueError(
+                    "best_score_trim_percentile must satisfy 0 < value <= 100."
+                )
+
+            bulk_dchi2 = other_dchi2
+            if trim_percentile < 100.0:
+                cutoff = float(np.percentile(other_dchi2, trim_percentile))
+                trimmed_dchi2 = other_dchi2[other_dchi2 <= cutoff]
+                if trimmed_dchi2.shape[0] >= 2:
+                    bulk_dchi2 = trimmed_dchi2
+
+            if bulk_dchi2.shape[0] < 2:
+                bulk_dchi2 = other_dchi2
+
+            med = float(np.median(bulk_dchi2))
+            std = float(np.std(bulk_dchi2))
             score = (best[2] - med) / std if std > 0 else float("inf")
         else:
             med = std = score = float("nan")

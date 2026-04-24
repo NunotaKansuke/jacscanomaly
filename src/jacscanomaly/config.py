@@ -154,6 +154,20 @@ class FinderConfig:
     Stop extracting clusters once the number of remaining grid points
     falls below this value.
     """
+
+    best_score_trim_percentile: float = 95.0
+    """
+    Upper percentile used when estimating the background spread of
+    ``dchi2`` values for the best-candidate score.
+
+    When selecting the best candidate, the score is computed from the
+    other cluster peaks after trimming values above this percentile.
+    This makes the score less sensitive to a few strong secondary peaks
+    that would otherwise inflate the background standard deviation.
+
+    Set to ``100`` to disable trimming.
+    """
+
     # ==================================================
     # 5) Grid execution mode
     # ==================================================

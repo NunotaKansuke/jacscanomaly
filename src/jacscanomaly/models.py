@@ -19,9 +19,11 @@ class BestCandidate:
     dchi2 : float
         Improvement in chi-square: chi2_null - chi2_anom (larger is better).
     med_others : float
-        Median dchi2 among all other candidates (excluding the best).
+        Median dchi2 among the bulk of the other candidates
+        (excluding the best, with the upper tail trimmed when configured).
     std_others : float
-        Standard deviation of dchi2 among all other candidates (excluding the best).
+        Standard deviation of dchi2 among the bulk of the other candidates
+        (excluding the best, with the upper tail trimmed when configured).
     score : float
         Standardized score of the best candidate:
             (dchi2_best - med_others) / std_others
