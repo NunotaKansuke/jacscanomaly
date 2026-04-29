@@ -190,14 +190,31 @@ to the grid-scan and Δχ² evaluation in `jacscanomaly`.
 Finite-source magnifications are computed using an external JAX-based
 implementation.
 
-The original FFT-based extended-source algorithm is from  
+The original FFT-based extended-source algorithm is from:
 https://github.com/git-sunao/fft-extended-source
 
-This algorithm is provided in JAX form by  
+This algorithm is provided in JAX form by:
 https://github.com/ShotaMiyazaki94/microjax
 
-Specifically, `scanomaly` uses the FFT disk-integration implementation
-available via `microjax.fastlens.mag_fft_jax`.
+Specifically, `jacscanomaly` uses the FFT disk-integration implementation
+available through:
+
+    from microjax.fastlens import fspl_disk
+
+Note:
+`jacscanomaly` currently requires the GitHub source version of `microjax`.
+The PyPI package `microjaxx==0.1.1` may not expose
+`microjax.fastlens.fspl_disk`.
+
+Install `microjax` from source before using FSPL functionality:
+
+    git clone https://github.com/ShotaMiyazaki94/microjax.git
+    cd microjax
+    python -m pip install -e .
+
+You can verify the installation with:
+
+    from microjax.fastlens import fspl_disk
 
 ## Citation
 
