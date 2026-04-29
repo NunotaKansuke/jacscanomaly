@@ -3,6 +3,8 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 .env
+.codex
+.claude
 
 # build artifacts
 dist/
