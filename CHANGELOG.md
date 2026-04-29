@@ -22,6 +22,20 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 - Example light curves are provided for demonstration purposes only
   and are drawn from Roman Galactic Exoplanet Survey simulation products.
 
+## [0.3.0] - 2026-04-29
+
+### Added
+- Chunked grid execution mode (`grid_chunked`, `grid_chunk_auto`, `grid_chunk_size`, `grid_chunk_threshold` in `FinderConfig`) to reduce JAX compilation size and peak memory usage on large grids.
+- Configurable best-candidate score trimming via `best_score_trim_percentile` in `FinderConfig`.
+- Parallax fitting now accepts shifted Julian dates (JD − 2450000) as timestamps.
+
+### Changed
+- Grid scan now uses masked weights instead of big-error windowing, improving numerical robustness.
+- Plot resolution improved: model curves use finer time steps and theory lines are rendered above data points.
+- Anomaly window plot scaling improved.
+
+---
+
 ## [0.2.0] - 2026-02-01
 
 ### Added
