@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, Optional, Callable
+from typing import Tuple, Optional, Callable, Any
 
 import numpy as np
 import jax.numpy as jnp
@@ -40,11 +40,10 @@ class SingleLensFitResult:
     fb: jnp.ndarray
     model_flux: jnp.ndarray
     residual: jnp.ndarray
-    plot_flux: np.ndarray
-    plot_time: np.ndarray
 
     # Optional: raw optimizer parameters (e.g. logrho), if different from `params`.
     raw_params: Optional[jnp.ndarray] = None
+    parallax_projector: Optional[Any] = None
 
 
 def _fit_single_lens(
@@ -62,6 +61,7 @@ def _fit_single_lens(
     tol: float = 1e-3,
     min_points: int = 4,
     store_raw_params: bool = False,
+    parallax_projector: Optional[Any] = None,
 ) -> SingleLensFitResult:
     """
     Shared fitting routine used by all single-lens fitters.
@@ -103,10 +103,6 @@ def _fit_single_lens(
     model_flux = fs * A + fb
     residual = flux - model_flux
 
-    plot_time = np.arange(np.min(time), np.max(time) + 0.1, 0.1)
-    plot_A = build_A(x, plot_time)
-    plot_flux = fs * plot_A + fb
-
     resn = residual_norm_from_A(A, flux, ferr)
     chi2 = chi2_from_res(resn)
     chi2_dof = chi2 / (n - dof)
@@ -126,9 +122,8 @@ def _fit_single_lens(
         fb=fb,
         model_flux=model_flux,
         residual=residual,
-        plot_time = plot_time,
-        plot_flux = plot_flux,
         raw_params=raw,
+        parallax_projector=parallax_projector,
     )
 
 
@@ -274,6 +269,7 @@ class PSPLParallaxFitter:
             damping_parameter=self.damping_parameter,
             tol=self.tol,
             min_points=6,
+            parallax_projector=P,
         )
         self._last_fit = fit
         return fit
@@ -335,6 +331,7 @@ class FSPLParallaxFitter:
             tol=self.tol,
             min_points=7,
             store_raw_params=True,
+            parallax_projector=P,
         )
         self._last_fit = fit
         return fit

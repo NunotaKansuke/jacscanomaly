@@ -72,7 +72,7 @@ class AnomalyResult:
     ----------
     time, flux, ferr : np.ndarray
         Input light curve arrays (1D).
-    fit : PSPLFitResult
+    fit : SingleLensFitResult
         PSPL fitting result (contains params, fs, fb, chi2, model_flux, residual, etc.).
     residual : np.ndarray
         Flux residuals on CPU: flux - model_flux.
@@ -93,7 +93,7 @@ class AnomalyResult:
     ferr: np.ndarray
 
     # PSPL fit
-    fit: PSPLFitResult
+    fit: SingleLensFitResult
     residual: np.ndarray
     model_flux: np.ndarray
     chi2_dof: float

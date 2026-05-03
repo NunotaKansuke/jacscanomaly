@@ -36,13 +36,14 @@ from jacscanomaly import Finder, FinderConfig
 data = np.load("example_data.npy")
 time, flux, ferr = data[:, 0], data[:, 1], data[:, 2]
 
-# initial guess for PSPL parameters
-p0 = np.array([10000, 10, 0.3])
-
 # run anomaly finder
 config = FinderConfig(fitter_kind="pspl")
 finder = Finder(config)
-result = finder.run(time, flux, ferr, p0)
+result = finder.run(time, flux, ferr)
+
+# You can still pass an explicit initial guess if desired:
+# p0 = np.array([10000, 10, 0.3])
+# result = finder.run(time, flux, ferr, p0)
 
 print("=== PSPL fit ===")
 t0_pspl, tE_pspl, u0_pspl = result.fit.params

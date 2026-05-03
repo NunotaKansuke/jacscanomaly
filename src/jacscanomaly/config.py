@@ -71,6 +71,42 @@ class FinderConfig:
     """
 
     # ==================================================
+    # 0b) Automatic single-lens initialization
+    # ==================================================
+    auto_init_teff_min: float = 1.0
+    """Smallest teff used when estimating single-lens initial values."""
+
+    auto_init_teff_max: float = 1000.0
+    """Largest teff used when estimating single-lens initial values."""
+
+    auto_init_teff_grid_n: int = 25
+    """Number of teff grid points used for automatic initialization."""
+
+    auto_init_dt0_coeff: float = 0.25
+    """t0 grid spacing coefficient used for automatic initialization."""
+
+    auto_init_max_clusters: int = 1
+    """Maximum number of scan clusters used as t0/teff seeds."""
+
+    auto_init_u0_min: float = 0.01
+    """Smallest allowed u0 seed after converting from teff/tE."""
+
+    auto_init_u0_max: float = 1.0
+    """Largest allowed u0 seed after converting from teff/tE."""
+
+    auto_init_tE_min: float = 1.0
+    """Smallest tE seed used in the log grid."""
+
+    auto_init_tE_max: float = 1000.0
+    """Largest tE seed used in the log grid."""
+
+    auto_init_tE_grid_n: int = 4
+    """Number of tE seeds used in the log grid."""
+
+    auto_init_logrho: float = -7.0
+    """Initial logrho used for FSPL models when x0 is omitted."""
+
+    # ==================================================
     # 1) Season splitting
     # ==================================================
     gap: float = 100.0

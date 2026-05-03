@@ -10,6 +10,106 @@ import jax
 import jax.numpy as jnp
 
 from .anomaly_models import get_flat_plot_model_masked, get_anom_plot_model_masked
+from .singlelens_model import (
+    A_pspl_func,
+    A_fspl_func,
+    A_pspl_parallax_func,
+    A_fspl_parallax_func,
+)
+
+
+def _single_lens_model_flux(fit, time) -> np.ndarray:
+    """
+    Evaluate the fitted single-lens model at arbitrary times.
+    """
+    names = tuple(getattr(fit, "param_names", ()))
+    params = jnp.asarray(fit.params)
+    time_j = jnp.asarray(time)
+
+    if names == ("t0", "tE", "u0"):
+        A = A_pspl_func(params, time_j)
+    elif names == ("t0", "tE", "u0", "rho"):
+        A = A_fspl_func(params, time_j)
+    elif names == ("t0", "tE", "u0", "piEN", "piEE"):
+        P = getattr(fit, "parallax_projector", None)
+        if P is None:
+            raise ValueError("Cannot plot parallax model without fit.parallax_projector.")
+        A = A_pspl_parallax_func(params, time_j, P)
+    elif names == ("t0", "tE", "u0", "rho", "piEN", "piEE"):
+        P = getattr(fit, "parallax_projector", None)
+        if P is None:
+            raise ValueError("Cannot plot parallax model without fit.parallax_projector.")
+        A = A_fspl_parallax_func(params, time_j, P)
+    else:
+        raise ValueError(f"Unsupported single-lens parameter set: {names}")
+
+    flux = fit.fs * A + fit.fb
+    return np.asarray(jax.device_get(flux), dtype=float)
+
+
+def _adaptive_single_lens_curve(
+    fit,
+    xlim: Tuple[float, float],
+    *,
+    base_points: int = 128,
+    max_flux_step: float | None = None,
+    min_time_step: float | None = None,
+    max_points: int = 12000,
+    max_iter: int = 24,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Sample the model only inside xlim, densifying intervals with large flux jumps.
+    """
+    xmin, xmax = map(float, xlim)
+    if xmax < xmin:
+        xmin, xmax = xmax, xmin
+    if xmax == xmin:
+        xmax = xmin + 1.0
+
+    n0 = max(2, int(base_points))
+    x = np.linspace(xmin, xmax, n0)
+    y = _single_lens_model_flux(fit, x)
+
+    if max_flux_step is None:
+        ferr = np.asarray(getattr(fit, "ferr", []), dtype=float)
+        ferr = ferr[np.isfinite(ferr) & (ferr > 0)]
+        if ferr.size:
+            max_flux_step = 0.25 * float(np.median(ferr))
+        else:
+            flux = np.asarray(getattr(fit, "flux", []), dtype=float)
+            flux = flux[np.isfinite(flux)]
+            scale = np.ptp(flux) if flux.size else 1.0
+            max_flux_step = 0.0025 * max(float(scale), 1.0)
+    max_flux_step = max(float(max_flux_step), np.finfo(float).eps)
+
+    if min_time_step is None:
+        min_time_step = max((xmax - xmin) / max_points, 1e-6)
+    min_time_step = max(float(min_time_step), np.finfo(float).eps)
+
+    for _ in range(max_iter):
+        dx = np.diff(x)
+        dy = np.abs(np.diff(y))
+        split = (dy > max_flux_step) & (dx > min_time_step)
+        if not np.any(split):
+            break
+
+        split_idx = np.flatnonzero(split)
+        available = max_points - len(x)
+        if available <= 0:
+            break
+        if split_idx.size > available:
+            order = np.argsort(dy[split_idx])[-available:]
+            split_idx = np.sort(split_idx[order])
+
+        mids = 0.5 * (x[split_idx] + x[split_idx + 1])
+        y_mids = _single_lens_model_flux(fit, mids)
+        x = np.concatenate([x, mids])
+        y = np.concatenate([y, y_mids])
+        order = np.argsort(x)
+        x = x[order]
+        y = y[order]
+
+    return x, y
 
 
 @dataclass
@@ -137,6 +237,10 @@ class AnomalyPlotter:
         a: float = 3.0,
         xlim: Tuple[float, float] | None = None,
         half_width: float | None = None,
+        model_base_points: int = 128,
+        model_max_flux_step: float | None = None,
+        model_min_time_step: float | None = None,
+        model_max_points: int = 12000,
     ):
         """
         Plot light curve and PSPL best-fit model.
@@ -144,8 +248,17 @@ class AnomalyPlotter:
         Returns (fig, ax).
         """
         t, f, e = result.time, result.flux, result.ferr
-        t_plot = result.fit.plot_time
-        m_plot = result.fit.plot_flux
+        xl = self._compute_xlim(
+            result, center=center, width_mode=width_mode, a=a, xlim=xlim, half_width=half_width
+        )
+        t_plot, m_plot = _adaptive_single_lens_curve(
+            result.fit,
+            xl,
+            base_points=model_base_points,
+            max_flux_step=model_max_flux_step,
+            min_time_step=model_min_time_step,
+            max_points=model_max_points,
+        )
 
         if ax is None:
             fig, ax = plt.subplots()
@@ -158,9 +271,6 @@ class AnomalyPlotter:
         ax.set_ylabel("flux")
         ax.legend()
 
-        xl = self._compute_xlim(
-            result, center=center, width_mode=width_mode, a=a, xlim=xlim, half_width=half_width
-        )
         ax.set_xlim(xl)
 
         if show:
@@ -335,6 +445,10 @@ class AnomalyPlotter:
         height_ratios=(3, 1, 1),
         show_anomaly_window: bool = False,
         teff_coeff: float = 3.0,
+        model_base_points: int = 128,
+        model_max_flux_step: float | None = None,
+        model_min_time_step: float | None = None,
+        model_max_points: int = 12000,
     ):
         """
         3-panel plot:
@@ -352,12 +466,18 @@ class AnomalyPlotter:
         e = np.asarray(result.ferr)
         res = np.asarray(result.residual)
         clusters = np.asarray(result.clusters_all)
-        t_plot = result.fit.plot_time
-        m_plot = result.fit.plot_flux
 
         xl = self._compute_xlim(
             result, center=center, width_mode=width_mode, a=a, xlim=xlim,
             half_width=half_width, min_hw=min_hw,
+        )
+        t_plot, m_plot = _adaptive_single_lens_curve(
+            result.fit,
+            xl,
+            base_points=model_base_points,
+            max_flux_step=model_max_flux_step,
+            min_time_step=model_min_time_step,
+            max_points=model_max_points,
         )
 
         fig, axes = plt.subplots(
@@ -426,7 +546,7 @@ class SingleLensPlotter:
     Plot utilities for single lens fitting results only.
 
     This plotter mirrors the interface philosophy of AnomalyPlotter,
-    but operates directly on PSPLFitResult.
+    but operates directly on SingleLensFitResult.
 
     Conventions
     -----------
@@ -478,6 +598,10 @@ class SingleLensPlotter:
         a: float = 3.0,
         xlim: tuple[float, float] | None = None,
         half_width: float | None = None,
+        model_base_points: int = 128,
+        model_max_flux_step: float | None = None,
+        model_min_time_step: float | None = None,
+        model_max_points: int = 12000,
     ):
         """
         Plot light curve with single lens best-fit model.
@@ -487,8 +611,21 @@ class SingleLensPlotter:
         t = np.asarray(fit.time)
         f = np.asarray(fit.flux)
         e = np.asarray(fit.ferr)
-        t_plot = np.asarray(fit.plot_time)
-        m_plot = np.asarray(fit.plot_flux)
+        xl = self._compute_xlim(
+            fit,
+            width_mode=width_mode,
+            a=a,
+            xlim=xlim,
+            half_width=half_width,
+        )
+        t_plot, m_plot = _adaptive_single_lens_curve(
+            fit,
+            xl,
+            base_points=model_base_points,
+            max_flux_step=model_max_flux_step,
+            min_time_step=model_min_time_step,
+            max_points=model_max_points,
+        )
 
         if ax is None:
             fig, ax = plt.subplots()
@@ -503,13 +640,6 @@ class SingleLensPlotter:
         ax.legend()
         ax.minorticks_on()
 
-        xl = self._compute_xlim(
-            fit,
-            width_mode=width_mode,
-            a=a,
-            xlim=xlim,
-            half_width=half_width,
-        )
         ax.set_xlim(xl)
 
         if show:

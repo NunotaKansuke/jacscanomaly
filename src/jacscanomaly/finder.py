@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 import logging
 
@@ -21,6 +21,8 @@ from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .runner import SeasonGridRunner
 from .models import AnomalyResult, BestCandidate
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -96,7 +98,7 @@ class Finder:
 
         self._last_result: Optional[AnomalyResult] = None
 
-    def _ensure_fitter(self, t0) -> None:
+    def _ensure_fitter(self, t_ref) -> None:
         """
         Instantiate the default single-lens fitter from the current configuration.
     
@@ -145,7 +147,7 @@ class Finder:
         # Parallax variants
         tref = self.config.tref
         if tref is None:
-            tref = t0
+            tref = t_ref
     
         if k == "pspl_parallax":
             self.fitter = PSPLParallaxFitter(
@@ -171,7 +173,7 @@ class Finder:
         time,
         flux,
         ferr,
-        x0,
+        x0=None,
     ) -> SingleLensFitResult:
         """
         Run only the single-lens fit selected by the current configuration.
@@ -180,9 +182,9 @@ class Finder:
         ----------
         time, flux, ferr : array-like
             One-dimensional light-curve arrays.
-        x0 : array-like
+        x0 : array-like, optional
             Initial guess for the nonlinear model parameters.
-            Its length must match the selected fitter.
+            If omitted, initial values are estimated from a scan of the light curve.
 
         Returns
         -------
@@ -190,7 +192,9 @@ class Finder:
             Result of the single-lens fit.
         """
         time_j, flux_j, ferr_j, x0_j, time_np, _, _ = self._to_arrays(time, flux, ferr, x0)
-        self._ensure_fitter(x0[0])
+        self._ensure_fitter(float(np.median(time_np)))
+        if x0_j is None:
+            return self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
         return self.fitter.fit(time_j, flux_j, ferr_j, x0_j)
 
     def run(
@@ -198,7 +202,7 @@ class Finder:
         time,
         flux,
         ferr,
-        x0,
+        x0=None,
         *,
         verbose: bool = True,
         log: Optional[logging.Logger] = None,
@@ -210,8 +214,9 @@ class Finder:
         ----------
         time, flux, ferr : array-like
             One-dimensional light-curve arrays.
-        x0 : array-like
-            Initial guess for the single-lens model parameters.
+        x0 : array-like, optional
+            Initial guess for the single-lens model parameters. If omitted, the
+            finder estimates multiple initial values and uses the best fit.
         verbose : bool, optional
             If True, print progress messages.
         log : logging.Logger, optional
@@ -227,9 +232,14 @@ class Finder:
             time, flux, ferr, x0
         )
 
-        self._ensure_fitter(x0[0])
+        self._ensure_fitter(float(np.median(time_np)))
 
-        fit: SingleLensFitResult = self.fitter.fit(time_j, flux_j, ferr_j, x0_j)
+        if x0_j is None:
+            if verbose:
+                (logger if log is None else log).info("Estimating single-lens initial values.")
+            fit = self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
+        else:
+            fit = self.fitter.fit(time_j, flux_j, ferr_j, x0_j)
         residual_j = fit.residual
         model_flux_j = fit.model_flux
 
@@ -290,9 +300,152 @@ class Finder:
         time_j = jnp.asarray(time_np)
         flux_j = jnp.asarray(flux_np)
         ferr_j = jnp.asarray(ferr_np)
-        x0_j = jnp.asarray(x0, dtype=time_j.dtype)
+        x0_j = None if x0 is None else jnp.asarray(x0, dtype=time_j.dtype)
 
         return time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np
+
+    def _fit_from_auto_initial_guesses(
+        self,
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        time_np: np.ndarray,
+    ) -> SingleLensFitResult:
+        guesses = self._estimate_single_lens_initial_guesses(
+            time_j=time_j,
+            flux_j=flux_j,
+            ferr_j=ferr_j,
+            time_np=time_np,
+        )
+
+        best_fit = None
+        best_chi2 = np.inf
+        errors = []
+
+        for x0 in guesses:
+            try:
+                fit = self.fitter.fit(time_j, flux_j, ferr_j, jnp.asarray(x0, dtype=time_j.dtype))
+                chi2 = float(jax.device_get(fit.chi2))
+            except Exception as exc:
+                errors.append(exc)
+                continue
+
+            if np.isfinite(chi2) and chi2 < best_chi2:
+                best_chi2 = chi2
+                best_fit = fit
+
+        if best_fit is None:
+            msg = "All automatic single-lens initial guesses failed."
+            if errors:
+                msg += f" First error: {errors[0]}"
+            raise RuntimeError(msg)
+
+        return best_fit
+
+    def _estimate_single_lens_initial_guesses(
+        self,
+        *,
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        time_np: np.ndarray,
+    ) -> np.ndarray:
+        cfg = self.config
+        if cfg.auto_init_teff_min <= 0 or cfg.auto_init_teff_max <= 0:
+            raise ValueError("auto_init_teff_min and auto_init_teff_max must be positive.")
+        if cfg.auto_init_teff_max < cfg.auto_init_teff_min:
+            raise ValueError("auto_init_teff_max must be >= auto_init_teff_min.")
+        if cfg.auto_init_u0_min <= 0 or cfg.auto_init_u0_max <= 0:
+            raise ValueError("auto_init_u0_min and auto_init_u0_max must be positive.")
+        if cfg.auto_init_u0_max < cfg.auto_init_u0_min:
+            raise ValueError("auto_init_u0_max must be >= auto_init_u0_min.")
+
+        n_teff = max(1, int(cfg.auto_init_teff_grid_n))
+        ratio = 1.0
+        if n_teff > 1 and cfg.auto_init_teff_max > cfg.auto_init_teff_min:
+            ratio = float((cfg.auto_init_teff_max / cfg.auto_init_teff_min) ** (1.0 / (n_teff - 1)))
+
+        init_config = replace(
+            cfg,
+            teff_init=float(cfg.auto_init_teff_min),
+            common_ratio=ratio,
+            teff_grid_n=n_teff,
+            dt0_coeff=float(cfg.auto_init_dt0_coeff),
+        )
+        init_runner = SeasonGridRunner(
+            splitter=SeasonSplitter(gap=cfg.gap),
+            extractor=ResultExtractor(sigma_overlap=cfg.overlap_sigma, min_points=1),
+            config=init_config,
+        )
+
+        _, clusters = init_runner.run(
+            time_j=time_j,
+            residual_j=flux_j,
+            ferr_j=ferr_j,
+            time_np=time_np,
+            verbose=False,
+        )
+
+        clusters = np.asarray(clusters, dtype=float)
+        if clusters.size:
+            clusters = clusters[np.isfinite(clusters).all(axis=1)]
+            clusters = clusters[clusters[:, 2] > 0]
+            order = np.argsort(clusters[:, 2])[::-1]
+            clusters = clusters[order[: max(1, int(cfg.auto_init_max_clusters))]]
+
+        if clusters.size == 0:
+            flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
+            i_peak = int(np.nanargmax(flux_np))
+            span = float(np.nanmax(time_np) - np.nanmin(time_np))
+            teff = min(max(0.1 * span, float(cfg.auto_init_teff_min)), float(cfg.auto_init_teff_max))
+            clusters = np.asarray([[float(time_np[i_peak]), teff, 0.0]], dtype=float)
+
+        if cfg.auto_init_tE_min <= 0 or cfg.auto_init_tE_max <= 0:
+            raise ValueError("auto_init_tE_min and auto_init_tE_max must be positive.")
+        if cfg.auto_init_tE_max < cfg.auto_init_tE_min:
+            raise ValueError("auto_init_tE_max must be >= auto_init_tE_min.")
+
+        n_tE = max(1, int(cfg.auto_init_tE_grid_n))
+        if n_tE == 1:
+            tE_grid = np.asarray([float(cfg.auto_init_tE_max)], dtype=float)
+        else:
+            tE_grid = np.exp(
+                np.linspace(
+                    np.log(float(cfg.auto_init_tE_min)),
+                    np.log(float(cfg.auto_init_tE_max)),
+                    n_tE,
+                )
+            )
+
+        guesses = []
+        for t0, teff, _ in clusters:
+            teff = float(teff)
+            for tE in tE_grid:
+                u0 = teff / float(tE)
+                if not (float(cfg.auto_init_u0_min) <= u0 <= float(cfg.auto_init_u0_max)):
+                    continue
+                guesses.append(self._build_initial_vector(float(t0), float(tE), float(u0)))
+
+        if not guesses:
+            t0 = float(clusters[0, 0])
+            teff = float(clusters[0, 1])
+            tE = min(max(teff / 0.1, float(cfg.auto_init_tE_min)), float(cfg.auto_init_tE_max))
+            u0 = min(max(teff / tE, float(cfg.auto_init_u0_min)), float(cfg.auto_init_u0_max))
+            guesses.append(self._build_initial_vector(t0, tE, u0))
+
+        return np.asarray(guesses, dtype=float)
+
+    def _build_initial_vector(self, t0: float, tE: float, u0: float) -> np.ndarray:
+        k = self.config.fitter_kind
+        if k == "pspl":
+            return np.asarray([t0, tE, u0], dtype=float)
+        if k == "fspl":
+            return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho)], dtype=float)
+        if k == "pspl_parallax":
+            return np.asarray([t0, tE, u0, 0.0, 0.0], dtype=float)
+        if k == "fspl_parallax":
+            return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho), 0.0, 0.0], dtype=float)
+        raise ValueError(f"Unknown fitter_kind '{k}'.")
 
     def _pick_best_candidate(
         self,
