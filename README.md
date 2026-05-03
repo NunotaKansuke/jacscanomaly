@@ -84,6 +84,11 @@ These commands produce two complementary visualizations:
    * A zoomed-in view around the best anomaly candidate
    * Residuals are shown together with the anomaly template and the flat model
 
+Example notebooks are available in `example/`:
+
+* `template_scan_example.ipynb` for the standard bell-template scan
+* `template_free_example.ipynb` for the template-free residual chi-square scan
+
 ---
 
 ## Method Overview

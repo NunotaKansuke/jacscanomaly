@@ -21,6 +21,7 @@ from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .runner import SeasonGridRunner
 from .models import AnomalyResult, BestCandidate
+from .template_free import TemplateFreeScanner, TemplateFreeSearchConfig, TemplateFreeSearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ class Finder:
         )
 
         self._last_result: Optional[AnomalyResult] = None
+        self._last_template_free_result: Optional[TemplateFreeSearchResult] = None
 
     def _ensure_fitter(self, t_ref) -> None:
         """
@@ -275,6 +277,38 @@ class Finder:
         )
 
         self._last_result = result
+        return result
+
+    def run_template_free(
+        self,
+        time,
+        flux,
+        ferr,
+        x0=None,
+        *,
+        fit: Optional[SingleLensFitResult] = None,
+        config: Optional[TemplateFreeSearchConfig] = None,
+    ) -> TemplateFreeSearchResult:
+        """
+        Run a template-free anomaly search on single-lens residuals.
+
+        This leaves the existing bell-template anomaly pipeline untouched.
+        """
+        time_j, flux_j, ferr_j, x0_j, time_np, _, ferr_np = self._to_arrays(
+            time, flux, ferr, x0
+        )
+
+        if fit is None:
+            self._ensure_fitter(float(np.median(time_np)))
+            if x0_j is None:
+                fit = self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
+            else:
+                fit = self.fitter.fit(time_j, flux_j, ferr_j, x0_j)
+
+        residual_np = np.asarray(jax.device_get(fit.residual), dtype=float)
+        scanner_config = TemplateFreeSearchConfig(gap=self.config.gap) if config is None else config
+        result = TemplateFreeScanner(scanner_config).run(time_np, residual_np, ferr_np)
+        self._last_template_free_result = result
         return result
 
     # ------------------------------------------------------------------
@@ -534,3 +568,11 @@ class Finder:
         """
         result = self._require_result()
         return self.plotter.plot_result(result, **kwargs)
+
+    def plot_template_free(self, **kwargs):
+        """
+        Plot the last template-free anomaly search result.
+        """
+        if self._last_template_free_result is None:
+            raise RuntimeError("Finder.run_template_free() has not been called yet.")
+        return self._last_template_free_result.plot(**kwargs)

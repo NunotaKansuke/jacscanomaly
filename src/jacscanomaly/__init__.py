@@ -14,6 +14,12 @@ from .singlelens_fit import (
     PSPLParallaxFitter,
     FSPLParallaxFitter,
 )
+from .template_free import (
+    TemplateFreeCandidate,
+    TemplateFreeScanner,
+    TemplateFreeSearchConfig,
+    TemplateFreeSearchResult,
+)
 
 __all__ = [
     "FinderConfig",
@@ -24,6 +30,10 @@ __all__ = [
     "PSPLParallaxFitter",
     "FSPLParallaxFitter",
     "SingleLensFitResult",
+    "TemplateFreeCandidate",
+    "TemplateFreeScanner",
+    "TemplateFreeSearchConfig",
+    "TemplateFreeSearchResult",
 ]
 
 __version__ = "0.1.1"
