@@ -39,3 +39,24 @@ def A_fspl_parallax_logrho_func(q: jnp.ndarray, time: jnp.ndarray, P) -> jnp.nda
     rho = jnp.exp(logrho)
     u = u_parallax(time, t0, tE, u0, piEN, piEE, P)
     return A_fspl_from_u(u, rho)
+
+
+def A_cv_asymexp_logtau_func(q: jnp.ndarray, time: jnp.ndarray) -> jnp.ndarray:
+    """
+    Asymmetric exponential CV template with sharp rise and slower decay.
+
+    Optimizer parameters
+    --------------------
+    q = (t0, log_tau_rise, log_tau_decay)
+
+    Returns
+    -------
+    A(t) with peak normalized to 1 at t=t0.
+    """
+    t0, log_tau_rise, log_tau_decay = q
+    tau_rise = jnp.exp(log_tau_rise)
+    tau_decay = jnp.exp(log_tau_decay)
+    dt = time - t0
+    rise = jnp.exp(dt / tau_rise)
+    decay = jnp.exp(-dt / tau_decay)
+    return jnp.where(dt < 0.0, rise, decay)

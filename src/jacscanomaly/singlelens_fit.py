@@ -15,6 +15,7 @@ from .singlelens_model import (
     A_fspl_logrho_func,
     A_pspl_parallax_func,
     A_fspl_parallax_logrho_func,
+    A_cv_asymexp_logtau_func,
 )
 from .trajectory import make_parallax_projector
 
@@ -332,6 +333,64 @@ class FSPLParallaxFitter:
             min_points=7,
             store_raw_params=True,
             parallax_projector=P,
+        )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        """Plot the light curve and best-fit model from the last fit."""
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
+        """Plot residuals from the last fit."""
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class CVFitter:
+    """
+    Cataclysmic-variable-like transient fitter.
+
+    Model shape is an asymmetric exponential:
+    - fast rise (tau_rise)
+    - slow decay (tau_decay)
+
+    Optimizer parameters: (t0, log_tau_rise, log_tau_decay)
+    Reported parameters:  (t0, tau_rise, tau_decay)
+    """
+
+    maxiter: int = 1000
+    damping_parameter: float = 1e-6
+    tol: float = 1e-3
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._last_fit: Optional[SingleLensFitResult] = None
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        """Fit a CV-shaped transient to a light curve."""
+        def build_A(q, t):
+            return A_cv_asymexp_logtau_func(q, t)
+
+        def q_to_params(q):
+            t0, log_tau_rise, log_tau_decay = q
+            return jnp.array([t0, jnp.exp(log_tau_rise), jnp.exp(log_tau_decay)])
+
+        fit = _fit_single_lens(
+            time=time, flux=flux, ferr=ferr, x0=q0,
+            build_A=build_A,
+            dof=3,
+            param_names=("t0", "tau_rise", "tau_decay"),
+            x_to_params=q_to_params,
+            maxiter=self.maxiter,
+            damping_parameter=self.damping_parameter,
+            tol=self.tol,
+            min_points=4,
+            store_raw_params=True,
         )
         self._last_fit = fit
         return fit
