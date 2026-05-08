@@ -6,6 +6,7 @@ jax_config.update("jax_enable_x64", True)
 
 from .config import FinderConfig
 from .finder import Finder
+from .models import AnomalyResult, BestCandidate, CandidateQuality, SeasonSummary
 from .plot import AnomalyPlotter
 from .singlelens_fit import (
     SingleLensFitResult,
@@ -24,6 +25,10 @@ from .template_free import (
 __all__ = [
     "FinderConfig",
     "Finder",
+    "AnomalyResult",
+    "BestCandidate",
+    "CandidateQuality",
+    "SeasonSummary",
     "AnomalyPlotter",
     "PSPLFitter",
     "FSPLFitter",

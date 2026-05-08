@@ -154,8 +154,8 @@ class FinderConfig:
     """
     Threshold parameter used in per-point chi-square improvement tests.
 
-    This parameter is kept mainly for compatibility with the original
-    ``n_out``-based logic used in early versions of the algorithm.
+    This threshold is used to count strongly contributing points in the
+    per-candidate quality diagnostics.
     """
 
     teff_coeff: float = 3.0

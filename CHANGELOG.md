@@ -6,6 +6,25 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [Unreleased]
+
+### Added
+- Candidate quality diagnostics for the grid scan, including `n_window`,
+  `n_contrib`, `n_eff`, `peak_frac`, `rho1`, and `longest_run`.
+- `AnomalyResult.grid_metrics_all` and per-season `SeasonSummary.grid_metrics`
+  for downstream inspection of grid-level diagnostics.
+- `BestCandidate.quality` for direct access to support and temporal diagnostics
+  of the selected candidate.
+- Summary helpers on `AnomalyResult`: `summary_dict()`, `summary_text()`,
+  `print_summary()`, and `summary_table()`.
+
+### Changed
+- Replaced the old internal `n_out` metric with richer per-candidate quality
+  diagnostics.
+- Updated documentation to show result summaries and candidate quality metrics.
+
+---
+
 ## [0.1.1] - 2026-01-21
 
 ### Added
@@ -64,4 +83,3 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
   `Finder` workflow.
 - Users providing custom initial guesses must ensure that the dimensionality of `x0`
   matches the selected single-lens model.
-

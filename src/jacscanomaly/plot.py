@@ -87,24 +87,40 @@ def _adaptive_single_lens_curve(
     min_time_step = max(float(min_time_step), np.finfo(float).eps)
 
     for _ in range(max_iter):
-        dx = np.diff(x)
-        dy = np.abs(np.diff(y))
-        split = (dy > max_flux_step) & (dx > min_time_step)
-        if not np.any(split):
+        if len(x) >= max_points:
             break
 
-        split_idx = np.flatnonzero(split)
+        dx = np.diff(x)
+        refineable = np.flatnonzero(dx > min_time_step)
+        if refineable.size == 0:
+            break
+
+        # Evaluate midpoints for all refineable intervals so we can check both
+        # jump size and curvature. Curvature = |y_mid - linear_interp| catches
+        # the "equal endpoints but bump in between" (trapezoid) case that a
+        # pure jump criterion misses.
+        mids = 0.5 * (x[refineable] + x[refineable + 1])
+        y_mids = _single_lens_model_flux(fit, mids)
+
+        dy_abs = np.abs(y[refineable + 1] - y[refineable])
+        y_interp = 0.5 * (y[refineable] + y[refineable + 1])
+        curvature = np.abs(y_mids - y_interp)
+
+        needs_split = (dy_abs > max_flux_step) | (curvature > max_flux_step)
+        if not needs_split.any():
+            break
+
+        ins = np.flatnonzero(needs_split)
         available = max_points - len(x)
         if available <= 0:
             break
-        if split_idx.size > available:
-            order = np.argsort(dy[split_idx])[-available:]
-            split_idx = np.sort(split_idx[order])
+        if ins.size > available:
+            priority = np.maximum(dy_abs[ins], curvature[ins])
+            order = np.argsort(priority)[-available:]
+            ins = np.sort(ins[order])
 
-        mids = 0.5 * (x[split_idx] + x[split_idx + 1])
-        y_mids = _single_lens_model_flux(fit, mids)
-        x = np.concatenate([x, mids])
-        y = np.concatenate([y, y_mids])
+        x = np.concatenate([x, mids[ins]])
+        y = np.concatenate([y, y_mids[ins]])
         order = np.argsort(x)
         x = x[order]
         y = y[order]

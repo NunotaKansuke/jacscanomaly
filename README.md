@@ -13,6 +13,8 @@ while remaining fast thanks to JAX.
 
 * **JAX-powered**: fast, vectorized grid scans with JIT compilation
 * **Scan-based anomaly detection** on residuals
+* **Candidate quality diagnostics**: effective contributing points,
+  peak-contribution fraction, and time-correlation metrics
 * **Built-in visualization**: PSPL fit, residuals, and anomaly scan summary
 
 ---
@@ -45,19 +47,10 @@ result = finder.run(time, flux, ferr)
 # p0 = np.array([10000, 10, 0.3])
 # result = finder.run(time, flux, ferr, p0)
 
-print("=== PSPL fit ===")
-t0_pspl, tE_pspl, u0_pspl = result.fit.params
-print(f"  t0          = {float(t0_pspl):.3f}")
-print(f"  tE          = {float(tE_pspl):.3f}")
-print(f"  u0          = {float(u0_pspl):.3f}")
-print(f"  chi2 / dof  = {result.chi2_dof:.3f}\n")
+result.print_summary()
 
-b = result.best
-print("=== Anomaly candidate ===")
-print(f"  t0          = {b.t0:.3f}")
-print(f"  teff        = {b.teff:.3f}")
-print(f"  dchi2       = {b.dchi2:.3e}")
-print(f"  score       = {b.score:.2f}")
+# In notebooks, get a one-row table:
+# display(result.summary_table())
 ```
 
 ---
@@ -139,6 +132,57 @@ This measures how strongly the best candidate stands out from the rest of the gr
 
 ---
 
+## Candidate Quality Diagnostics
+
+Large Δχ² values can sometimes be dominated by one or two points. To make this
+visible, `jacscanomaly` stores per-candidate support diagnostics in
+`result.best.quality` and per-grid diagnostics in `result.grid_metrics_all`.
+
+For the best candidate:
+
+```python
+q = result.best.quality
+print(q.n_window)     # points in the local chi2 window
+print(q.n_contrib)    # points above the per-point improvement threshold
+print(q.n_eff)        # effective number of contributing points
+print(q.peak_frac)    # strongest-point fraction of total positive improvement
+print(q.rho1)         # lag-1 autocorrelation of per-point improvements
+print(q.longest_run)  # longest consecutive run of contributing points
+```
+
+The effective point count is computed from positive per-point improvements
+using a participation-ratio style statistic:
+
+```
+n_eff = (sum_i u_i)^2 / sum_i u_i^2
+```
+
+where `u_i = max(0, chi2_flat_i - chi2_anomaly_i)`. A one-point-dominated
+candidate has `n_eff` close to 1 and a large `peak_frac`.
+
+`result.grid_metrics_all` is a NumPy array with columns:
+
+```
+[t0, teff, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run]
+```
+
+---
+
+## Result Summaries
+
+`AnomalyResult` provides both CLI-friendly and notebook-friendly summaries:
+
+```python
+result.print_summary()       # print formatted text
+text = result.summary_text() # return formatted text
+row = result.summary_dict()  # return a plain dictionary
+table = result.summary_table()  # pandas.DataFrame when pandas is installed
+```
+
+`print(result)` also shows the formatted summary text.
+
+---
+
 ## Configuration
 
 Key parameters are controlled via `FinderConfig`:
@@ -149,7 +193,7 @@ from jacscanomaly import FinderConfig
 config = FinderConfig(
     teff_init=0.03,      # initial anomaly timescale
     teff_grid_n=20,      # number of teff grid points
-    sigma=3.0,           # threshold for outlier counting
+    sigma=3.0,           # per-point improvement threshold for n_contrib
     best_score_trim_percentile=95.0,  # trim upper tail for best-candidate score
 )
 ```

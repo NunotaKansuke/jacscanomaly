@@ -20,7 +20,7 @@ from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .runner import SeasonGridRunner
-from .models import AnomalyResult, BestCandidate
+from .models import AnomalyResult, BestCandidate, CandidateQuality
 from .template_free import TemplateFreeScanner, TemplateFreeSearchConfig, TemplateFreeSearchResult
 
 logger = logging.getLogger(__name__)
@@ -252,7 +252,7 @@ class Finder:
         model_flux_np = np.asarray(model_flux_np, dtype=float)
         chi2_dof = float(chi2_dof)
 
-        seasons, clusters_all = self.runner.run(
+        seasons, clusters_all, grid_metrics_all = self.runner.run(
             time_j=time_j,
             residual_j=residual_j,
             ferr_j=ferr_j,
@@ -261,7 +261,7 @@ class Finder:
             log=log,
         )
 
-        best_obj = self._pick_best_candidate(clusters_all)
+        best_obj = self._pick_best_candidate(clusters_all, grid_metrics_all)
 
         result = AnomalyResult(
             time=time_np,
@@ -273,6 +273,7 @@ class Finder:
             chi2_dof=chi2_dof,
             seasons=seasons,
             clusters_all=clusters_all,
+            grid_metrics_all=grid_metrics_all,
             best=best_obj,
         )
 
@@ -412,7 +413,7 @@ class Finder:
             config=init_config,
         )
 
-        _, clusters = init_runner.run(
+        _, clusters, _ = init_runner.run(
             time_j=time_j,
             residual_j=flux_j,
             ferr_j=ferr_j,
@@ -484,6 +485,7 @@ class Finder:
     def _pick_best_candidate(
         self,
         clusters_all: np.ndarray,
+        grid_metrics_all: np.ndarray,
     ) -> Optional[BestCandidate]:
         """
         Select the strongest anomaly candidate from all extracted clusters.
@@ -523,6 +525,8 @@ class Finder:
         else:
             med = std = score = float("nan")
 
+        quality = self._quality_for_point(float(best[0]), float(best[1]), grid_metrics_all)
+
         return BestCandidate(
             t0=float(best[0]),
             teff=float(best[1]),
@@ -530,6 +534,31 @@ class Finder:
             med_others=med,
             std_others=std,
             score=float(score),
+            quality=quality,
+        )
+
+    @staticmethod
+    def _quality_for_point(t0: float, teff: float, grid_metrics_all: np.ndarray) -> CandidateQuality:
+        if grid_metrics_all is None or grid_metrics_all.size == 0:
+            return CandidateQuality(
+                n_window=0,
+                n_contrib=0,
+                n_eff=0.0,
+                peak_frac=0.0,
+                rho1=0.0,
+                longest_run=0,
+            )
+
+        dist = np.abs(grid_metrics_all[:, 0] - t0) + np.abs(grid_metrics_all[:, 1] - teff)
+        i = int(np.argmin(dist))
+        row = grid_metrics_all[i]
+        return CandidateQuality(
+            n_window=int(round(float(row[3]))),
+            n_contrib=int(round(float(row[4]))),
+            n_eff=float(row[5]),
+            peak_frac=float(row[6]),
+            rho1=float(row[7]),
+            longest_run=int(round(float(row[8]))),
         )
 
 
