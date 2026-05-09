@@ -121,8 +121,8 @@ class FinderConfig:
     pspl_fit_min_t0_support_points: int = 3
     """Minimum number of data points required near the fitted t0."""
 
-    pspl_fit_t0_support_window: float = 5.0
-    """Half-width in days used when counting data points near fitted t0."""
+    pspl_fit_t0_support_tE_coeff: float = 3.0
+    """Require t0 support points within +/- coeff * tE for C++ PSPL fits."""
 
     # ==================================================
     # 1) Season splitting

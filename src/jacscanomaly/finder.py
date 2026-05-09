@@ -144,7 +144,7 @@ class Finder:
                 self.fitter = CPPPSPLFitter(
                     u0_min=float(self.config.pspl_fit_u0_min),
                     min_t0_support_points=int(self.config.pspl_fit_min_t0_support_points),
-                    t0_support_window=float(self.config.pspl_fit_t0_support_window),
+                    t0_support_tE_coeff=float(self.config.pspl_fit_t0_support_tE_coeff),
                 )
             else:
                 self.fitter = PSPLFitter()

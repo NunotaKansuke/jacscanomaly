@@ -120,7 +120,7 @@ void pspl_residuals(
     Fit* out_fit = nullptr,
     double u0_min = 0.0,
     int min_t0_support_points = 0,
-    double t0_support_window = 0.0
+    double t0_support_tE_coeff = 0.0
 ) {
     const double t0 = q[0];
     const double tE = std::max(std::exp(q[1]), 1e-12);
@@ -132,8 +132,9 @@ void pspl_residuals(
         residual.assign(static_cast<size_t>(n), 1e100);
         return;
     }
-    if (min_t0_support_points > 0 && t0_support_window > 0.0) {
+    if (min_t0_support_points > 0 && t0_support_tE_coeff > 0.0) {
         int support = 0;
+        const double t0_support_window = t0_support_tE_coeff * tE;
         const double lo = t0 - t0_support_window;
         const double hi = t0 + t0_support_window;
         for (npy_intp i = 0; i < n; ++i) {
@@ -545,11 +546,11 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
     double tol = 1e-3;
     double u0_min = 0.01;
     int min_t0_support_points = 3;
-    double t0_support_window = 5.0;
+    double t0_support_tE_coeff = 3.0;
 
     static const char* kwlist[] = {
         "time", "flux", "ferr", "p0", "maxiter", "damping_parameter", "tol",
-        "u0_min", "min_t0_support_points", "t0_support_window", nullptr
+        "u0_min", "min_t0_support_points", "t0_support_tE_coeff", nullptr
     };
     if (!PyArg_ParseTupleAndKeywords(
             args,
@@ -565,7 +566,7 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
             &tol,
             &u0_min,
             &min_t0_support_points,
-            &t0_support_window
+            &t0_support_tE_coeff
         )) {
         return nullptr;
     }
@@ -622,7 +623,7 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
     double lambda = std::max(damping_parameter, 1e-12);
     std::vector<double> residual;
     Fit fit;
-    pspl_residuals(q, time, flux, ferr, n, residual, &fit, u0_min, min_t0_support_points, t0_support_window);
+    pspl_residuals(q, time, flux, ferr, n, residual, &fit, u0_min, min_t0_support_points, t0_support_tE_coeff);
     double chi2 = sumsq(residual);
 
     for (int iter = 0; iter < maxiter; ++iter) {
@@ -637,8 +638,8 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
             qm[k] -= step;
             std::vector<double> rp;
             std::vector<double> rm;
-            pspl_residuals(qp, time, flux, ferr, n, rp, nullptr, u0_min, min_t0_support_points, t0_support_window);
-            pspl_residuals(qm, time, flux, ferr, n, rm, nullptr, u0_min, min_t0_support_points, t0_support_window);
+            pspl_residuals(qp, time, flux, ferr, n, rp, nullptr, u0_min, min_t0_support_points, t0_support_tE_coeff);
+            pspl_residuals(qm, time, flux, ferr, n, rm, nullptr, u0_min, min_t0_support_points, t0_support_tE_coeff);
             jcol[k].resize(static_cast<size_t>(n));
             const double inv = 1.0 / (2.0 * step);
             for (npy_intp i = 0; i < n; ++i) {
@@ -678,7 +679,7 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
                 q_trial[2] = std::copysign(u0_min, q_trial[2] == 0.0 ? q[2] : q_trial[2]);
             }
             std::vector<double> trial_residual;
-            pspl_residuals(q_trial, time, flux, ferr, n, trial_residual, nullptr, u0_min, min_t0_support_points, t0_support_window);
+            pspl_residuals(q_trial, time, flux, ferr, n, trial_residual, nullptr, u0_min, min_t0_support_points, t0_support_tE_coeff);
             const double trial_chi2 = sumsq(trial_residual);
             if (std::isfinite(trial_chi2) && trial_chi2 < best_trial_chi2) {
                 best_trial_chi2 = trial_chi2;
@@ -706,7 +707,7 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
         }
     }
 
-    pspl_residuals(q, time, flux, ferr, n, residual, &fit, u0_min, min_t0_support_points, t0_support_window);
+    pspl_residuals(q, time, flux, ferr, n, residual, &fit, u0_min, min_t0_support_points, t0_support_tE_coeff);
     chi2 = sumsq(residual);
 
     npy_intp param_dims[1] = {3};

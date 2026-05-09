@@ -195,7 +195,7 @@ class CPPPSPLFitter:
     tol: float = 1e-3
     u0_min: float = 0.01
     min_t0_support_points: int = 3
-    t0_support_window: float = 5.0
+    t0_support_tE_coeff: float = 3.0
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
@@ -219,7 +219,7 @@ class CPPPSPLFitter:
             tol=float(self.tol),
             u0_min=float(self.u0_min),
             min_t0_support_points=int(self.min_t0_support_points),
-            t0_support_window=float(self.t0_support_window),
+            t0_support_tE_coeff=float(self.t0_support_tE_coeff),
         )
         n = int(time_np.shape[0])
         chi2_dof = float(chi2) / max(n - 3, 1)
