@@ -117,11 +117,38 @@ void pspl_residuals(
     const double* ferr,
     npy_intp n,
     std::vector<double>& residual,
-    Fit* out_fit = nullptr
+    Fit* out_fit = nullptr,
+    double u0_min = 0.0,
+    int min_t0_support_points = 0,
+    double t0_support_window = 0.0
 ) {
     const double t0 = q[0];
     const double tE = std::max(std::exp(q[1]), 1e-12);
     const double u0 = q[2];
+    if (std::abs(u0) < u0_min) {
+        if (out_fit != nullptr) {
+            *out_fit = {};
+        }
+        residual.assign(static_cast<size_t>(n), 1e100);
+        return;
+    }
+    if (min_t0_support_points > 0 && t0_support_window > 0.0) {
+        int support = 0;
+        const double lo = t0 - t0_support_window;
+        const double hi = t0 + t0_support_window;
+        for (npy_intp i = 0; i < n; ++i) {
+            if (time[i] >= lo && time[i] <= hi) {
+                ++support;
+            }
+        }
+        if (support < min_t0_support_points) {
+            if (out_fit != nullptr) {
+                *out_fit = {};
+            }
+            residual.assign(static_cast<size_t>(n), 1e100);
+            return;
+        }
+    }
     const Fit fit = fit_pspl_fluxes(t0, tE, u0, time, flux, ferr, n);
     if (out_fit != nullptr) {
         *out_fit = fit;
@@ -516,14 +543,18 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
     int maxiter = 1000;
     double damping_parameter = 1e-6;
     double tol = 1e-3;
+    double u0_min = 0.01;
+    int min_t0_support_points = 3;
+    double t0_support_window = 5.0;
 
     static const char* kwlist[] = {
-        "time", "flux", "ferr", "p0", "maxiter", "damping_parameter", "tol", nullptr
+        "time", "flux", "ferr", "p0", "maxiter", "damping_parameter", "tol",
+        "u0_min", "min_t0_support_points", "t0_support_window", nullptr
     };
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
-            "OOOO|idd",
+            "OOOO|idddid",
             const_cast<char**>(kwlist),
             &time_obj,
             &flux_obj,
@@ -531,7 +562,10 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
             &p0_obj,
             &maxiter,
             &damping_parameter,
-            &tol
+            &tol,
+            &u0_min,
+            &min_t0_support_points,
+            &t0_support_window
         )) {
         return nullptr;
     }
@@ -583,12 +617,12 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
     double q[3] = {
         p0[0],
         std::log(std::max(std::abs(p0[1]), 1e-12)),
-        p0[2],
+        std::abs(p0[2]) < u0_min ? std::copysign(u0_min, p0[2] == 0.0 ? 1.0 : p0[2]) : p0[2],
     };
     double lambda = std::max(damping_parameter, 1e-12);
     std::vector<double> residual;
     Fit fit;
-    pspl_residuals(q, time, flux, ferr, n, residual, &fit);
+    pspl_residuals(q, time, flux, ferr, n, residual, &fit, u0_min, min_t0_support_points, t0_support_window);
     double chi2 = sumsq(residual);
 
     for (int iter = 0; iter < maxiter; ++iter) {
@@ -603,8 +637,8 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
             qm[k] -= step;
             std::vector<double> rp;
             std::vector<double> rm;
-            pspl_residuals(qp, time, flux, ferr, n, rp);
-            pspl_residuals(qm, time, flux, ferr, n, rm);
+            pspl_residuals(qp, time, flux, ferr, n, rp, nullptr, u0_min, min_t0_support_points, t0_support_window);
+            pspl_residuals(qm, time, flux, ferr, n, rm, nullptr, u0_min, min_t0_support_points, t0_support_window);
             jcol[k].resize(static_cast<size_t>(n));
             const double inv = 1.0 / (2.0 * step);
             for (npy_intp i = 0; i < n; ++i) {
@@ -640,8 +674,11 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
             }
             double q_trial[3] = {q[0] + step_q[0], q[1] + step_q[1], q[2] + step_q[2]};
             q_trial[1] = std::min(std::max(q_trial[1], std::log(1e-6)), std::log(1e8));
+            if (std::abs(q_trial[2]) < u0_min) {
+                q_trial[2] = std::copysign(u0_min, q_trial[2] == 0.0 ? q[2] : q_trial[2]);
+            }
             std::vector<double> trial_residual;
-            pspl_residuals(q_trial, time, flux, ferr, n, trial_residual);
+            pspl_residuals(q_trial, time, flux, ferr, n, trial_residual, nullptr, u0_min, min_t0_support_points, t0_support_window);
             const double trial_chi2 = sumsq(trial_residual);
             if (std::isfinite(trial_chi2) && trial_chi2 < best_trial_chi2) {
                 best_trial_chi2 = trial_chi2;
@@ -669,7 +706,7 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
         }
     }
 
-    pspl_residuals(q, time, flux, ferr, n, residual, &fit);
+    pspl_residuals(q, time, flux, ferr, n, residual, &fit, u0_min, min_t0_support_points, t0_support_window);
     chi2 = sumsq(residual);
 
     npy_intp param_dims[1] = {3};

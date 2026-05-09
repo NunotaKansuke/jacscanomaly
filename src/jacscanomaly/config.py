@@ -115,6 +115,15 @@ class FinderConfig:
     auto_init_logrho: float = -7.0
     """Initial logrho used for FSPL models when x0 is omitted."""
 
+    pspl_fit_u0_min: float = 0.01
+    """Smallest allowed absolute u0 for the experimental C++ PSPL fitter."""
+
+    pspl_fit_min_t0_support_points: int = 3
+    """Minimum number of data points required near the fitted t0."""
+
+    pspl_fit_t0_support_window: float = 5.0
+    """Half-width in days used when counting data points near fitted t0."""
+
     # ==================================================
     # 1) Season splitting
     # ==================================================

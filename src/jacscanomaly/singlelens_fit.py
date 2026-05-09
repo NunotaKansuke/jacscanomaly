@@ -193,6 +193,9 @@ class CPPPSPLFitter:
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
+    u0_min: float = 0.01
+    min_t0_support_points: int = 3
+    t0_support_window: float = 5.0
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
@@ -214,6 +217,9 @@ class CPPPSPLFitter:
             maxiter=int(self.maxiter),
             damping_parameter=float(self.damping_parameter),
             tol=float(self.tol),
+            u0_min=float(self.u0_min),
+            min_t0_support_points=int(self.min_t0_support_points),
+            t0_support_window=float(self.t0_support_window),
         )
         n = int(time_np.shape[0])
         chi2_dof = float(chi2) / max(n - 3, 1)
