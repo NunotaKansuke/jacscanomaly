@@ -7,6 +7,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace {
 
@@ -28,6 +31,15 @@ double calc_a1(double t0, double teff, double t) {
     return (q + 2.0) / std::sqrt(q * (q + 4.0));
 }
 
+struct Window {
+    npy_intp start = 0;
+    npy_intp end = 0;
+
+    int size() const {
+        return static_cast<int>(end - start);
+    }
+};
+
 struct Fit {
     double a = 0.0;
     double b = 0.0;
@@ -43,19 +55,14 @@ Fit fit_weighted_line(
     const double* time,
     const double* flux,
     const double* weight,
-    npy_intp n,
-    double lo,
-    double hi
+    Window window
 ) {
     double sw = 0.0;
     double sx = 0.0;
     double sy = 0.0;
 
-    for (npy_intp i = 0; i < n; ++i) {
+    for (npy_intp i = window.start; i < window.end; ++i) {
         const double t = time[i];
-        if (!(t > lo && t < hi)) {
-            continue;
-        }
         const double w = weight[i];
         const double x = basis(t0, teff, t);
         sw += w;
@@ -70,11 +77,8 @@ Fit fit_weighted_line(
     const double y_mean = sy / sw;
     double wxx = 0.0;
     double wxy = 0.0;
-    for (npy_intp i = 0; i < n; ++i) {
+    for (npy_intp i = window.start; i < window.end; ++i) {
         const double t = time[i];
-        if (!(t > lo && t < hi)) {
-            continue;
-        }
         const double w = weight[i];
         const double xc = basis(t0, teff, t) - x_mean;
         const double yc = flux[i] - y_mean;
@@ -91,11 +95,8 @@ Fit fit_weighted_line(
     fit.valid = true;
 
     double chi2 = 0.0;
-    for (npy_intp i = 0; i < n; ++i) {
+    for (npy_intp i = window.start; i < window.end; ++i) {
         const double t = time[i];
-        if (!(t > lo && t < hi)) {
-            continue;
-        }
         const double model = fit.a * basis(t0, teff, t) + fit.b;
         const double r = flux[i] - model;
         chi2 += r * r * weight[i];
@@ -216,22 +217,25 @@ PyObject* run_grid(PyObject*, PyObject* args, PyObject* kwargs) {
         const double sigma2 = sigma * sigma;
 
         Py_BEGIN_ALLOW_THREADS
+        #pragma omp parallel for schedule(dynamic, 256)
         for (npy_intp g = 0; g < n_grid; ++g) {
             const double t0 = t0_grid[g];
             const double teff = teff_grid[g];
             const double lo = t0 - teff_coeff * teff;
             const double hi = t0 + teff_coeff * teff;
+            const double* begin = time;
+            const double* end = time + n;
+            const Window window{
+                static_cast<npy_intp>(std::upper_bound(begin, end, lo) - begin),
+                static_cast<npy_intp>(std::lower_bound(begin, end, hi) - begin),
+            };
 
-            int count = 0;
+            const int count = window.size();
             double sw = 0.0;
             double sy = 0.0;
-            for (npy_intp i = 0; i < n; ++i) {
-                const double t = time[i];
-                if (t > lo && t < hi) {
-                    ++count;
-                    sw += weight[i];
-                    sy += weight[i] * flux[i];
-                }
+            for (npy_intp i = window.start; i < window.end; ++i) {
+                sw += weight[i];
+                sy += weight[i] * flux[i];
             }
 
             if (count < min_pts || !(sw > 0.0)) {
@@ -247,16 +251,13 @@ PyObject* run_grid(PyObject*, PyObject* args, PyObject* kwargs) {
 
             const double mu = sy / sw;
             double chi2_flat = 0.0;
-            for (npy_intp i = 0; i < n; ++i) {
-                const double t = time[i];
-                if (t > lo && t < hi) {
-                    const double r = flux[i] - mu;
-                    chi2_flat += r * r * weight[i];
-                }
+            for (npy_intp i = window.start; i < window.end; ++i) {
+                const double r = flux[i] - mu;
+                chi2_flat += r * r * weight[i];
             }
 
-            Fit fit0 = fit_weighted_line(calc_a0, t0, teff, time, flux, weight, n, lo, hi);
-            Fit fit1 = fit_weighted_line(calc_a1, t0, teff, time, flux, weight, n, lo, hi);
+            Fit fit0 = fit_weighted_line(calc_a0, t0, teff, time, flux, weight, window);
+            Fit fit1 = fit_weighted_line(calc_a1, t0, teff, time, flux, weight, window);
             const bool choose0 = fit0.valid && (!fit1.valid || fit0.chi2 < fit1.chi2);
             const Fit fit = choose0 ? fit0 : fit1;
             if (!fit.valid) {
@@ -279,11 +280,8 @@ PyObject* run_grid(PyObject*, PyObject* args, PyObject* kwargs) {
             int current_run = 0;
             int longest_run = 0;
 
-            for (npy_intp i = 0; i < n; ++i) {
+            for (npy_intp i = window.start; i < window.end; ++i) {
                 const double t = time[i];
-                if (!(t > lo && t < hi)) {
-                    continue;
-                }
                 const double r_flat = flux[i] - mu;
                 const double a = choose0 ? calc_a0(t0, teff, t) : calc_a1(t0, teff, t);
                 const double r_anom = flux[i] - (fit.a * a + fit.b);
@@ -311,12 +309,8 @@ PyObject* run_grid(PyObject*, PyObject* args, PyObject* kwargs) {
             int pairs = 0;
             bool have_prev = false;
             double prev_centered = 0.0;
-            for (npy_intp i = 0; i < n; ++i) {
+            for (npy_intp i = window.start; i < window.end; ++i) {
                 const double t = time[i];
-                if (!(t > lo && t < hi)) {
-                    have_prev = false;
-                    continue;
-                }
                 const double r_flat = flux[i] - mu;
                 const double a = choose0 ? calc_a0(t0, teff, t) : calc_a1(t0, teff, t);
                 const double r_anom = flux[i] - (fit.a * a + fit.b);

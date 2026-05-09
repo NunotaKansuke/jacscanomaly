@@ -11,7 +11,8 @@ setup(
             ["src/jacscanomaly/_cpp_grid.cpp"],
             include_dirs=[np.get_include()],
             language="c++",
-            extra_compile_args=["-O3", "-std=c++17"],
+            extra_compile_args=["-O3", "-std=c++17", "-fopenmp"],
+            extra_link_args=["-fopenmp"],
         )
     ]
 )
