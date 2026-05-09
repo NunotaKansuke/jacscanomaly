@@ -5,12 +5,13 @@ __pycache__/
 .env
 .codex
 .claude
+nunolog
 
 # build artifacts
 dist/
 build/
 *.egg-info/
+*.so
 
 # local test tools
 test_tool/
-

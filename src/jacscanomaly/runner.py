@@ -17,6 +17,11 @@ from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .anomaly_models import get_chi2_anom_masked, get_chi2_flat_masked
 
+try:
+    from . import _cpp_grid
+except ImportError:  # pragma: no cover - optional compiled backend
+    _cpp_grid = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -368,14 +373,40 @@ class SeasonGridRunner:
             if verbose:
                 log.info("  -> grid: n_grid=%d", n_grid)
 
+            t0_flat_np = np.concatenate(t0_flat_list).astype(float, copy=False)
+            teff_flat_np = np.concatenate(teff_flat_list).astype(float, copy=False)
+
             # JAX arrays for the grid
-            t0_flat = jnp.asarray(np.concatenate(t0_flat_list), dtype=jnp.float64)
-            teff_flat = jnp.asarray(np.concatenate(teff_flat_list), dtype=jnp.float64)
+            t0_flat = jnp.asarray(t0_flat_np, dtype=jnp.float64)
+            teff_flat = jnp.asarray(teff_flat_np, dtype=jnp.float64)
 
             # ---- timed block: grid run
             t_grid0 = time.perf_counter()
 
-            if self.config.grid_chunk_auto:
+            used_cpp_backend = self.config.grid_backend == "cpp"
+            if used_cpp_backend:
+                if _cpp_grid is None:
+                    raise RuntimeError(
+                        "FinderConfig(grid_backend='cpp') requires the compiled jacscanomaly._cpp_grid extension."
+                    )
+                if verbose:
+                    log.info("  -> grid exec: cpp")
+                t_season_np = np.asarray(device_get(t_season), dtype=float)
+                r_season_np = np.asarray(device_get(r_season), dtype=float)
+                w_season_np = np.asarray(device_get(w_season), dtype=float)
+                dchi2_np, nwin_np, ncontrib_np, neff_np, peak_np, rho1_np, longest_np = _cpp_grid.run_grid(
+                    t_season_np,
+                    r_season_np,
+                    w_season_np,
+                    t0_flat_np,
+                    teff_flat_np,
+                    sigma=float(self.config.sigma),
+                    teff_coeff=float(self.config.teff_coeff),
+                    min_pts=int(self.config.min_pts_in_window),
+                )
+                t0_np_out = t0_flat_np
+                teff_np_out = teff_flat_np
+            elif self.config.grid_chunk_auto:
                 if verbose:
                     log.info("  -> grid exec: chunked(auto,size=%d)", self.config.grid_chunk_size)
                 t0_out, teff_out, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run = GridRunner.run_auto(
@@ -409,15 +440,19 @@ class SeasonGridRunner:
                     min_pts=self.config.min_pts_in_window,
                 )
 
-            block_until_ready(dchi2)
-            dt_grid = time.perf_counter() - t_grid0
+            if used_cpp_backend:
+                dt_grid = time.perf_counter() - t_grid0
+                dt_copy = 0.0
+            else:
+                block_until_ready(dchi2)
+                dt_grid = time.perf_counter() - t_grid0
 
-            # bring results back to CPU in one call
-            t_copy0 = time.perf_counter()
-            t0_np_out, teff_np_out, dchi2_np, nwin_np, ncontrib_np, neff_np, peak_np, rho1_np, longest_np = device_get(
-                (t0_out, teff_out, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run)
-            )
-            dt_copy = time.perf_counter() - t_copy0
+                # bring results back to CPU in one call
+                t_copy0 = time.perf_counter()
+                t0_np_out, teff_np_out, dchi2_np, nwin_np, ncontrib_np, neff_np, peak_np, rho1_np, longest_np = device_get(
+                    (t0_out, teff_out, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run)
+                )
+                dt_copy = time.perf_counter() - t_copy0
 
             grid_metrics = np.column_stack(
                 [

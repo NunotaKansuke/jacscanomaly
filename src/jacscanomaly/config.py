@@ -208,6 +208,14 @@ class FinderConfig:
     # 5) Grid execution mode
     # ==================================================
     
+    grid_backend: Literal["jax", "cpp"] = "jax"
+    """
+    Grid evaluation backend.
+
+    - ``"jax"`` keeps the existing JAX vectorized/chunked implementation.
+    - ``"cpp"`` uses the experimental C++ for-loop backend for lower peak memory.
+    """
+
     grid_chunked: bool = False
     """
     Force chunked execution of the grid scan.
