@@ -19,6 +19,11 @@ from .singlelens_model import (
 )
 from .trajectory import make_parallax_projector
 
+try:
+    from . import _cpp_grid
+except ImportError:  # pragma: no cover - optional compiled backend
+    _cpp_grid = None
+
 
 @dataclass(frozen=True)
 class SingleLensFitResult:
@@ -170,6 +175,70 @@ class PSPLFitter:
 
     def plot_residual(self, **kwargs):
         """Plot residuals from the last fit."""
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class CPPPSPLFitter:
+    """
+    Experimental C++ PSPL fitter.
+
+    Nonlinear parameters are optimized with a small finite-difference
+    Levenberg-Marquardt implementation in the compiled extension. The linear
+    flux parameters are solved analytically at each evaluation.
+    """
+
+    maxiter: int = 1000
+    damping_parameter: float = 1e-6
+    tol: float = 1e-3
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._last_fit: Optional[SingleLensFitResult] = None
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, p0: jnp.ndarray) -> SingleLensFitResult:
+        if _cpp_grid is None:
+            raise RuntimeError("CPPPSPLFitter requires the compiled jacscanomaly._cpp_grid extension.")
+
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.asarray(ferr, dtype=float)
+        p0_np = np.asarray(p0, dtype=float)
+        params, fs, fb, chi2, model_flux, residual = _cpp_grid.fit_pspl(
+            time_np,
+            flux_np,
+            ferr_np,
+            p0_np,
+            maxiter=int(self.maxiter),
+            damping_parameter=float(self.damping_parameter),
+            tol=float(self.tol),
+        )
+        n = int(time_np.shape[0])
+        chi2_dof = float(chi2) / max(n - 3, 1)
+        fit = SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=jnp.asarray(params),
+            param_names=("t0", "tE", "u0"),
+            chi2=jnp.asarray(float(chi2)),
+            chi2_dof=jnp.asarray(chi2_dof),
+            fs=jnp.asarray(float(fs)),
+            fb=jnp.asarray(float(fb)),
+            model_flux=jnp.asarray(model_flux),
+            residual=jnp.asarray(residual),
+        )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
         if self._last_fit is None:
             raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_residual(self._last_fit, **kwargs)

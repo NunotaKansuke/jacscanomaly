@@ -12,6 +12,7 @@ from .config import FinderConfig
 from .singlelens_fit import (
     SingleLensFitResult,
     PSPLFitter,
+    CPPPSPLFitter,
     FSPLFitter,
     PSPLParallaxFitter,
     FSPLParallaxFitter,
@@ -139,7 +140,10 @@ class Finder:
         # 3) Build fitter
         # -----------------------------
         if k == "pspl":
-            self.fitter = PSPLFitter()
+            if self.config.single_fit_backend == "cpp":
+                self.fitter = CPPPSPLFitter()
+            else:
+                self.fitter = PSPLFitter()
             return
     
         if k == "fspl":

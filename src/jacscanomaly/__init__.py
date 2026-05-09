@@ -11,6 +11,7 @@ from .plot import AnomalyPlotter
 from .singlelens_fit import (
     SingleLensFitResult,
     PSPLFitter,
+    CPPPSPLFitter,
     FSPLFitter,
     PSPLParallaxFitter,
     FSPLParallaxFitter,
@@ -32,6 +33,7 @@ __all__ = [
     "SeasonSummary",
     "AnomalyPlotter",
     "PSPLFitter",
+    "CPPPSPLFitter",
     "FSPLFitter",
     "PSPLParallaxFitter",
     "FSPLParallaxFitter",

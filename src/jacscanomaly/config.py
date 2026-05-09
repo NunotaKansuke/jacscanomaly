@@ -216,6 +216,14 @@ class FinderConfig:
     - ``"cpp"`` uses the experimental C++ for-loop backend for lower peak memory.
     """
 
+    single_fit_backend: Literal["jax", "cpp"] = "jax"
+    """
+    Single-lens fit backend.
+
+    ``"cpp"`` is currently implemented for ``fitter_kind="pspl"`` only.
+    Other single-lens models continue to use the JAX fitter.
+    """
+
     grid_chunked: bool = False
     """
     Force chunked execution of the grid scan.

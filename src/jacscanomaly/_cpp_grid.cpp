@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <vector>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -46,6 +47,149 @@ struct Fit {
     double chi2 = 0.0;
     bool valid = false;
 };
+
+double pspl_magnification(double t0, double tE, double u0, double t) {
+    const double tau = (t - t0) / tE;
+    const double u = std::sqrt(tau * tau + u0 * u0);
+    const double u_safe = std::max(u, 1e-12);
+    return (u_safe * u_safe + 2.0) / (u_safe * std::sqrt(u_safe * u_safe + 4.0));
+}
+
+Fit fit_pspl_fluxes(
+    double t0,
+    double tE,
+    double u0,
+    const double* time,
+    const double* flux,
+    const double* ferr,
+    npy_intp n
+) {
+    double sw = 0.0;
+    double sx = 0.0;
+    double sy = 0.0;
+    for (npy_intp i = 0; i < n; ++i) {
+        const double fe = std::max(ferr[i], 1e-12);
+        const double w = 1.0 / (fe * fe);
+        const double a = pspl_magnification(t0, tE, u0, time[i]);
+        sw += w;
+        sx += w * a;
+        sy += w * flux[i];
+    }
+    if (!(sw > 0.0)) {
+        return {};
+    }
+
+    const double x_mean = sx / sw;
+    const double y_mean = sy / sw;
+    double wxx = 0.0;
+    double wxy = 0.0;
+    for (npy_intp i = 0; i < n; ++i) {
+        const double fe = std::max(ferr[i], 1e-12);
+        const double w = 1.0 / (fe * fe);
+        const double xc = pspl_magnification(t0, tE, u0, time[i]) - x_mean;
+        const double yc = flux[i] - y_mean;
+        wxx += w * xc * xc;
+        wxy += w * xc * yc;
+    }
+    if (!(wxx > 0.0)) {
+        return {};
+    }
+
+    Fit fit;
+    fit.a = wxy / wxx;
+    fit.b = y_mean - fit.a * x_mean;
+    fit.valid = true;
+    double chi2 = 0.0;
+    for (npy_intp i = 0; i < n; ++i) {
+        const double fe = std::max(ferr[i], 1e-12);
+        const double model = fit.a * pspl_magnification(t0, tE, u0, time[i]) + fit.b;
+        const double r = (flux[i] - model) / fe;
+        chi2 += r * r;
+    }
+    fit.chi2 = chi2;
+    return fit;
+}
+
+void pspl_residuals(
+    const double q[3],
+    const double* time,
+    const double* flux,
+    const double* ferr,
+    npy_intp n,
+    std::vector<double>& residual,
+    Fit* out_fit = nullptr
+) {
+    const double t0 = q[0];
+    const double tE = std::max(std::exp(q[1]), 1e-12);
+    const double u0 = q[2];
+    const Fit fit = fit_pspl_fluxes(t0, tE, u0, time, flux, ferr, n);
+    if (out_fit != nullptr) {
+        *out_fit = fit;
+    }
+    residual.resize(static_cast<size_t>(n));
+    if (!fit.valid) {
+        std::fill(residual.begin(), residual.end(), 1e100);
+        return;
+    }
+    for (npy_intp i = 0; i < n; ++i) {
+        const double fe = std::max(ferr[i], 1e-12);
+        const double model = fit.a * pspl_magnification(t0, tE, u0, time[i]) + fit.b;
+        residual[static_cast<size_t>(i)] = (flux[i] - model) / fe;
+    }
+}
+
+double dot_vec(const std::vector<double>& a, const std::vector<double>& b) {
+    double out = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        out += a[i] * b[i];
+    }
+    return out;
+}
+
+bool solve_3x3(double a[3][3], double b[3], double x[3]) {
+    double m[3][4] = {
+        {a[0][0], a[0][1], a[0][2], b[0]},
+        {a[1][0], a[1][1], a[1][2], b[1]},
+        {a[2][0], a[2][1], a[2][2], b[2]},
+    };
+    for (int col = 0; col < 3; ++col) {
+        int pivot = col;
+        for (int row = col + 1; row < 3; ++row) {
+            if (std::abs(m[row][col]) > std::abs(m[pivot][col])) {
+                pivot = row;
+            }
+        }
+        if (std::abs(m[pivot][col]) < 1e-30) {
+            return false;
+        }
+        if (pivot != col) {
+            for (int k = col; k < 4; ++k) {
+                std::swap(m[col][k], m[pivot][k]);
+            }
+        }
+        const double div = m[col][col];
+        for (int k = col; k < 4; ++k) {
+            m[col][k] /= div;
+        }
+        for (int row = 0; row < 3; ++row) {
+            if (row == col) {
+                continue;
+            }
+            const double factor = m[row][col];
+            for (int k = col; k < 4; ++k) {
+                m[row][k] -= factor * m[col][k];
+            }
+        }
+    }
+    x[0] = m[0][3];
+    x[1] = m[1][3];
+    x[2] = m[2][3];
+    return true;
+}
+
+double sumsq(const std::vector<double>& r) {
+    return dot_vec(r, r);
+}
 
 template <typename Func>
 Fit fit_weighted_line(
@@ -364,12 +508,220 @@ fail:
     return nullptr;
 }
 
+PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject* time_obj = nullptr;
+    PyObject* flux_obj = nullptr;
+    PyObject* ferr_obj = nullptr;
+    PyObject* p0_obj = nullptr;
+    int maxiter = 1000;
+    double damping_parameter = 1e-6;
+    double tol = 1e-3;
+
+    static const char* kwlist[] = {
+        "time", "flux", "ferr", "p0", "maxiter", "damping_parameter", "tol", nullptr
+    };
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OOOO|idd",
+            const_cast<char**>(kwlist),
+            &time_obj,
+            &flux_obj,
+            &ferr_obj,
+            &p0_obj,
+            &maxiter,
+            &damping_parameter,
+            &tol
+        )) {
+        return nullptr;
+    }
+
+    PyArrayObject* time_arr = as_double_array(time_obj);
+    PyArrayObject* flux_arr = as_double_array(flux_obj);
+    PyArrayObject* ferr_arr = as_double_array(ferr_obj);
+    PyArrayObject* p0_arr = as_double_array(p0_obj);
+    if (!time_arr || !flux_arr || !ferr_arr || !p0_arr) {
+        Py_XDECREF(time_arr);
+        Py_XDECREF(flux_arr);
+        Py_XDECREF(ferr_arr);
+        Py_XDECREF(p0_arr);
+        return nullptr;
+    }
+    if (PyArray_NDIM(time_arr) != 1 || PyArray_NDIM(flux_arr) != 1 ||
+        PyArray_NDIM(ferr_arr) != 1 || PyArray_NDIM(p0_arr) != 1) {
+        PyErr_SetString(PyExc_ValueError, "time, flux, ferr, and p0 must be one-dimensional arrays");
+        Py_DECREF(time_arr);
+        Py_DECREF(flux_arr);
+        Py_DECREF(ferr_arr);
+        Py_DECREF(p0_arr);
+        return nullptr;
+    }
+
+    const npy_intp n = PyArray_DIM(time_arr, 0);
+    if (PyArray_DIM(flux_arr, 0) != n || PyArray_DIM(ferr_arr, 0) != n || PyArray_DIM(p0_arr, 0) < 3) {
+        PyErr_SetString(PyExc_ValueError, "invalid input shapes for fit_pspl");
+        Py_DECREF(time_arr);
+        Py_DECREF(flux_arr);
+        Py_DECREF(ferr_arr);
+        Py_DECREF(p0_arr);
+        return nullptr;
+    }
+    if (n < 4) {
+        PyErr_SetString(PyExc_ValueError, "Need at least 4 data points for PSPL fit.");
+        Py_DECREF(time_arr);
+        Py_DECREF(flux_arr);
+        Py_DECREF(ferr_arr);
+        Py_DECREF(p0_arr);
+        return nullptr;
+    }
+
+    const double* time = static_cast<const double*>(PyArray_DATA(time_arr));
+    const double* flux = static_cast<const double*>(PyArray_DATA(flux_arr));
+    const double* ferr = static_cast<const double*>(PyArray_DATA(ferr_arr));
+    const double* p0 = static_cast<const double*>(PyArray_DATA(p0_arr));
+
+    double q[3] = {
+        p0[0],
+        std::log(std::max(std::abs(p0[1]), 1e-12)),
+        p0[2],
+    };
+    double lambda = std::max(damping_parameter, 1e-12);
+    std::vector<double> residual;
+    Fit fit;
+    pspl_residuals(q, time, flux, ferr, n, residual, &fit);
+    double chi2 = sumsq(residual);
+
+    for (int iter = 0; iter < maxiter; ++iter) {
+        double jac_cols[3][1];  // placeholder to keep the stack small; columns live in vectors below.
+        (void)jac_cols;
+        std::vector<double> jcol[3];
+        for (int k = 0; k < 3; ++k) {
+            double qp[3] = {q[0], q[1], q[2]};
+            double qm[3] = {q[0], q[1], q[2]};
+            const double step = 1e-5 * std::max(std::abs(q[k]), 1.0);
+            qp[k] += step;
+            qm[k] -= step;
+            std::vector<double> rp;
+            std::vector<double> rm;
+            pspl_residuals(qp, time, flux, ferr, n, rp);
+            pspl_residuals(qm, time, flux, ferr, n, rm);
+            jcol[k].resize(static_cast<size_t>(n));
+            const double inv = 1.0 / (2.0 * step);
+            for (npy_intp i = 0; i < n; ++i) {
+                jcol[k][static_cast<size_t>(i)] = (rp[static_cast<size_t>(i)] - rm[static_cast<size_t>(i)]) * inv;
+            }
+        }
+
+        double jtj[3][3] = {};
+        double rhs[3] = {};
+        for (int a = 0; a < 3; ++a) {
+            rhs[a] = -dot_vec(jcol[a], residual);
+            for (int b = 0; b < 3; ++b) {
+                jtj[a][b] = dot_vec(jcol[a], jcol[b]);
+            }
+        }
+
+        double step_q[3] = {};
+        bool accepted = false;
+        double best_trial_chi2 = chi2;
+        double best_trial_q[3] = {q[0], q[1], q[2]};
+        for (int attempt = 0; attempt < 12; ++attempt) {
+            double a[3][3] = {
+                {jtj[0][0], jtj[0][1], jtj[0][2]},
+                {jtj[1][0], jtj[1][1], jtj[1][2]},
+                {jtj[2][0], jtj[2][1], jtj[2][2]},
+            };
+            for (int k = 0; k < 3; ++k) {
+                a[k][k] += lambda * std::max(jtj[k][k], 1.0);
+            }
+            if (!solve_3x3(a, rhs, step_q)) {
+                lambda *= 10.0;
+                continue;
+            }
+            double q_trial[3] = {q[0] + step_q[0], q[1] + step_q[1], q[2] + step_q[2]};
+            q_trial[1] = std::min(std::max(q_trial[1], std::log(1e-6)), std::log(1e8));
+            std::vector<double> trial_residual;
+            pspl_residuals(q_trial, time, flux, ferr, n, trial_residual);
+            const double trial_chi2 = sumsq(trial_residual);
+            if (std::isfinite(trial_chi2) && trial_chi2 < best_trial_chi2) {
+                best_trial_chi2 = trial_chi2;
+                best_trial_q[0] = q_trial[0];
+                best_trial_q[1] = q_trial[1];
+                best_trial_q[2] = q_trial[2];
+                residual.swap(trial_residual);
+                accepted = true;
+                break;
+            }
+            lambda *= 10.0;
+        }
+
+        if (!accepted) {
+            break;
+        }
+        const double prev_chi2 = chi2;
+        q[0] = best_trial_q[0];
+        q[1] = best_trial_q[1];
+        q[2] = best_trial_q[2];
+        chi2 = best_trial_chi2;
+        lambda = std::max(lambda * 0.3, 1e-12);
+        if (std::abs(prev_chi2 - chi2) < tol) {
+            break;
+        }
+    }
+
+    pspl_residuals(q, time, flux, ferr, n, residual, &fit);
+    chi2 = sumsq(residual);
+
+    npy_intp param_dims[1] = {3};
+    npy_intp data_dims[1] = {n};
+    PyArrayObject* params_arr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, param_dims, NPY_DOUBLE));
+    PyArrayObject* model_arr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, data_dims, NPY_DOUBLE));
+    PyArrayObject* residual_arr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, data_dims, NPY_DOUBLE));
+    if (!params_arr || !model_arr || !residual_arr) {
+        Py_XDECREF(params_arr);
+        Py_XDECREF(model_arr);
+        Py_XDECREF(residual_arr);
+        Py_DECREF(time_arr);
+        Py_DECREF(flux_arr);
+        Py_DECREF(ferr_arr);
+        Py_DECREF(p0_arr);
+        return nullptr;
+    }
+
+    const double t0 = q[0];
+    const double tE = std::max(std::exp(q[1]), 1e-12);
+    const double u0 = q[2];
+    double* params = static_cast<double*>(PyArray_DATA(params_arr));
+    params[0] = t0;
+    params[1] = tE;
+    params[2] = u0;
+    double* model = static_cast<double*>(PyArray_DATA(model_arr));
+    double* residual_out = static_cast<double*>(PyArray_DATA(residual_arr));
+    for (npy_intp i = 0; i < n; ++i) {
+        model[i] = fit.a * pspl_magnification(t0, tE, u0, time[i]) + fit.b;
+        residual_out[i] = flux[i] - model[i];
+    }
+
+    Py_DECREF(time_arr);
+    Py_DECREF(flux_arr);
+    Py_DECREF(ferr_arr);
+    Py_DECREF(p0_arr);
+
+    return Py_BuildValue("NdddNN", params_arr, fit.a, fit.b, chi2, model_arr, residual_arr);
+}
+
 PyMethodDef methods[] = {
     {
         "run_grid",
         reinterpret_cast<PyCFunction>(run_grid),
         METH_VARARGS | METH_KEYWORDS,
         "Evaluate anomaly grid points with a plain C++ for-loop backend.",
+    },
+    {
+        "fit_pspl",
+        reinterpret_cast<PyCFunction>(fit_pspl),
+        METH_VARARGS | METH_KEYWORDS,
+        "Fit a PSPL single-lens model with a small C++ Levenberg-Marquardt solver.",
     },
     {nullptr, nullptr, 0, nullptr},
 };
