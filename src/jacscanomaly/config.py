@@ -88,6 +88,15 @@ class FinderConfig:
     auto_init_max_clusters: int = 1
     """Maximum number of scan clusters used as t0/teff seeds."""
 
+    auto_init_min_n_eff: float = 2.0
+    """
+    Minimum effective number of contributing points required for automatic
+    single-lens initial grid clusters.
+
+    This suppresses initial guesses driven by one unrealistically high-weight
+    data point.
+    """
+
     auto_init_u0_min: float = 0.01
     """Smallest allowed u0 seed after converting from teff/tE."""
 

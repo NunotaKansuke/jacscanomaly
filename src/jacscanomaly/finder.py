@@ -417,7 +417,7 @@ class Finder:
             config=init_config,
         )
 
-        _, clusters, _ = init_runner.run(
+        _, clusters, grid_metrics = init_runner.run(
             time_j=time_j,
             residual_j=flux_j,
             ferr_j=ferr_j,
@@ -429,7 +429,24 @@ class Finder:
         if clusters.size:
             clusters = clusters[np.isfinite(clusters).all(axis=1)]
             clusters = clusters[clusters[:, 2] > 0]
-            order = np.argsort(clusters[:, 2])[::-1]
+            grid_metrics = np.asarray(grid_metrics, dtype=float)
+            if grid_metrics.size:
+                qualities = np.asarray(
+                    [
+                        self._grid_quality_for_cluster(float(row[0]), float(row[1]), grid_metrics)
+                        for row in clusters
+                    ],
+                    dtype=float,
+                )
+                pass_eff = qualities[:, 0] >= float(cfg.auto_init_min_n_eff)
+                if np.any(pass_eff):
+                    clusters = clusters[pass_eff]
+                    qualities = qualities[pass_eff]
+                    order = np.argsort(clusters[:, 2])[::-1]
+                else:
+                    order = np.lexsort((-clusters[:, 2], -qualities[:, 0]))
+            else:
+                order = np.argsort(clusters[:, 2])[::-1]
             clusters = clusters[order[: max(1, int(cfg.auto_init_max_clusters))]]
 
         if clusters.size == 0:
@@ -473,6 +490,13 @@ class Finder:
             guesses.append(self._build_initial_vector(t0, tE, u0))
 
         return np.asarray(guesses, dtype=float)
+
+    @staticmethod
+    def _grid_quality_for_cluster(t0: float, teff: float, metrics: np.ndarray) -> tuple[float, float]:
+        if metrics.size == 0:
+            return 0.0, 0.0
+        i = int(np.argmin(np.abs(metrics[:, 0] - t0) + np.abs(metrics[:, 1] - teff)))
+        return float(metrics[i, 5]), float(metrics[i, 6])
 
     def _build_initial_vector(self, t0: float, tE: float, u0: float) -> np.ndarray:
         k = self.config.fitter_kind
