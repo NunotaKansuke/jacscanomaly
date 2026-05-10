@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 
 from .config import FinderConfig
+from .criteria import CandidateCriteria
 from .singlelens_fit import (
     SingleLensFitResult,
     PSPLFitter,
@@ -525,9 +526,22 @@ class Finder:
         if clusters_all is None or clusters_all.size == 0:
             return None
 
-        max_ind = int(np.argmax(clusters_all[:, 2]))
-        best = clusters_all[max_ind]
-        others = np.delete(clusters_all, max_ind, axis=0)
+        criteria: CandidateCriteria | None = self.config.candidate_criteria
+        if criteria is not None:
+            accepted = []
+            for row in clusters_all:
+                quality_i = self._quality_for_point(float(row[0]), float(row[1]), grid_metrics_all)
+                if criteria.accepts(dchi2=float(row[2]), quality=quality_i):
+                    accepted.append(row)
+            if not accepted:
+                return None
+            clusters_use = np.asarray(accepted, dtype=float)
+        else:
+            clusters_use = clusters_all
+
+        max_ind = int(np.argmax(clusters_use[:, 2]))
+        best = clusters_use[max_ind]
+        others = np.delete(clusters_use, max_ind, axis=0)
 
         if others.shape[0] >= 2:
             other_dchi2 = others[:, 2]

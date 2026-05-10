@@ -5,6 +5,7 @@ from jax import config as jax_config
 jax_config.update("jax_enable_x64", True)
 
 from .config import FinderConfig
+from .criteria import CandidateCriteria
 from .finder import Finder
 from .models import AnomalyResult, BestCandidate, CandidateQuality, SeasonSummary
 from .plot import AnomalyPlotter
@@ -26,6 +27,7 @@ from .template_free import (
 
 __all__ = [
     "FinderConfig",
+    "CandidateCriteria",
     "Finder",
     "AnomalyResult",
     "BestCandidate",

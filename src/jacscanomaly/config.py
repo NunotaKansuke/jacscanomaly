@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Literal
 
+from .criteria import CandidateCriteria
 
 @dataclass(frozen=True)
 class FinderConfig:
@@ -220,6 +221,12 @@ class FinderConfig:
     that would otherwise inflate the background standard deviation.
 
     Set to ``100`` to disable trimming.
+    """
+
+    candidate_criteria: Optional[CandidateCriteria] = None
+    """
+    Optional criteria to reject anomaly candidates before best-candidate
+    selection. If ``None``, no additional filtering is applied.
     """
 
     # ==================================================
