@@ -526,18 +526,10 @@ class Finder:
         if clusters_all is None or clusters_all.size == 0:
             return None
 
-        criteria: CandidateCriteria | None = self.config.candidate_criteria
-        if criteria is not None:
-            accepted = []
-            for row in clusters_all:
-                quality_i = self._quality_for_point(float(row[0]), float(row[1]), grid_metrics_all)
-                if criteria.accepts(dchi2=float(row[2]), quality=quality_i):
-                    accepted.append(row)
-            if not accepted:
-                return None
-            clusters_use = np.asarray(accepted, dtype=float)
-        else:
-            clusters_use = clusters_all
+        clusters_use = np.asarray(clusters_all, dtype=float)
+        clusters_use = clusters_use[np.isfinite(clusters_use).all(axis=1)]
+        if clusters_use.size == 0:
+            return None
 
         max_ind = int(np.argmax(clusters_use[:, 2]))
         best = clusters_use[max_ind]
@@ -567,7 +559,7 @@ class Finder:
 
             med = float(np.median(bulk_dchi2))
             std = float(np.std(bulk_dchi2))
-            score = (best[2] - med) / std if std > 0 else float("inf")
+            score = (best[2] - med) / std if std > 0 else float("nan")
         else:
             med = std = score = float("nan")
 

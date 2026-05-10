@@ -152,7 +152,7 @@ class FinderConfig:
     Common ratio of the geometric progression used to generate teff values.
     """
 
-    teff_grid_n: int = 20
+    teff_grid_n: int = 24
     """
     Number of teff values in the grid.
     """
