@@ -54,8 +54,8 @@ class BestCandidate:
         Standard deviation of dchi2 among the bulk of the other candidates
         (excluding the best, with the upper tail trimmed when configured).
     score : float
-        Standardized score of the best candidate:
-            (dchi2_best - med_others) / std_others
+        Standardized score of the best candidate.
+        Computed as ``(dchi2_best - med_others) / std_others``.
         (may be NaN/inf depending on the number of candidates / std_others).
     quality : CandidateQuality
         Per-point support and temporal diagnostics for this candidate.

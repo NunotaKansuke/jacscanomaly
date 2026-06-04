@@ -27,6 +27,36 @@ pip install jacscanomaly
 
 ---
 
+## Development
+
+Install the package with test dependencies:
+
+```bash
+pip install -e ".[test]"
+```
+
+Run the unit tests:
+
+```bash
+pytest
+```
+
+Run the tests with coverage:
+
+```bash
+coverage run -m pytest
+coverage report
+```
+
+Build the Sphinx documentation locally:
+
+```bash
+pip install -e ".[docs]"
+sphinx-build -b html docs docs/_build/html
+```
+
+---
+
 ## Quick Example
 
 ```python

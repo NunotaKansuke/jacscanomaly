@@ -17,6 +17,20 @@ dependencies = [
   "matplotlib",
 ]
 
+[project.optional-dependencies]
+docs = [
+  "sphinx>=7",
+  "sphinx-rtd-theme>=2",
+  "myst-parser>=2",
+]
+test = [
+  "pytest>=7",
+  "coverage[toml]>=7",
+]
+dev = [
+  "jacscanomaly[docs,test]",
+]
+
 [project.urls]
 Homepage = "https://github.com/NunotaKansuke/jacscanomaly"
 Repository = "https://github.com/NunotaKansuke/jacscanomaly"
@@ -31,3 +45,16 @@ exclude = ["jacscanomaly.test_tool*"]
 
 [tool.setuptools.package-data]
 jacscanomaly = ["data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["jacscanomaly"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

@@ -12,6 +12,10 @@ dist/
 build/
 *.egg-info/
 *.so
+docs/_build/
+docs/generated/
+.coverage
+htmlcov/
 
 # local test tools
 test_tool/
