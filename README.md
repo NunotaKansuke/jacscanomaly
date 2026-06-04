@@ -1,5 +1,7 @@
 # jacscanomaly
 
+[![Documentation Status](https://readthedocs.org/projects/jacscanomaly/badge/?version=latest)](https://jacscanomaly.readthedocs.io/en/latest/?badge=latest)
+
 **jacscanomaly** is a JAX-based framework for anomaly detection
 in time-series data.
 
@@ -19,40 +21,26 @@ while remaining fast thanks to JAX.
 
 ---
 
+## Documentation
+
+The full documentation is available on ReadTheDocs:
+
+https://jacscanomaly.readthedocs.io/en/latest/
+
+Start with:
+
+* [Installation](https://jacscanomaly.readthedocs.io/en/latest/installation.html)
+* [Quickstart](https://jacscanomaly.readthedocs.io/en/latest/quickstart.html)
+* [Examples](https://jacscanomaly.readthedocs.io/en/latest/examples.html)
+* [Method overview](https://jacscanomaly.readthedocs.io/en/latest/method.html)
+* [API reference](https://jacscanomaly.readthedocs.io/en/latest/api.html)
+
+---
+
 ## Installation
 
 ```bash
 pip install jacscanomaly
-```
-
----
-
-## Development
-
-Install the package with test dependencies:
-
-```bash
-pip install -e ".[test]"
-```
-
-Run the unit tests:
-
-```bash
-pytest
-```
-
-Run the tests with coverage:
-
-```bash
-coverage run -m pytest
-coverage report
-```
-
-Build the Sphinx documentation locally:
-
-```bash
-pip install -e ".[docs]"
-sphinx-build -b html docs docs/_build/html
 ```
 
 ---
@@ -313,3 +301,32 @@ which can be used directly by GitHub and reference managers.
 * jax
 * jaxopt
 * matplotlib
+
+---
+
+## Development
+
+Install the package with development dependencies:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Run the unit tests:
+
+```bash
+pytest
+```
+
+Run the tests with coverage:
+
+```bash
+coverage run -m pytest
+coverage report
+```
+
+Build the Sphinx documentation locally:
+
+```bash
+sphinx-build -W -b html docs docs/_build/html
+```
