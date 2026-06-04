@@ -42,3 +42,5 @@ Current scope
 The first test suite intentionally avoids full survey-scale fits. Those tests
 are more expensive and should be added later as integration tests with small
 fixed light curves. Unit tests should stay fast enough to run on every commit.
+
+See also :doc:`development` for the expected local checks before pushing.

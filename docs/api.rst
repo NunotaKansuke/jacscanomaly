@@ -1,7 +1,11 @@
 API Reference
 =============
 
-Top-level API
+This page is the reference layer for the user guide. For narrative
+documentation, start with :doc:`quickstart`, :doc:`method`, and
+:doc:`configuration`.
+
+Main workflow
 -------------
 
 .. autosummary::
@@ -10,11 +14,32 @@ Top-level API
    jacscanomaly.Finder
    jacscanomaly.FinderConfig
    jacscanomaly.CandidateCriteria
+
+Result containers
+-----------------
+
+.. autosummary::
+   :toctree: generated
+
    jacscanomaly.AnomalyResult
    jacscanomaly.BestCandidate
    jacscanomaly.CandidateQuality
    jacscanomaly.SeasonSummary
+
+Plotting
+--------
+
+.. autosummary::
+   :toctree: generated
+
    jacscanomaly.AnomalyPlotter
+
+Single-lens fitting
+-------------------
+
+.. autosummary::
+   :toctree: generated
+
    jacscanomaly.PSPLFitter
    jacscanomaly.CPPPSPLFitter
    jacscanomaly.FSPLFitter
@@ -23,8 +48,8 @@ Top-level API
    jacscanomaly.CVFitter
    jacscanomaly.SingleLensFitResult
 
-Modules
--------
+Module reference
+----------------
 
 .. autosummary::
    :toctree: generated
