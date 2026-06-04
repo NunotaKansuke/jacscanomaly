@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
 import jax.numpy as jnp
 from jax import jit
 from importlib import resources
@@ -27,8 +26,7 @@ _EPH = None
 
 def _load_earth_orbital_parallax_array():
     p = resources.files("jacscanomaly.data").joinpath("earth_orbital_parallax_table.txt")
-    with p.open("r") as f:
-        return np.genfromtxt(f, skip_header=59, skip_footer=60)
+    return parallax.load_horizons_vectors_file(str(p))
 
 def get_heliocentric_ephemeris():
     global _EPH
@@ -37,13 +35,30 @@ def get_heliocentric_ephemeris():
         _EPH = parallax.HeliocentricEphemeris.from_horizons_table(arr)
     return _EPH
 
-def make_parallax_projector(RA: float, Dec: float, tref: float):
+def make_parallax_projector(RA: float, Dec: float, tref: float, *, use_HJD: bool = True):
     eph = get_heliocentric_ephemeris()
-    return parallax.EarthOrbitalParallaxProjector(eph, RA, Dec, tref)
+    return parallax.EarthOrbitalParallaxProjector(eph, RA, Dec, tref, use_HJD=use_HJD)
+
+
+def make_space_parallax_projector(
+    RA: float,
+    Dec: float,
+    tref: float,
+    satellite_ephemeris_path: str,
+    *,
+    use_HJD: bool = True,
+):
+    eph = get_heliocentric_ephemeris()
+    earth = parallax.EarthOrbitalParallaxProjector(eph, RA, Dec, tref, use_HJD=use_HJD)
+    sat_table = parallax.load_vbm_satellite_file(satellite_ephemeris_path)
+    sat = parallax.SatelliteEphemeris.from_radec_distance_table(sat_table)
+    return parallax.SpaceOrbitalParallaxProjector(earth, sat)
 
 
 def u_parallax_tau_beta(t, t0, tE, u0, piEN, piEE, P):
-    tau0 = (t - t0) / tE
+    lt = parallax.earth_observer_lighttravel_delay_jit(t, P)
+    lt0 = parallax.earth_observer_lighttravel_delay_jit(jnp.asarray([t0], dtype=jnp.asarray(t).dtype), P)[0]
+    tau0 = (t + lt - t0 - lt0) / tE
     beta0 = jnp.full_like(tau0, u0)
     d_tau, d_beta = parallax.earth_orbital_parallax_offsets_jit(t, piEN, piEE, P)
     return tau0 + d_tau, beta0 + d_beta
@@ -53,3 +68,16 @@ def u_parallax(t, t0, tE, u0, piEN, piEE, P):
     tau, beta = u_parallax_tau_beta(t, t0, tE, u0, piEN, piEE, P)
     return jnp.sqrt(tau**2 + beta**2)
 
+
+def u_space_parallax_tau_beta(t, t0, tE, u0, piEN, piEE, P):
+    lt = parallax.earth_observer_lighttravel_delay_jit(t, P.earth)
+    lt0 = parallax.earth_observer_lighttravel_delay_jit(jnp.asarray([t0], dtype=jnp.asarray(t).dtype), P.earth)[0]
+    tau0 = (t + lt - t0 - lt0) / tE
+    beta0 = jnp.full_like(tau0, u0)
+    d_tau, d_beta = parallax.space_orbital_parallax_offsets_jit(t, piEN, piEE, P)
+    return tau0 + d_tau, beta0 + d_beta
+
+
+def u_space_parallax(t, t0, tE, u0, piEN, piEE, P):
+    tau, beta = u_space_parallax_tau_beta(t, t0, tE, u0, piEN, piEE, P)
+    return jnp.sqrt(tau**2 + beta**2)

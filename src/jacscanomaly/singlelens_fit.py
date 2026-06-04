@@ -15,9 +15,11 @@ from .singlelens_model import (
     A_fspl_logrho_func,
     A_pspl_parallax_func,
     A_fspl_parallax_logrho_func,
+    A_pspl_space_parallax_func,
+    A_fspl_space_parallax_logrho_func,
     A_cv_asymexp_logtau_func,
 )
-from .trajectory import make_parallax_projector
+from .trajectory import make_parallax_projector, make_space_parallax_projector
 
 try:
     from . import _cpp_grid
@@ -320,13 +322,14 @@ class PSPLParallaxFitter:
     RA: float
     Dec: float
     tref: float
+    use_HJD: bool = True
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
-        self._P = make_parallax_projector(self.RA, self.Dec, self.tref)
+        self._P = make_parallax_projector(self.RA, self.Dec, self.tref, use_HJD=self.use_HJD)
         self._last_fit: Optional[SingleLensFitResult] = None
 
     def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, p0: jnp.ndarray) -> SingleLensFitResult:
@@ -375,13 +378,14 @@ class FSPLParallaxFitter:
     RA: float
     Dec: float
     tref: float
+    use_HJD: bool = True
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
-        self._P = make_parallax_projector(self.RA, self.Dec, self.tref)
+        self._P = make_parallax_projector(self.RA, self.Dec, self.tref, use_HJD=self.use_HJD)
         self._last_fit: Optional[SingleLensFitResult] = None
 
     def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
@@ -420,6 +424,124 @@ class FSPLParallaxFitter:
 
     def plot_residual(self, **kwargs):
         """Plot residuals from the last fit."""
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class PSPLSpaceParallaxFitter:
+    """
+    PSPL + annual parallax + spacecraft parallax fitter.
+
+    The spacecraft ephemeris is read from a VBMicrolensing/RTModel satellite
+    table with columns ``JD RA_deg Dec_deg distance_AU``.
+    """
+
+    RA: float
+    Dec: float
+    tref: float
+    satellite_ephemeris_path: str
+    use_HJD: bool = True
+    maxiter: int = 1000
+    damping_parameter: float = 1e-6
+    tol: float = 1e-3
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._P = make_space_parallax_projector(
+            self.RA, self.Dec, self.tref, self.satellite_ephemeris_path,
+            use_HJD=self.use_HJD,
+        )
+        self._last_fit: Optional[SingleLensFitResult] = None
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, p0: jnp.ndarray) -> SingleLensFitResult:
+        P = self._P
+
+        def build_A(p, t):
+            return A_pspl_space_parallax_func(p, t, P)
+
+        fit = _fit_single_lens(
+            time=time, flux=flux, ferr=ferr, x0=p0,
+            build_A=build_A,
+            dof=5,
+            param_names=("t0", "tE", "u0", "piEN", "piEE"),
+            maxiter=self.maxiter,
+            damping_parameter=self.damping_parameter,
+            tol=self.tol,
+            min_points=6,
+            parallax_projector=P,
+        )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class FSPLSpaceParallaxFitter:
+    """
+    FSPL + annual parallax + spacecraft parallax fitter.
+    """
+
+    RA: float
+    Dec: float
+    tref: float
+    satellite_ephemeris_path: str
+    use_HJD: bool = True
+    maxiter: int = 1000
+    damping_parameter: float = 1e-6
+    tol: float = 1e-3
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._P = make_space_parallax_projector(
+            self.RA, self.Dec, self.tref, self.satellite_ephemeris_path,
+            use_HJD=self.use_HJD,
+        )
+        self._last_fit: Optional[SingleLensFitResult] = None
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        P = self._P
+
+        def build_A(q, t):
+            return A_fspl_space_parallax_logrho_func(q, t, P)
+
+        def q_to_params(q):
+            t0, tE, u0, logrho, piEN, piEE = q
+            rho = jnp.exp(logrho)
+            return jnp.array([t0, tE, u0, rho, piEN, piEE])
+
+        fit = _fit_single_lens(
+            time=time, flux=flux, ferr=ferr, x0=q0,
+            build_A=build_A,
+            dof=6,
+            param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
+            x_to_params=q_to_params,
+            maxiter=self.maxiter,
+            damping_parameter=self.damping_parameter,
+            tol=self.tol,
+            min_points=7,
+            store_raw_params=True,
+            parallax_projector=P,
+        )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
         if self._last_fit is None:
             raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_residual(self._last_fit, **kwargs)

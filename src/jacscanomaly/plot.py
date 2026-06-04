@@ -15,6 +15,8 @@ from .singlelens_model import (
     A_fspl_func,
     A_pspl_parallax_func,
     A_fspl_parallax_func,
+    A_pspl_space_parallax_func,
+    A_fspl_space_parallax_func,
     A_cv_asymexp_logtau_func,
 )
 
@@ -35,12 +37,18 @@ def _single_lens_model_flux(fit, time) -> np.ndarray:
         P = getattr(fit, "parallax_projector", None)
         if P is None:
             raise ValueError("Cannot plot parallax model without fit.parallax_projector.")
-        A = A_pspl_parallax_func(params, time_j, P)
+        if hasattr(P, "earth"):
+            A = A_pspl_space_parallax_func(params, time_j, P)
+        else:
+            A = A_pspl_parallax_func(params, time_j, P)
     elif names == ("t0", "tE", "u0", "rho", "piEN", "piEE"):
         P = getattr(fit, "parallax_projector", None)
         if P is None:
             raise ValueError("Cannot plot parallax model without fit.parallax_projector.")
-        A = A_fspl_parallax_func(params, time_j, P)
+        if hasattr(P, "earth"):
+            A = A_fspl_space_parallax_func(params, time_j, P)
+        else:
+            A = A_fspl_parallax_func(params, time_j, P)
     elif names == ("t0", "tau_rise", "tau_decay"):
         t0, tau_rise, tau_decay = params
         q = jnp.array([t0, jnp.log(tau_rise), jnp.log(tau_decay)])

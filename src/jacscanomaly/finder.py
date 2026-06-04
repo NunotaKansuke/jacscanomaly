@@ -17,6 +17,8 @@ from .singlelens_fit import (
     FSPLFitter,
     PSPLParallaxFitter,
     FSPLParallaxFitter,
+    PSPLSpaceParallaxFitter,
+    FSPLSpaceParallaxFitter,
 )
 from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
@@ -67,13 +69,15 @@ class Finder:
       on the selected fitter:
 
       =======================  ===============================
-      Model                    x0 parameters
-      =======================  ===============================
-      PSPL                     (t0, tE, u0)
-      FSPL                     (t0, tE, u0, logrho)
-      PSPL + parallax          (t0, tE, u0, piEN, piEE)
-      FSPL + parallax          (t0, tE, u0, logrho, piEN, piEE)
-      =======================  ===============================
+      Model                         x0 parameters
+      ============================  ===============================
+      PSPL                          (t0, tE, u0)
+      FSPL                          (t0, tE, u0, logrho)
+      PSPL + parallax               (t0, tE, u0, piEN, piEE)
+      FSPL + parallax               (t0, tE, u0, logrho, piEN, piEE)
+      PSPL + space parallax         (t0, tE, u0, piEN, piEE)
+      FSPL + space parallax         (t0, tE, u0, logrho, piEN, piEE)
+      ============================  ===============================
 
     * For parallax models, ``ra_deg`` and ``dec_deg`` must be provided
       in :class:`FinderConfig`. If ``tref`` is not specified, the median
@@ -119,7 +123,14 @@ class Finder:
         # -----------------------------
         # 1) Validate model selection
         # -----------------------------
-        valid = {"pspl", "fspl", "pspl_parallax", "fspl_parallax"}
+        valid = {
+            "pspl",
+            "fspl",
+            "pspl_parallax",
+            "fspl_parallax",
+            "pspl_space_parallax",
+            "fspl_space_parallax",
+        }
         if k not in valid:
             raise ValueError(
                 f"Unknown fitter_kind '{k}'. "
@@ -134,8 +145,12 @@ class Finder:
             if self.config.ra_deg is None or self.config.dec_deg is None:
                 raise ValueError(
                     f"{k} requires ra_deg and dec_deg in FinderConfig "
-                    "(sky coordinates are required for annual parallax)."
+                    "(sky coordinates are required for parallax)."
                 )
+        if k.endswith("_space_parallax") and self.config.satellite_ephemeris_path is None:
+            raise ValueError(
+                f"{k} requires satellite_ephemeris_path in FinderConfig."
+            )
     
         # -----------------------------
         # 3) Build fitter
@@ -165,6 +180,27 @@ class Finder:
                 RA=self.config.ra_deg,
                 Dec=self.config.dec_deg,
                 tref=tref,
+                use_HJD=self.config.parallax_use_HJD,
+            )
+            return
+
+        if k == "pspl_space_parallax":
+            self.fitter = PSPLSpaceParallaxFitter(
+                RA=self.config.ra_deg,
+                Dec=self.config.dec_deg,
+                tref=tref,
+                satellite_ephemeris_path=self.config.satellite_ephemeris_path,
+                use_HJD=self.config.parallax_use_HJD,
+            )
+            return
+
+        if k == "fspl_space_parallax":
+            self.fitter = FSPLSpaceParallaxFitter(
+                RA=self.config.ra_deg,
+                Dec=self.config.dec_deg,
+                tref=tref,
+                satellite_ephemeris_path=self.config.satellite_ephemeris_path,
+                use_HJD=self.config.parallax_use_HJD,
             )
             return
     
@@ -173,6 +209,7 @@ class Finder:
             RA=self.config.ra_deg,
             Dec=self.config.dec_deg,
             tref=tref,
+            use_HJD=self.config.parallax_use_HJD,
         )
 
 
@@ -509,9 +546,9 @@ class Finder:
             return np.asarray([t0, tE, u0], dtype=float)
         if k == "fspl":
             return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho)], dtype=float)
-        if k == "pspl_parallax":
+        if k in {"pspl_parallax", "pspl_space_parallax"}:
             return np.asarray([t0, tE, u0, 0.0, 0.0], dtype=float)
-        if k == "fspl_parallax":
+        if k in {"fspl_parallax", "fspl_space_parallax"}:
             return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho), 0.0, 0.0], dtype=float)
         raise ValueError(f"Unknown fitter_kind '{k}'.")
 

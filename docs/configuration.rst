@@ -28,6 +28,14 @@ Supported values:
 ``"fspl_parallax"``
    FSPL with annual parallax. Requires ``ra_deg`` and ``dec_deg``.
 
+``"pspl_space_parallax"``
+   PSPL with annual parallax plus a spacecraft ephemeris. Requires
+   ``ra_deg``, ``dec_deg``, and ``satellite_ephemeris_path``.
+
+``"fspl_space_parallax"``
+   FSPL with annual parallax plus a spacecraft ephemeris. Requires
+   ``ra_deg``, ``dec_deg``, and ``satellite_ephemeris_path``.
+
 For parallax models:
 
 .. code-block:: python
@@ -38,6 +46,22 @@ For parallax models:
        dec_deg=-30.0,
        tref=None,  # defaults to median observation time
    )
+
+For space-parallax models, pass a VBMicrolensing/RTModel satellite table:
+
+.. code-block:: python
+
+   config = FinderConfig(
+       fitter_kind="pspl_space_parallax",
+       ra_deg=267.623337808,
+       dec_deg=-29.1164180355,
+       tref=2459000.0,
+       satellite_ephemeris_path="satellitedir/satellite1.txt",
+   )
+
+The satellite table is expected to contain rows of
+``JD RA_deg Dec_deg distance_AU`` inside an optional ``$$SOE`` / ``$$EOE``
+block, matching the VBMicrolensing satellite-table convention.
 
 Automatic single-lens initialization
 ------------------------------------

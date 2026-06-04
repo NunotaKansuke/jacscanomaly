@@ -42,6 +42,8 @@ class FinderConfig:
         "fspl",
         "pspl_parallax",
         "fspl_parallax",
+        "pspl_space_parallax",
+        "fspl_space_parallax",
     ] = "pspl"
     """
     Choice of single-lens model used for the initial fit.
@@ -56,6 +58,10 @@ class FinderConfig:
         PSPL with annual parallax.
     - ``"fspl_parallax"`` :
         FSPL with annual parallax.
+    - ``"pspl_space_parallax"`` :
+        PSPL with annual parallax plus a spacecraft ephemeris.
+    - ``"fspl_space_parallax"`` :
+        FSPL with annual parallax plus a spacecraft ephemeris.
     """
 
     ra_deg: Optional[float] = None
@@ -69,6 +75,22 @@ class FinderConfig:
     Reference time for annual parallax.
 
     If ``None``, the median observation time is used.
+    """
+
+    satellite_ephemeris_path: Optional[str] = None
+    """
+    Path to a VBMicrolensing/RTModel satellite ephemeris table.
+
+    Required for ``"pspl_space_parallax"`` and ``"fspl_space_parallax"``.
+    Expected columns are ``JD RA_deg Dec_deg distance_AU``.
+    """
+
+    parallax_use_HJD: bool = True
+    """
+    If True, input times for parallax models are treated as HJD-style times.
+    If False, input times are treated as JD-style times and the observer
+    light-travel correction is included in the source trajectory, matching
+    VBMicrolensing's ``t_in_HJD=0`` convention.
     """
 
     # ==================================================

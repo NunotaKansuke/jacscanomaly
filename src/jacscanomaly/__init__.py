@@ -16,6 +16,8 @@ from .singlelens_fit import (
     FSPLFitter,
     PSPLParallaxFitter,
     FSPLParallaxFitter,
+    PSPLSpaceParallaxFitter,
+    FSPLSpaceParallaxFitter,
     CVFitter,
 )
 from .template_free import (
@@ -39,6 +41,8 @@ __all__ = [
     "FSPLFitter",
     "PSPLParallaxFitter",
     "FSPLParallaxFitter",
+    "PSPLSpaceParallaxFitter",
+    "FSPLSpaceParallaxFitter",
     "CVFitter",
     "SingleLensFitResult",
     "TemplateFreeCandidate",
