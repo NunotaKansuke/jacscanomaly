@@ -430,9 +430,9 @@ class CVFitter:
     """
     Cataclysmic-variable-like transient fitter.
 
-    Model shape is an asymmetric exponential:
-    - fast rise (tau_rise)
-    - slow decay (tau_decay)
+    Model shape is a linear rise:
+    - linear ramp-up to peak over tau_rise
+    - exponential decay over tau_decay
 
     Optimizer parameters: (t0, log_tau_rise, log_tau_decay)
     Reported parameters:  (t0, tau_rise, tau_decay)

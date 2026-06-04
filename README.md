@@ -2,19 +2,21 @@
 
 [![Documentation Status](https://readthedocs.org/projects/jacscanomaly/badge/?version=latest)](https://jacscanomaly.readthedocs.io/en/latest/?badge=latest)
 
-**jacscanomaly** is a JAX-based framework for anomaly detection
-in time-series data.
+**jacscanomaly** is a Python package for scan-based anomaly detection
+in time-series light curves.
 
 The package is designed to detect **microlensing planetary anomalies** by
 scanning residuals after fitting a single lens model (e.g., PSPL),
-while remaining fast thanks to JAX.
+with low-memory C++ backends for large survey light curves and JAX-based
+fitters for flexible model development.
 
 ---
 
 ## Features
 
-* **JAX-powered**: fast, vectorized grid scans with JIT compilation
-* **Scan-based anomaly detection** on residuals
+* **Scan-based anomaly detection** on residuals after single-lens fitting
+* **C++ survey backends** for the PSPL fit and anomaly grid scan
+* **JAX model components** for flexible single-lens and higher-order models
 * **Candidate quality diagnostics**: effective contributing points,
   peak-contribution fraction, and time-correlation metrics
 * **Built-in visualization**: PSPL fit, residuals, and anomaly scan summary
@@ -50,14 +52,17 @@ pip install jacscanomaly
 ```python
 import numpy as np
 import matplotlib.pyplot as plt
-from jacscanomaly import Finder, FinderConfig
+from jacscanomaly import CandidateCriteria, Finder, FinderConfig
 
 # load data (time, flux, flux_err)
 data = np.load("example_data.npy")
 time, flux, ferr = data[:, 0], data[:, 1], data[:, 2]
 
 # run anomaly finder
-config = FinderConfig(fitter_kind="pspl")
+config = FinderConfig(
+    fitter_kind="pspl",
+    candidate_criteria=CandidateCriteria(min_n_eff=2.0),
+)
 finder = Finder(config)
 result = finder.run(time, flux, ferr)
 
@@ -206,12 +211,15 @@ table = result.summary_table()  # pandas.DataFrame when pandas is installed
 Key parameters are controlled via `FinderConfig`:
 
 ```python
-from jacscanomaly import FinderConfig
+from jacscanomaly import CandidateCriteria, FinderConfig
 
 config = FinderConfig(
+    grid_backend="cpp",  # default for PSPL survey scans
+    single_fit_backend="cpp",
     teff_init=0.03,      # initial anomaly timescale
     teff_grid_n=20,      # number of teff grid points
     sigma=3.0,           # per-point improvement threshold for n_contrib
+    candidate_criteria=CandidateCriteria(min_n_eff=2.0),
     best_score_trim_percentile=95.0,  # trim upper tail for best-candidate score
 )
 ```

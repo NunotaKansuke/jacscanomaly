@@ -117,6 +117,8 @@ Any threshold set to ``None`` is ignored.
 Backend selection
 -----------------
 
+The PSPL workflow uses C++ backends by default:
+
 .. code-block:: python
 
    config = FinderConfig(
@@ -124,6 +126,15 @@ Backend selection
        single_fit_backend="cpp",
    )
 
-Use the C++ backends for large light curves when memory use is more important
-than JAX vectorization. Use the JAX backend when you want the original fully
-vectorized implementation.
+Use the JAX backend when you want the original vectorized implementation or
+when comparing backend behavior:
+
+.. code-block:: python
+
+   config = FinderConfig(
+       grid_backend="jax",
+       single_fit_backend="jax",
+   )
+
+``single_fit_backend="cpp"`` applies to ``fitter_kind="pspl"``. Other baseline
+model families use the JAX fitters.

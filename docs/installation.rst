@@ -57,12 +57,13 @@ Install ``microjax`` from source before using FSPL fitters:
 C++ backend
 -----------
 
-The package includes an experimental C++ grid backend and C++ PSPL fitting
-backend. They are built through ``setup.py`` using OpenMP:
+The package includes a C++ grid backend and C++ PSPL fitting backend. They are
+built through ``setup.py`` using OpenMP:
 
 .. code-block:: bash
 
    pip install -e .
 
-If the extension does not build, first check that your compiler supports
-``-fopenmp`` and C++17.
+If the extension does not build, check that your compiler supports
+``-fopenmp`` and C++17. You can still request the JAX backend explicitly, but
+the standard PSPL survey workflow uses the C++ backend.

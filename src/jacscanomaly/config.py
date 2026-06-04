@@ -8,7 +8,7 @@ from .criteria import CandidateCriteria
 @dataclass(frozen=True)
 class FinderConfig:
     """
-    Configuration object for :class:`scanomaly.finder.Finder`.
+    Configuration object for :class:`jacscanomaly.finder.Finder`.
 
     This dataclass collects **all hyperparameters controlling the anomaly-search
     pipeline**, excluding any numerical or model-dependent quantities.
@@ -19,7 +19,7 @@ class FinderConfig:
     - *Explicitly structured* according to pipeline stages
 
     The parameters are grouped according to the internal workflow of
-    :class:`scanomaly.finder.Finder`:
+    :class:`jacscanomaly.finder.Finder`:
 
     1. Season splitting
     2. Grid construction in (t0, teff)
@@ -117,7 +117,7 @@ class FinderConfig:
     """Initial logrho used for FSPL models when x0 is omitted."""
 
     pspl_fit_u0_min: float = 0.01
-    """Smallest allowed absolute u0 for the experimental C++ PSPL fitter."""
+    """Smallest allowed absolute u0 for the C++ PSPL fitter."""
 
     pspl_fit_min_t0_support_points: int = 3
     """Minimum number of data points required near the fitted t0."""
@@ -233,20 +233,20 @@ class FinderConfig:
     # 5) Grid execution mode
     # ==================================================
     
-    grid_backend: Literal["jax", "cpp"] = "jax"
+    grid_backend: Literal["jax", "cpp"] = "cpp"
     """
     Grid evaluation backend.
 
-    - ``"jax"`` keeps the existing JAX vectorized/chunked implementation.
-    - ``"cpp"`` uses the experimental C++ for-loop backend for lower peak memory.
+    - ``"cpp"`` uses the C++ for-loop backend for low-memory survey scans.
+    - ``"jax"`` uses the JAX vectorized/chunked implementation.
     """
 
-    single_fit_backend: Literal["jax", "cpp"] = "jax"
+    single_fit_backend: Literal["jax", "cpp"] = "cpp"
     """
     Single-lens fit backend.
 
-    ``"cpp"`` is currently implemented for ``fitter_kind="pspl"`` only.
-    Other single-lens models continue to use the JAX fitter.
+    ``"cpp"`` is implemented for ``fitter_kind="pspl"``. Other single-lens
+    models continue to use the JAX fitters.
     """
 
     grid_chunked: bool = False

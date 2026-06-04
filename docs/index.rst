@@ -1,9 +1,9 @@
 jacscanomaly
 ============
 
-``jacscanomaly`` is a JAX-based package for scan-based anomaly detection in
-time-series residuals, with microlensing anomaly searches as the primary use
-case.
+``jacscanomaly`` is a Python package for scan-based anomaly detection in
+time-series light curves, with microlensing anomaly searches as the primary
+use case.
 
 The package is built for the common situation where a smooth baseline model
 fits most of a light curve, but localized deviations may contain the signal of
@@ -20,7 +20,7 @@ What it does
 * non-overlapping candidate extraction,
 * candidate support diagnostics such as ``n_eff`` and ``peak_frac``,
 * plotting and summary helpers for scripts, CLIs, and notebooks,
-* optional C++ backends for large light curves.
+* low-memory C++ backends for large PSPL survey scans.
 
 The high-level entry point is :class:`jacscanomaly.Finder`. A typical workflow
 is:

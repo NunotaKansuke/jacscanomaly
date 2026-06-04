@@ -105,13 +105,16 @@ separate seasons while still scanning all seasons.
 Backends
 --------
 
-``grid_backend="jax"``
-   Uses JAX vectorized grid evaluation.
-
 ``grid_backend="cpp"``
-   Uses the experimental C++ for-loop grid backend. This is useful for large
-   light curves because it usually has lower peak memory use.
+   Uses the C++ for-loop grid backend. This is the default for PSPL survey
+   scans and is useful for large light curves because it has lower peak memory
+   use.
 
 ``single_fit_backend="cpp"``
-   Uses the experimental C++ PSPL fitter for ``fitter_kind="pspl"``. Other
-   fitter kinds continue to use the JAX fitters.
+   Uses the C++ PSPL fitter for ``fitter_kind="pspl"``.
+
+``grid_backend="jax"``
+   Uses JAX vectorized or chunked grid evaluation. This remains available for
+   development and comparison.
+
+Other single-lens model families continue to use the JAX fitters.

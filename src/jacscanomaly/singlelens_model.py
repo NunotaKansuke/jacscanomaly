@@ -43,7 +43,7 @@ def A_fspl_parallax_logrho_func(q: jnp.ndarray, time: jnp.ndarray, P) -> jnp.nda
 
 def A_cv_asymexp_logtau_func(q: jnp.ndarray, time: jnp.ndarray) -> jnp.ndarray:
     """
-    Asymmetric exponential CV template with sharp rise and slower decay.
+    CV template with linear rise and exponential decay.
 
     Optimizer parameters
     --------------------
@@ -57,6 +57,6 @@ def A_cv_asymexp_logtau_func(q: jnp.ndarray, time: jnp.ndarray) -> jnp.ndarray:
     tau_rise = jnp.exp(log_tau_rise)
     tau_decay = jnp.exp(log_tau_decay)
     dt = time - t0
-    rise = jnp.exp(dt / tau_rise)
+    rise = jnp.clip((dt + tau_rise) / tau_rise, 0.0, 1.0)
     decay = jnp.exp(-dt / tau_decay)
     return jnp.where(dt < 0.0, rise, decay)

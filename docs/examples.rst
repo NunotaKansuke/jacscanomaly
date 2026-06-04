@@ -37,8 +37,8 @@ deviation and runs the default PSPL workflow.
    result = finder.run(time, flux, ferr)
    result.print_summary()
 
-For survey-scale light curves, prefer the C++ backends when JAX memory use is
-too high:
+The default PSPL workflow uses the C++ backends. You can still make that
+explicit when writing survey scripts:
 
 .. code-block:: python
 

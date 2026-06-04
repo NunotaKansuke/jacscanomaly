@@ -17,13 +17,7 @@ The main inputs are one-dimensional arrays of time, flux, and flux error:
    flux = data[:, 1]
    ferr = data[:, 2]
 
-   config = FinderConfig(
-       fitter_kind="pspl",
-       gap=50.0,
-       grid_backend="cpp",
-       single_fit_backend="cpp",
-       candidate_criteria=None,
-   )
+   config = FinderConfig(fitter_kind="pspl", gap=50.0)
 
    finder = Finder(config)
    result = finder.run(time, flux, ferr)

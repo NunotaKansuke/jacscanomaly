@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Finder:
     """
-    Main entry point of **scanomaly**.
+    Main entry point of **jacscanomaly**.
 
     `Finder` orchestrates the full anomaly-search pipeline:
 

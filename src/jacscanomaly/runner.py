@@ -1,4 +1,4 @@
-# scanomaly/runner.py
+# jacscanomaly/runner.py
 from __future__ import annotations
 
 from dataclasses import dataclass
