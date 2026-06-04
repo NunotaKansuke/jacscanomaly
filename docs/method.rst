@@ -1,0 +1,117 @@
+Method overview
+===============
+
+``jacscanomaly`` searches for localized deviations from a baseline model. The
+default microlensing workflow uses a PSPL single-lens model as the baseline.
+
+Pipeline
+--------
+
+The high-level pipeline is:
+
+1. Convert inputs to arrays and fit a single-lens model.
+2. Compute residuals:
+
+   .. math::
+
+      r_i = f_i - f_{\mathrm{single}}(t_i)
+
+3. Split the time series into observing seasons using large time gaps.
+4. For each season, scan a grid of anomaly centers ``t0`` and effective
+   durations ``teff``.
+5. At each grid point, evaluate a local window around ``t0``.
+6. Compare a flat residual model against an anomaly-template residual model.
+7. Extract non-overlapping clusters and keep one representative per cluster.
+8. Select the best candidate after optional quality criteria.
+
+Detection statistic
+-------------------
+
+For each grid point, the package computes:
+
+.. math::
+
+   \Delta\chi^2 = \chi^2_{\mathrm{flat}} - \chi^2_{\mathrm{anom}}
+
+Large positive ``dchi2`` means that a localized anomaly template improves the
+fit relative to a flat residual model.
+
+Candidate score
+---------------
+
+The candidate ``score`` measures how strongly the best cluster stands out
+relative to other extracted clusters:
+
+.. math::
+
+   \mathrm{score}
+   =
+   \frac{\Delta\chi^2_{\mathrm{best}} - \mathrm{median}(\Delta\chi^2_{\mathrm{others}})}
+        {\mathrm{std}(\Delta\chi^2_{\mathrm{others}})}
+
+The background sample is trimmed using
+``FinderConfig.best_score_trim_percentile`` before estimating the median and
+standard deviation. This keeps a few strong secondary peaks from dominating the
+score normalization.
+
+Effective number of points
+--------------------------
+
+``dchi2`` alone can be misleading when one point dominates the improvement. For
+each candidate, ``jacscanomaly`` computes per-point positive improvements:
+
+.. math::
+
+   u_i = \max(0, \chi^2_{\mathrm{flat}, i} - \chi^2_{\mathrm{anom}, i})
+
+The effective number of contributing points is:
+
+.. math::
+
+   n_{\mathrm{eff}} = \frac{(\sum_i u_i)^2}{\sum_i u_i^2}
+
+This behaves like a participation ratio. A one-point-dominated candidate has
+``n_eff`` close to 1. A candidate supported by many comparable points has larger
+``n_eff``.
+
+Other quality diagnostics
+-------------------------
+
+Each candidate also stores:
+
+``n_window``
+   Number of data points in the local evaluation window.
+
+``n_contrib``
+   Number of points above the configured per-point improvement threshold.
+
+``peak_frac``
+   Fraction of the total positive improvement carried by the strongest point.
+
+``rho1``
+   Lag-1 autocorrelation of signed per-point improvements.
+
+``longest_run``
+   Longest consecutive run of above-threshold contributing points.
+
+Season splitting
+----------------
+
+The data are sorted by time and split whenever the gap between consecutive
+points is larger than ``FinderConfig.gap``. The default is 100 days. For survey
+light curves with yearly observing seasons, a smaller value such as 50 days can
+separate seasons while still scanning all seasons.
+
+Backends
+--------
+
+``grid_backend="jax"``
+   Uses JAX vectorized grid evaluation.
+
+``grid_backend="cpp"``
+   Uses the experimental C++ for-loop grid backend. This is useful for large
+   light curves because it usually has lower peak memory use.
+
+``single_fit_backend="cpp"``
+   Uses the experimental C++ PSPL fitter for ``fitter_kind="pspl"``. Other
+   fitter kinds continue to use the JAX fitters.
