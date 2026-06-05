@@ -5,6 +5,22 @@ from typing import Optional, Literal
 
 from .criteria import CandidateCriteria
 
+
+class _DisplayFloat(float):
+    """Float default with a concise repr for generated signatures."""
+
+    def __new__(cls, value: float, repr_text: str):
+        obj = super().__new__(cls, value)
+        obj._repr_text = repr_text
+        return obj
+
+    def __repr__(self) -> str:
+        return self._repr_text
+
+
+_COMMON_RATIO_DEFAULT = _DisplayFloat(4.0 / 3.0, "4.0 / 3.0")
+
+
 @dataclass(frozen=True)
 class FinderConfig:
     """
@@ -169,7 +185,7 @@ class FinderConfig:
     teff grid.
     """
 
-    common_ratio: float = 4.0 / 3.0
+    common_ratio: float = _COMMON_RATIO_DEFAULT
     """
     Common ratio of the geometric progression used to generate teff values.
     """
