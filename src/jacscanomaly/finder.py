@@ -68,16 +68,16 @@ class Finder:
     * The dimensionality of the initial parameter vector ``x0`` depends
       on the selected fitter:
 
-      =======================  ===============================
+      ============================  ============================================
       Model                         x0 parameters
-      ============================  ===============================
+      ============================  ============================================
       PSPL                          (t0, tE, u0)
       FSPL                          (t0, tE, u0, logrho)
       PSPL + parallax               (t0, tE, u0, piEN, piEE)
       FSPL + parallax               (t0, tE, u0, logrho, piEN, piEE)
       PSPL + space parallax         (t0, tE, u0, piEN, piEE)
       FSPL + space parallax         (t0, tE, u0, logrho, piEN, piEE)
-      ============================  ===============================
+      ============================  ============================================
 
     * For parallax models, ``ra_deg`` and ``dec_deg`` must be provided
       in :class:`FinderConfig`. If ``tref`` is not specified, the median
