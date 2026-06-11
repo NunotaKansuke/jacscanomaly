@@ -226,6 +226,34 @@ config = FinderConfig(
 
 See `FinderConfig` for the full list of options.
 
+For finite-source single-lens baselines without JAX autodiff, use the
+VBMicrolensing finite-difference fitters:
+
+```python
+config = FinderConfig(
+    fitter_kind="fspl_vbm_fd",
+    grid_backend="cpp",
+)
+```
+
+For GULLS-convention spacecraft parallax:
+
+```python
+config = FinderConfig(
+    fitter_kind="fspl_space_parallax_gulls_vbm_fd",
+    grid_backend="cpp",
+    ra_deg=267.3,
+    dec_deg=-29.9,
+    tref=2461504.0,
+    satellite_ephemeris_path="gulls_orbit5_heliocentric.dat",
+)
+```
+
+These fitters evaluate finite-source magnification with
+`VBMicrolensing.ESPLMag` and optimize nonlinear parameters with SciPy
+finite-difference least squares. They are useful for large CPU survey runs
+where JAX FSPL autodiff overhead dominates runtime.
+
 ---
 
 ## Example Data
@@ -263,8 +291,23 @@ to the grid-scan and Δχ² evaluation in `jacscanomaly`.
 
 ### Finite-source magnification (FSPL)
 
-Finite-source magnifications are computed using an external JAX-based
-implementation.
+`jacscanomaly` provides two FSPL implementation families:
+
+* JAX/microjax fitters: `fspl`, `fspl_parallax`, and `fspl_space_parallax`.
+* CPU finite-difference fitters using VBMicrolensing ESPL magnification:
+  `fspl_vbm_fd` and `fspl_space_parallax_gulls_vbm_fd`.
+
+Install the VBM backend dependencies with:
+
+```bash
+pip install -e ".[vbm]"
+```
+
+The VBM fitters keep the anomaly grid scan in the compiled C++ backend when
+`grid_backend="cpp"` is selected.
+
+For the JAX/microjax FSPL fitters, finite-source magnifications are computed
+using an external JAX-based implementation.
 
 The original FFT-based extended-source algorithm is from:
 https://github.com/git-sunao/fft-extended-source
@@ -309,6 +352,11 @@ which can be used directly by GitHub and reference managers.
 * jax
 * jaxopt
 * matplotlib
+
+Optional for VBM finite-difference FSPL fitters:
+
+* scipy
+* VBMicrolensing
 
 ---
 

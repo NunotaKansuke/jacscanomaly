@@ -27,8 +27,12 @@ test = [
   "pytest>=7",
   "coverage[toml]>=7",
 ]
+vbm = [
+  "scipy",
+  "VBMicrolensing",
+]
 dev = [
-  "jacscanomaly[docs,test]",
+  "jacscanomaly[docs,test,vbm]",
 ]
 
 [project.urls]

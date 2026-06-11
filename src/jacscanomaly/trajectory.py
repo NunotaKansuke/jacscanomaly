@@ -47,11 +47,16 @@ def make_space_parallax_projector(
     satellite_ephemeris_path: str,
     *,
     use_HJD: bool = True,
+    convention: str = "vbm",
 ):
-    eph = get_heliocentric_ephemeris()
-    earth = parallax.EarthOrbitalParallaxProjector(eph, RA, Dec, tref, use_HJD=use_HJD)
     sat_table = parallax.load_vbm_satellite_file(satellite_ephemeris_path)
     sat = parallax.SatelliteEphemeris.from_radec_distance_table(sat_table)
+    if convention == "gulls":
+        return parallax.GullsSpaceParallaxProjector(sat, RA, Dec, tref)
+    if convention != "vbm":
+        raise ValueError("space parallax convention must be 'vbm' or 'gulls'.")
+    eph = get_heliocentric_ephemeris()
+    earth = parallax.EarthOrbitalParallaxProjector(eph, RA, Dec, tref, use_HJD=use_HJD)
     return parallax.SpaceOrbitalParallaxProjector(earth, sat)
 
 
@@ -70,11 +75,14 @@ def u_parallax(t, t0, tE, u0, piEN, piEE, P):
 
 
 def u_space_parallax_tau_beta(t, t0, tE, u0, piEN, piEE, P):
-    lt = parallax.earth_observer_lighttravel_delay_jit(t, P.earth)
-    lt0 = parallax.earth_observer_lighttravel_delay_jit(jnp.asarray([t0], dtype=jnp.asarray(t).dtype), P.earth)[0]
-    tau0 = (t + lt - t0 - lt0) / tE
+    if isinstance(P, parallax.GullsSpaceParallaxProjector):
+        tau0 = (t - t0) / tE
+    else:
+        lt = parallax.earth_observer_lighttravel_delay_jit(t, P.earth)
+        lt0 = parallax.earth_observer_lighttravel_delay_jit(jnp.asarray([t0], dtype=jnp.asarray(t).dtype), P.earth)[0]
+        tau0 = (t + lt - t0 - lt0) / tE
     beta0 = jnp.full_like(tau0, u0)
-    d_tau, d_beta = parallax.space_orbital_parallax_offsets_jit(t, piEN, piEE, P)
+    d_tau, d_beta = parallax.any_space_parallax_offsets_jit(t, piEN, piEE, P)
     return tau0 + d_tau, beta0 + d_beta
 
 

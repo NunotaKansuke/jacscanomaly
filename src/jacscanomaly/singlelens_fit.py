@@ -26,6 +26,48 @@ try:
 except ImportError:  # pragma: no cover - optional compiled backend
     _cpp_grid = None
 
+try:
+    from scipy.optimize import least_squares
+except ImportError:  # pragma: no cover - optional VBM finite-difference backend
+    least_squares = None
+
+try:
+    import VBMicrolensing
+except ImportError:  # pragma: no cover - optional VBM finite-difference backend
+    VBMicrolensing = None
+
+
+def _make_vbm_magnifier(tol: float, reltol: float):
+    if least_squares is None:
+        raise ImportError("scipy is required for VBM finite-difference fitters.")
+    if VBMicrolensing is None:
+        raise ImportError("VBMicrolensing is required for VBM finite-difference fitters.")
+    vbm = VBMicrolensing.VBMicrolensing()
+    vbm.Tol = float(tol)
+    vbm.RelTol = float(reltol)
+    return vbm
+
+
+def _vbm_espl_magnification(vbm, u: np.ndarray, rho: float) -> np.ndarray:
+    rho_safe = max(float(rho), 1e-12)
+    return np.asarray([vbm.ESPLMag(float(ui), rho_safe) for ui in u], dtype=float)
+
+
+def _solve_fs_fb_numpy(A: np.ndarray, flux: np.ndarray, ferr: np.ndarray) -> tuple[float, float]:
+    fe = np.maximum(ferr, 1e-12)
+    w = 1.0 / (fe * fe)
+    sw = np.sum(w)
+    x_mean = np.sum(w * A) / sw
+    y_mean = np.sum(w * flux) / sw
+    xc = A - x_mean
+    yc = flux - y_mean
+    wxx = np.sum(w * xc * xc)
+    if not np.isfinite(wxx) or wxx <= 0.0:
+        return np.nan, np.nan
+    fs = np.sum(w * xc * yc) / wxx
+    fb = y_mean - fs * x_mean
+    return float(fs), float(fb)
+
 
 @dataclass(frozen=True)
 class SingleLensFitResult:
@@ -185,7 +227,7 @@ class PSPLFitter:
 @dataclass
 class CPPPSPLFitter:
     """
-    Experimental C++ PSPL fitter.
+    C++ PSPL fitter.
 
     Nonlinear parameters are optimized with a small finite-difference
     Levenberg-Marquardt implementation in the compiled extension. The linear
@@ -302,6 +344,120 @@ class FSPLFitter:
 
     def plot_residual(self, **kwargs):
         """Plot residuals from the last fit."""
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class VBMFiniteDiffFSPLFitter:
+    """
+    FSPL fitter with VBM magnification and finite-difference least squares.
+
+    This is the non-parallax counterpart of
+    ``VBMFiniteDiffGullsFSPLSpaceParallaxFitter``.
+    """
+
+    maxiter: int = 1000
+    damping_parameter: float = 1e-6
+    tol: float = 1e-6
+    vbm_tol: float = 1e-4
+    vbm_reltol: float = 1e-4
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._vbm = _make_vbm_magnifier(self.vbm_tol, self.vbm_reltol)
+        self._last_fit: Optional[SingleLensFitResult] = None
+
+    @staticmethod
+    def _u_numpy(time: np.ndarray, q: np.ndarray) -> np.ndarray:
+        t0, tE, u0, _logrho = q
+        tE_safe = max(abs(float(tE)), 1e-12)
+        tau = (time - t0) / tE_safe
+        return np.sqrt(tau * tau + u0 * u0)
+
+    def _magnification(self, u: np.ndarray, rho: float) -> np.ndarray:
+        return _vbm_espl_magnification(self._vbm, u, rho)
+
+    def _model_and_residual(
+        self,
+        q: np.ndarray,
+        time: np.ndarray,
+        flux: np.ndarray,
+        ferr: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+        rho = np.exp(np.clip(float(q[3]), -50.0, 10.0))
+        u = self._u_numpy(time, q)
+        A = self._magnification(u, rho)
+        fs, fb = _solve_fs_fb_numpy(A, flux, ferr)
+        if not np.isfinite(fs) or not np.isfinite(fb):
+            residual = np.full_like(flux, 1e100, dtype=float)
+            model = np.full_like(flux, np.nan, dtype=float)
+            return model, residual, np.inf, fs, fb
+        model = fs * A + fb
+        residual = flux - model
+        resn = residual / np.maximum(ferr, 1e-12)
+        chi2 = float(np.sum(resn * resn))
+        return model, residual, chi2, fs, fb
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1e-12)
+        q0_np = np.asarray(q0, dtype=float)
+        if time_np.size < 4:
+            raise ValueError(f"Need at least 4 data points, got {time_np.size}.")
+
+        def residual_fun(q):
+            _model, residual, chi2, _fs, _fb = self._model_and_residual(q, time_np, flux_np, ferr_np)
+            if not np.isfinite(chi2):
+                return np.full_like(flux_np, 1e50, dtype=float)
+            return residual / ferr_np
+
+        lower = np.full(4, -np.inf, dtype=float)
+        upper = np.full(4, np.inf, dtype=float)
+        lower[1] = 1e-6
+        lower[3] = -50.0
+        upper[3] = 10.0
+        result = least_squares(
+            residual_fun,
+            q0_np,
+            jac="2-point",
+            method="trf",
+            bounds=(lower, upper),
+            max_nfev=int(self.maxiter),
+            xtol=float(self.tol),
+            ftol=float(self.tol),
+            gtol=float(self.tol),
+        )
+        q = np.asarray(result.x, dtype=float)
+        model, residual, chi2, fs, fb = self._model_and_residual(q, time_np, flux_np, ferr_np)
+        n = int(time_np.size)
+        rho = float(np.exp(np.clip(q[3], -50.0, 10.0)))
+        params = np.asarray([q[0], q[1], q[2], rho], dtype=float)
+        fit = SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=jnp.asarray(params),
+            param_names=("t0", "tE", "u0", "rho"),
+            chi2=jnp.asarray(chi2),
+            chi2_dof=jnp.asarray(chi2 / max(n - 4, 1)),
+            fs=jnp.asarray(fs),
+            fb=jnp.asarray(fb),
+            model_flux=jnp.asarray(model),
+            residual=jnp.asarray(residual),
+            raw_params=jnp.asarray(q),
+        )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
         if self._last_fit is None:
             raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_residual(self._last_fit, **kwargs)
@@ -443,6 +599,7 @@ class PSPLSpaceParallaxFitter:
     tref: float
     satellite_ephemeris_path: str
     use_HJD: bool = True
+    convention: str = "vbm"
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
@@ -452,6 +609,7 @@ class PSPLSpaceParallaxFitter:
         self._P = make_space_parallax_projector(
             self.RA, self.Dec, self.tref, self.satellite_ephemeris_path,
             use_HJD=self.use_HJD,
+            convention=self.convention,
         )
         self._last_fit: Optional[SingleLensFitResult] = None
 
@@ -497,6 +655,7 @@ class FSPLSpaceParallaxFitter:
     tref: float
     satellite_ephemeris_path: str
     use_HJD: bool = True
+    convention: str = "vbm"
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
@@ -506,6 +665,7 @@ class FSPLSpaceParallaxFitter:
         self._P = make_space_parallax_projector(
             self.RA, self.Dec, self.tref, self.satellite_ephemeris_path,
             use_HJD=self.use_HJD,
+            convention=self.convention,
         )
         self._last_fit: Optional[SingleLensFitResult] = None
 
@@ -532,6 +692,151 @@ class FSPLSpaceParallaxFitter:
             min_points=7,
             store_raw_params=True,
             parallax_projector=P,
+        )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
+    """
+    GULLS-convention FSPL space-parallax fitter with VBM magnification.
+
+    This keeps the GULLS trajectory calculation in NumPy, evaluates finite-source
+    single-lens magnification with ``VBMicrolensing.ESPLMag(u, rho)``, and uses
+    SciPy finite-difference least squares for the nonlinear parameters.
+    """
+
+    RA: float
+    Dec: float
+    tref: float
+    satellite_ephemeris_path: str
+    maxiter: int = 1000
+    damping_parameter: float = 1e-6
+    tol: float = 1e-6
+    vbm_tol: float = 1e-4
+    vbm_reltol: float = 1e-4
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._P = make_space_parallax_projector(
+            self.RA,
+            self.Dec,
+            self.tref,
+            self.satellite_ephemeris_path,
+            use_HJD=False,
+            convention="gulls",
+        )
+        self._vbm = _make_vbm_magnifier(self.vbm_tol, self.vbm_reltol)
+        self._last_fit: Optional[SingleLensFitResult] = None
+
+    def _gulls_u_numpy(self, time: np.ndarray, q: np.ndarray) -> np.ndarray:
+        t0, tE, u0, _logrho, piEN, piEE = q
+        P = self._P
+        t = np.asarray(time, dtype=float) + float(np.asarray(P.time_add))
+        t_grid = np.asarray(P.t, dtype=float)
+        r_grid = np.asarray(P.r, dtype=float)
+        r_t = np.column_stack([np.interp(t, t_grid, r_grid[:, j]) for j in range(3)])
+        north = np.asarray(P.sky_north, dtype=float)
+        east = np.asarray(P.sky_east, dtype=float)
+        ne_t = np.column_stack([r_t @ north, r_t @ east])
+        d_ne = (
+            ne_t
+            - np.asarray(P.NE_ref, dtype=float)[None, :]
+            - (t - float(np.asarray(P.tref)))[:, None] * np.asarray(P.NE_vref, dtype=float)[None, :]
+        )
+        d_n = d_ne[:, 0]
+        d_e = d_ne[:, 1]
+        d_tau = -(piEN * d_n + piEE * d_e)
+        d_beta = piEE * d_n - piEN * d_e
+        tE_safe = max(abs(float(tE)), 1e-12)
+        tau = (time - t0) / tE_safe + d_tau
+        beta = u0 + d_beta
+        return np.sqrt(tau * tau + beta * beta)
+
+    def _magnification(self, u: np.ndarray, rho: float) -> np.ndarray:
+        return _vbm_espl_magnification(self._vbm, u, rho)
+
+    def _model_and_residual(
+        self,
+        q: np.ndarray,
+        time: np.ndarray,
+        flux: np.ndarray,
+        ferr: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+        rho = np.exp(np.clip(float(q[3]), -50.0, 10.0))
+        u = self._gulls_u_numpy(time, q)
+        A = self._magnification(u, rho)
+        fs, fb = _solve_fs_fb_numpy(A, flux, ferr)
+        if not np.isfinite(fs) or not np.isfinite(fb):
+            residual = np.full_like(flux, 1e100, dtype=float)
+            model = np.full_like(flux, np.nan, dtype=float)
+            return model, residual, np.inf, fs, fb
+        model = fs * A + fb
+        residual = flux - model
+        resn = residual / np.maximum(ferr, 1e-12)
+        chi2 = float(np.sum(resn * resn))
+        return model, residual, chi2, fs, fb
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1e-12)
+        q0_np = np.asarray(q0, dtype=float)
+        if time_np.size < 7:
+            raise ValueError(f"Need at least 7 data points, got {time_np.size}.")
+
+        def residual_fun(q):
+            _model, residual, chi2, _fs, _fb = self._model_and_residual(q, time_np, flux_np, ferr_np)
+            if not np.isfinite(chi2):
+                return np.full_like(flux_np, 1e50, dtype=float)
+            return residual / ferr_np
+
+        lower = np.full(6, -np.inf, dtype=float)
+        upper = np.full(6, np.inf, dtype=float)
+        lower[1] = 1e-6
+        lower[3] = -50.0
+        upper[3] = 10.0
+        result = least_squares(
+            residual_fun,
+            q0_np,
+            jac="2-point",
+            method="trf",
+            bounds=(lower, upper),
+            max_nfev=int(self.maxiter),
+            xtol=float(self.tol),
+            ftol=float(self.tol),
+            gtol=float(self.tol),
+        )
+        q = np.asarray(result.x, dtype=float)
+        model, residual, chi2, fs, fb = self._model_and_residual(q, time_np, flux_np, ferr_np)
+        n = int(time_np.size)
+        rho = float(np.exp(np.clip(q[3], -50.0, 10.0)))
+        params = np.asarray([q[0], q[1], q[2], rho, q[4], q[5]], dtype=float)
+        fit = SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=jnp.asarray(params),
+            param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
+            chi2=jnp.asarray(chi2),
+            chi2_dof=jnp.asarray(chi2 / max(n - 6, 1)),
+            fs=jnp.asarray(fs),
+            fb=jnp.asarray(fb),
+            model_flux=jnp.asarray(model),
+            residual=jnp.asarray(residual),
+            raw_params=jnp.asarray(q),
+            parallax_projector=self._P,
         )
         self._last_fit = fit
         return fit

@@ -5,7 +5,7 @@ import pytest
 import jax.numpy as jnp
 
 from jacscanomaly import Finder, FinderConfig
-from jacscanomaly.singlelens_model import A_pspl_space_parallax_func
+from jacscanomaly.singlelens_model import A_fspl_logrho_func, A_pspl_space_parallax_func
 from jacscanomaly import parallax
 from jacscanomaly.trajectory import (
     make_space_parallax_projector,
@@ -68,6 +68,40 @@ def test_space_parallax_projector_adds_satellite_offsets():
     assert np.all(np.isfinite(np.asarray(tau)))
     assert np.all(np.isfinite(np.asarray(beta)))
     assert not np.allclose(np.asarray(tau), np.asarray((t - tref) / 100.0))
+
+
+def test_gulls_space_parallax_uses_reference_frame_subtraction(tmp_path):
+    # RA=0, Dec=0 gives sky east=(0,1,0), sky north=(0,0,1).
+    vectors = np.array(
+        [
+            [2450000.0, 1.0, 0.0, 0.0],
+            [2450010.0, 1.0, 0.1, 0.2],
+            [2450020.0, 1.0, 0.4, 0.8],
+        ]
+    )
+    xyz = vectors[:, 1:]
+    dist = np.linalg.norm(xyz, axis=1)
+    ra = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0]))
+    dec = np.degrees(np.arcsin(xyz[:, 2] / dist))
+    table = np.column_stack([vectors[:, 0], ra, dec, dist])
+    path = tmp_path / "gulls_observer.dat"
+    np.savetxt(path, table)
+
+    tref = 2450010.0
+    projector = make_space_parallax_projector(
+        0.0,
+        0.0,
+        tref,
+        str(path),
+        convention="gulls",
+    )
+    t = jnp.asarray([2450000.0, 2450010.0, 2450020.0])
+    tau, beta = u_space_parallax_tau_beta(t, tref, 100.0, 0.1, 0.5, 0.25, projector)
+
+    expected_tau = np.asarray([-0.225, 0.0, -0.025])
+    expected_beta = np.asarray([0.1, 0.1, 0.1])
+    np.testing.assert_allclose(np.asarray(tau), expected_tau, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(beta), expected_beta, rtol=1e-12, atol=1e-12)
 
 
 def test_space_parallax_matches_vbm_source_coordinate_formula():
@@ -190,6 +224,114 @@ def test_finder_builds_pspl_space_parallax_fitter():
     assert finder.fitter.__class__.__name__ == "PSPLSpaceParallaxFitter"
 
 
+def test_finder_supports_vbm_finite_difference_fspl():
+    pytest.importorskip("VBMicrolensing")
+
+    finder = Finder(FinderConfig(fitter_kind="fspl_vbm_fd", grid_backend="cpp"))
+    time = jnp.asarray(np.linspace(-5.0, 5.0, 21))
+    q = jnp.asarray([0.0, 30.0, 0.2, np.log(0.01)])
+    amp = A_fspl_logrho_func(q, time)
+    flux = 1.7 * amp + 0.2
+    ferr = jnp.full_like(time, 0.01)
+
+    fit = finder.fit_single_lens(time, flux, ferr, x0=q)
+
+    assert fit.param_names == ("t0", "tE", "u0", "rho")
+    assert np.isfinite(np.asarray(fit.params)).all()
+    assert float(fit.chi2_dof) < 1.0e-2
+
+
+def test_finder_supports_gulls_vbm_finite_difference_fspl_space_parallax(tmp_path):
+    pytest.importorskip("VBMicrolensing")
+
+    vectors = np.array(
+        [
+            [2450000.0, 1.0, 0.0, 0.0],
+            [2450010.0, 1.0, 0.1, 0.2],
+            [2450020.0, 1.0, 0.4, 0.8],
+        ]
+    )
+    xyz = vectors[:, 1:]
+    dist = np.linalg.norm(xyz, axis=1)
+    ra = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0]))
+    dec = np.degrees(np.arcsin(xyz[:, 2] / dist))
+    path = tmp_path / "gulls_observer.dat"
+    np.savetxt(path, np.column_stack([vectors[:, 0], ra, dec, dist]))
+
+    finder = Finder(
+        FinderConfig(
+            fitter_kind="fspl_space_parallax_gulls_vbm_fd",
+            grid_backend="cpp",
+            ra_deg=0.0,
+            dec_deg=0.0,
+            tref=2450010.0,
+            satellite_ephemeris_path=str(path),
+        )
+    )
+    finder._ensure_fitter(2450010.0)
+    assert finder.fitter.__class__.__name__ == "VBMFiniteDiffGullsFSPLSpaceParallaxFitter"
+
+    time = np.linspace(2450006.0, 2450014.0, 15)
+    q = np.asarray([2450010.0, 30.0, 0.2, np.log(0.01), 0.3, -0.2])
+    u = finder.fitter._gulls_u_numpy(time, q)
+    amp = finder.fitter._magnification(u, np.exp(q[3]))
+    flux = 1.7 * amp + 0.2
+    ferr = np.full_like(time, 0.01)
+
+    fit = finder.fit_single_lens(time, flux, ferr, x0=q)
+
+    assert fit.param_names == ("t0", "tE", "u0", "rho", "piEN", "piEE")
+    assert np.isfinite(np.asarray(fit.params)).all()
+    assert float(fit.chi2) < 1.0e-8
+
+
+def test_gulls_vbm_fitter_handles_offset_time_coordinates(tmp_path):
+    pytest.importorskip("VBMicrolensing")
+
+    vectors = np.array(
+        [
+            [2450000.0, 1.0, 0.0, 0.0],
+            [2450010.0, 1.0, 0.1, 0.2],
+            [2450020.0, 1.0, 0.4, 0.8],
+        ]
+    )
+    xyz = vectors[:, 1:]
+    dist = np.linalg.norm(xyz, axis=1)
+    ra = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0]))
+    dec = np.degrees(np.arcsin(xyz[:, 2] / dist))
+    path = tmp_path / "gulls_observer.dat"
+    np.savetxt(path, np.column_stack([vectors[:, 0], ra, dec, dist]))
+
+    finder = Finder(
+        FinderConfig(
+            fitter_kind="fspl_space_parallax_gulls_vbm_fd",
+            grid_backend="cpp",
+            ra_deg=0.0,
+            dec_deg=0.0,
+            tref=10.0,
+            satellite_ephemeris_path=str(path),
+        )
+    )
+    finder._ensure_fitter(10.0)
+
+    time = np.asarray([6.0, 10.0, 14.0])
+    q = np.asarray([10.0, 30.0, 0.2, np.log(0.01), 0.3, -0.2])
+    u_numpy = finder.fitter._gulls_u_numpy(time, q)
+    tau, beta = u_space_parallax_tau_beta(
+        jnp.asarray(time),
+        q[0],
+        q[1],
+        q[2],
+        q[4],
+        q[5],
+        finder.fitter._P,
+    )
+    u_jax = np.sqrt(np.asarray(tau) ** 2 + np.asarray(beta) ** 2)
+
+    np.testing.assert_allclose(u_numpy, u_jax, rtol=1e-10, atol=1e-10)
+    assert np.max(u_numpy) < 1.0
+
+
 def test_finder_fit_single_lens_supports_pspl_space_parallax():
     if not ROMAN_SATELLITE1.exists():
         pytest.skip("Roman satellite sample file is not available.")
@@ -224,6 +366,24 @@ def test_space_parallax_requires_satellite_path():
     finder = Finder(
         FinderConfig(
             fitter_kind="pspl_space_parallax",
+            ra_deg=267.623337808,
+            dec_deg=-29.1164180355,
+        )
+    )
+
+    with pytest.raises(ValueError, match="satellite_ephemeris_path"):
+        finder._ensure_fitter(2459000.0)
+
+
+def test_gulls_vbm_fd_space_parallax_requires_sky_and_satellite_path():
+    finder = Finder(FinderConfig(fitter_kind="fspl_space_parallax_gulls_vbm_fd"))
+
+    with pytest.raises(ValueError, match="ra_deg and dec_deg"):
+        finder._ensure_fitter(2459000.0)
+
+    finder = Finder(
+        FinderConfig(
+            fitter_kind="fspl_space_parallax_gulls_vbm_fd",
             ra_deg=267.623337808,
             dec_deg=-29.1164180355,
         )

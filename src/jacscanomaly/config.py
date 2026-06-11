@@ -56,10 +56,12 @@ class FinderConfig:
     fitter_kind: Literal[
         "pspl",
         "fspl",
+        "fspl_vbm_fd",
         "pspl_parallax",
         "fspl_parallax",
         "pspl_space_parallax",
         "fspl_space_parallax",
+        "fspl_space_parallax_gulls_vbm_fd",
     ] = "pspl"
     """
     Choice of single-lens model used for the initial fit.
@@ -70,6 +72,9 @@ class FinderConfig:
         Point-Source Point-Lens (standard Paczyński curve).
     - ``"fspl"`` :
         Finite-Source Point-Lens (log-rho parameterization).
+    - ``"fspl_vbm_fd"`` :
+        Finite-Source Point-Lens using VBMicrolensing ESPL magnification and
+        finite-difference SciPy least squares.
     - ``"pspl_parallax"`` :
         PSPL with annual parallax.
     - ``"fspl_parallax"`` :
@@ -78,6 +83,9 @@ class FinderConfig:
         PSPL with annual parallax plus a spacecraft ephemeris.
     - ``"fspl_space_parallax"`` :
         FSPL with annual parallax plus a spacecraft ephemeris.
+    - ``"fspl_space_parallax_gulls_vbm_fd"`` :
+        GULLS-convention FSPL space-parallax fitter using VBMicrolensing ESPL
+        magnification and finite-difference SciPy least squares.
     """
 
     ra_deg: Optional[float] = None
@@ -95,10 +103,25 @@ class FinderConfig:
 
     satellite_ephemeris_path: Optional[str] = None
     """
-    Path to a VBMicrolensing/RTModel satellite ephemeris table.
+    Path to the spacecraft/observer ephemeris table used by space-parallax
+    models.
 
-    Required for ``"pspl_space_parallax"`` and ``"fspl_space_parallax"``.
-    Expected columns are ``JD RA_deg Dec_deg distance_AU``.
+    Required for ``"pspl_space_parallax"``, ``"fspl_space_parallax"``, and
+    ``"fspl_space_parallax_gulls_vbm_fd"``. Expected columns are
+    ``JD RA_deg Dec_deg distance_AU``. The interpretation of the position is
+    controlled by ``space_parallax_convention``.
+    """
+
+    space_parallax_convention: Literal["vbm", "gulls"] = "vbm"
+    """
+    Convention used for ``"*_space_parallax"`` models.
+
+    - ``"vbm"`` interprets ``satellite_ephemeris_path`` as a geocentric
+      VBMicrolensing/RTModel satellite table and adds it to the annual Earth
+      parallax displacement.
+    - ``"gulls"`` interprets ``satellite_ephemeris_path`` as a heliocentric
+      GULLS observer ephemeris and uses the GULLS reference-frame subtraction
+      ``x(t) - x(tref) - v(tref) * (t - tref)``.
     """
 
     parallax_use_HJD: bool = True
@@ -136,7 +159,7 @@ class FinderConfig:
     data point.
     """
 
-    auto_init_u0_min: float = 0.01
+    auto_init_u0_min: float = 1e-4
     """Smallest allowed u0 seed after converting from teff/tE."""
 
     auto_init_u0_max: float = 1.0
@@ -154,7 +177,7 @@ class FinderConfig:
     auto_init_logrho: float = -7.0
     """Initial logrho used for FSPL models when x0 is omitted."""
 
-    pspl_fit_u0_min: float = 0.01
+    pspl_fit_u0_min: float = 1e-4
     """Smallest allowed absolute u0 for the C++ PSPL fitter."""
 
     pspl_fit_min_t0_support_points: int = 3

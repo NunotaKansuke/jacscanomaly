@@ -522,3 +522,91 @@ def space_orbital_parallax_offsets(t, piEN, piEE, P: SpaceOrbitalParallaxProject
 
 
 space_orbital_parallax_offsets_jit = jax.jit(space_orbital_parallax_offsets)
+
+
+@jax.tree_util.register_pytree_node_class
+class GullsSpaceParallaxProjector:
+    """
+    GULLS-style observer-frame parallax projector.
+
+    The observer ephemeris is interpreted as a heliocentric observer position
+    table in equatorial coordinates.  Unlike the VBMicrolensing-style
+    ``SpaceOrbitalParallaxProjector``, this convention does not add a separate
+    Earth annual parallax term.  Instead it mirrors GULLS' parallax class:
+
+    ``observer(t) - observer(tref) - observer_velocity(tref) * (t - tref)``
+
+    is projected onto the sky and converted to trajectory shifts.
+    """
+
+    def __init__(self, observer: SatelliteEphemeris, RA_deg, Dec_deg, tref, *, time_add=0.0):
+        dtype = observer.t.dtype
+        self.t = observer.t
+        self.r = observer.r
+        self.v = observer.v
+
+        tref_user = jnp.asarray(tref, dtype=dtype)
+        origin = jnp.asarray(2450000.0, dtype=dtype)
+        self.time_add = jnp.where(tref_user < origin, origin, jnp.asarray(time_add, dtype=dtype))
+        self.tref = tref_user + self.time_add
+
+        self.sky_north, self.sky_east = get_north_east(RA_deg, Dec_deg)
+        r_ref = interp_linear(self.tref[None], self.t, self.r)[0]
+        v_ref = interp_linear(self.tref[None], self.t, self.v)[0]
+        self.NE_ref = jnp.stack([r_ref @ self.sky_north, r_ref @ self.sky_east])
+        self.NE_vref = jnp.stack([v_ref @ self.sky_north, v_ref @ self.sky_east])
+
+    def tree_flatten(self):
+        children = (
+            self.t,
+            self.r,
+            self.v,
+            self.tref,
+            self.time_add,
+            self.sky_north,
+            self.sky_east,
+            self.NE_ref,
+            self.NE_vref,
+        )
+        return children, None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        (
+            obj.t,
+            obj.r,
+            obj.v,
+            obj.tref,
+            obj.time_add,
+            obj.sky_north,
+            obj.sky_east,
+            obj.NE_ref,
+            obj.NE_vref,
+        ) = children
+        return obj
+
+
+def gulls_space_parallax_offsets(t, piEN, piEE, P: GullsSpaceParallaxProjector):
+    t = jnp.asarray(t, dtype=P.tref.dtype) + P.time_add
+    r_t = interp_linear(t, P.t, P.r)
+    NE_t = jnp.stack([r_t @ P.sky_north, r_t @ P.sky_east], axis=-1)
+    d_ne = NE_t - P.NE_ref[None, :] - P.NE_vref[None, :] * (t - P.tref)[:, None]
+    d_n = d_ne[:, 0]
+    d_e = d_ne[:, 1]
+
+    d_tau = -(piEN * d_n + piEE * d_e)
+    d_beta = piEE * d_n - piEN * d_e
+    return d_tau, d_beta
+
+
+gulls_space_parallax_offsets_jit = jax.jit(gulls_space_parallax_offsets)
+
+
+def any_space_parallax_offsets(t, piEN, piEE, P):
+    if isinstance(P, GullsSpaceParallaxProjector):
+        return gulls_space_parallax_offsets(t, piEN, piEE, P)
+    return space_orbital_parallax_offsets(t, piEN, piEE, P)
+
+
+any_space_parallax_offsets_jit = jax.jit(any_space_parallax_offsets)

@@ -15,10 +15,12 @@ from .singlelens_fit import (
     PSPLFitter,
     CPPPSPLFitter,
     FSPLFitter,
+    VBMFiniteDiffFSPLFitter,
     PSPLParallaxFitter,
     FSPLParallaxFitter,
     PSPLSpaceParallaxFitter,
     FSPLSpaceParallaxFitter,
+    VBMFiniteDiffGullsFSPLSpaceParallaxFitter,
 )
 from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
@@ -126,10 +128,12 @@ class Finder:
         valid = {
             "pspl",
             "fspl",
+            "fspl_vbm_fd",
             "pspl_parallax",
             "fspl_parallax",
             "pspl_space_parallax",
             "fspl_space_parallax",
+            "fspl_space_parallax_gulls_vbm_fd",
         }
         if k not in valid:
             raise ValueError(
@@ -140,14 +144,25 @@ class Finder:
         # -----------------------------
         # 2) Validate model requirements
         # -----------------------------
-        needs_parallax = k.endswith("_parallax")
-        if needs_parallax:
+        needs_sky = k in {
+            "pspl_parallax",
+            "fspl_parallax",
+            "pspl_space_parallax",
+            "fspl_space_parallax",
+            "fspl_space_parallax_gulls_vbm_fd",
+        }
+        if needs_sky:
             if self.config.ra_deg is None or self.config.dec_deg is None:
                 raise ValueError(
                     f"{k} requires ra_deg and dec_deg in FinderConfig "
                     "(sky coordinates are required for parallax)."
                 )
-        if k.endswith("_space_parallax") and self.config.satellite_ephemeris_path is None:
+        needs_satellite = k in {
+            "pspl_space_parallax",
+            "fspl_space_parallax",
+            "fspl_space_parallax_gulls_vbm_fd",
+        }
+        if needs_satellite and self.config.satellite_ephemeris_path is None:
             raise ValueError(
                 f"{k} requires satellite_ephemeris_path in FinderConfig."
             )
@@ -168,6 +183,10 @@ class Finder:
     
         if k == "fspl":
             self.fitter = FSPLFitter()
+            return
+
+        if k == "fspl_vbm_fd":
+            self.fitter = VBMFiniteDiffFSPLFitter()
             return
     
         # Parallax variants
@@ -191,6 +210,7 @@ class Finder:
                 tref=tref,
                 satellite_ephemeris_path=self.config.satellite_ephemeris_path,
                 use_HJD=self.config.parallax_use_HJD,
+                convention=self.config.space_parallax_convention,
             )
             return
 
@@ -201,6 +221,16 @@ class Finder:
                 tref=tref,
                 satellite_ephemeris_path=self.config.satellite_ephemeris_path,
                 use_HJD=self.config.parallax_use_HJD,
+                convention=self.config.space_parallax_convention,
+            )
+            return
+
+        if k == "fspl_space_parallax_gulls_vbm_fd":
+            self.fitter = VBMFiniteDiffGullsFSPLSpaceParallaxFitter(
+                RA=self.config.ra_deg,
+                Dec=self.config.dec_deg,
+                tref=tref,
+                satellite_ephemeris_path=self.config.satellite_ephemeris_path,
             )
             return
     
@@ -544,11 +574,11 @@ class Finder:
         k = self.config.fitter_kind
         if k == "pspl":
             return np.asarray([t0, tE, u0], dtype=float)
-        if k == "fspl":
+        if k in {"fspl", "fspl_vbm_fd"}:
             return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho)], dtype=float)
         if k in {"pspl_parallax", "pspl_space_parallax"}:
             return np.asarray([t0, tE, u0, 0.0, 0.0], dtype=float)
-        if k in {"fspl_parallax", "fspl_space_parallax"}:
+        if k in {"fspl_parallax", "fspl_space_parallax", "fspl_space_parallax_gulls_vbm_fd"}:
             return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho), 0.0, 0.0], dtype=float)
         raise ValueError(f"Unknown fitter_kind '{k}'.")
 
