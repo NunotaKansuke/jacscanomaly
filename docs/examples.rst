@@ -71,6 +71,18 @@ an explicit initial guess:
    x0 = np.array([50.0, 8.0, 0.2])
    fit = finder.fit_single_lens(time, flux, ferr, x0=x0)
 
+If you already trust a set of baseline nonlinear parameters and want to scan
+residuals without refitting them, pass ``refit=False`` to
+:meth:`jacscanomaly.Finder.run`:
+
+.. code-block:: python
+
+   x0 = np.array([50.0, 8.0, 0.2])
+   result = finder.run(time, flux, ferr, x0=x0, refit=False)
+
+The nonlinear parameters are fixed, while ``fs`` and ``fb`` are still solved
+analytically for the input light curve.
+
 Using candidate criteria
 ------------------------
 

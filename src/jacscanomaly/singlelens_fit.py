@@ -177,6 +177,63 @@ def _fit_single_lens(
     )
 
 
+def evaluate_single_lens_fixed(
+    *,
+    time: jnp.ndarray,
+    flux: jnp.ndarray,
+    ferr: jnp.ndarray,
+    x0: jnp.ndarray,
+    build_A: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    dof: int,
+    param_names: Tuple[str, ...],
+    x_to_params: Optional[Callable[[jnp.ndarray], jnp.ndarray]] = None,
+    min_points: int = 4,
+    store_raw_params: bool = False,
+    parallax_projector: Optional[Any] = None,
+) -> SingleLensFitResult:
+    """
+    Evaluate a single-lens model at fixed nonlinear parameters.
+
+    The nonlinear parameters in ``x0`` are not optimized. The linear flux
+    parameters ``fs`` and ``fb`` are still solved analytically for the supplied
+    light curve, matching the normal fitter convention.
+    """
+    n = int(time.shape[0])
+    if n < min_points:
+        raise ValueError(f"Need at least {min_points} data points, got {n}.")
+
+    eps = 1e-12
+    ferr = jnp.maximum(ferr, eps)
+
+    x = jnp.asarray(x0, dtype=time.dtype)
+    A = build_A(x, time)
+    fs, fb = solve_fs_fb(A, flux, ferr)
+    model_flux = fs * A + fb
+    residual = flux - model_flux
+    resn = residual / ferr
+    chi2 = chi2_from_res(resn)
+    chi2_dof = chi2 / max(n - dof, 1)
+
+    params_phys = x if x_to_params is None else x_to_params(x)
+    raw = x if store_raw_params else None
+
+    return SingleLensFitResult(
+        time=np.asarray(time),
+        flux=np.asarray(flux),
+        ferr=np.asarray(ferr),
+        params=params_phys,
+        param_names=param_names,
+        chi2=chi2,
+        chi2_dof=chi2_dof,
+        fs=fs,
+        fb=fb,
+        model_flux=model_flux,
+        residual=residual,
+        raw_params=raw,
+        parallax_projector=parallax_projector,
+    )
+
+
 @dataclass
 class PSPLFitter:
     """

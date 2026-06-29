@@ -102,3 +102,19 @@ You can also provide an explicit nonlinear initial guess:
 
    x0 = np.array([2459000.0, 30.0, 0.1])  # t0, tE, u0
    fit = finder.fit_single_lens(time, flux, ferr, x0=x0)
+
+Run the scan with fixed baseline parameters
+-------------------------------------------
+
+By default, :meth:`jacscanomaly.Finder.run` treats ``x0`` as an initial guess
+and refits the selected single-lens model before scanning residuals. If you
+already have baseline nonlinear parameters and want to scan without refitting
+them, pass ``refit=False``:
+
+.. code-block:: python
+
+   x0 = np.array([2459000.0, 30.0, 0.1])  # t0, tE, u0
+   result = finder.run(time, flux, ferr, x0=x0, refit=False)
+
+In this mode, the nonlinear parameters in ``x0`` are fixed. The linear flux
+parameters ``fs`` and ``fb`` are still solved for the supplied light curve.

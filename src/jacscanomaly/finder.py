@@ -21,6 +21,15 @@ from .singlelens_fit import (
     PSPLSpaceParallaxFitter,
     FSPLSpaceParallaxFitter,
     VBMFiniteDiffGullsFSPLSpaceParallaxFitter,
+    evaluate_single_lens_fixed,
+)
+from .singlelens_model import (
+    A_pspl_func,
+    A_fspl_logrho_func,
+    A_pspl_parallax_func,
+    A_fspl_parallax_logrho_func,
+    A_pspl_space_parallax_func,
+    A_fspl_space_parallax_logrho_func,
 )
 from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
@@ -282,6 +291,7 @@ class Finder:
         ferr,
         x0=None,
         *,
+        refit: bool = True,
         verbose: bool = True,
         log: Optional[logging.Logger] = None,
     ) -> AnomalyResult:
@@ -295,6 +305,10 @@ class Finder:
         x0 : array-like, optional
             Initial guess for the single-lens model parameters. If omitted, the
             finder estimates multiple initial values and uses the best fit.
+        refit : bool, optional
+            If True, optimize the single-lens nonlinear parameters starting from
+            ``x0``. If False, require ``x0`` and use it as fixed nonlinear
+            parameters; only the linear flux parameters are solved.
         verbose : bool, optional
             If True, print progress messages.
         log : logging.Logger, optional
@@ -312,7 +326,9 @@ class Finder:
 
         self._ensure_fitter(float(np.median(time_np)))
 
-        if x0_j is None:
+        if not refit:
+            fit = self._fixed_single_lens_from_x0(time_j, flux_j, ferr_j, x0_j)
+        elif x0_j is None:
             if verbose:
                 (logger if log is None else log).info("Estimating single-lens initial values.")
             fit = self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
@@ -452,6 +468,177 @@ class Finder:
             raise RuntimeError(msg)
 
         return best_fit
+
+    def _fixed_single_lens_from_x0(
+        self,
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        x0_j: Optional[jnp.ndarray],
+    ) -> SingleLensFitResult:
+        if x0_j is None:
+            raise ValueError("Finder.run(refit=False) requires x0.")
+
+        k = self.config.fitter_kind
+        P = getattr(self.fitter, "_P", None)
+
+        if k == "pspl":
+            return evaluate_single_lens_fixed(
+                time=time_j,
+                flux=flux_j,
+                ferr=ferr_j,
+                x0=x0_j,
+                build_A=A_pspl_func,
+                dof=3,
+                param_names=("t0", "tE", "u0"),
+                min_points=4,
+            )
+
+        if k == "fspl":
+            def q_to_params(q):
+                t0, tE, u0, logrho = q
+                return jnp.array([t0, tE, u0, jnp.exp(logrho)])
+
+            return evaluate_single_lens_fixed(
+                time=time_j,
+                flux=flux_j,
+                ferr=ferr_j,
+                x0=x0_j,
+                build_A=A_fspl_logrho_func,
+                dof=4,
+                param_names=("t0", "tE", "u0", "rho"),
+                x_to_params=q_to_params,
+                min_points=4,
+                store_raw_params=True,
+            )
+
+        if k == "fspl_vbm_fd":
+            return self._fixed_single_lens_from_numpy_model(
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                x0_j=x0_j,
+                dof=4,
+                param_names=("t0", "tE", "u0", "rho"),
+                parallax_projector=None,
+            )
+
+        if k == "pspl_parallax":
+            return evaluate_single_lens_fixed(
+                time=time_j,
+                flux=flux_j,
+                ferr=ferr_j,
+                x0=x0_j,
+                build_A=lambda p, t: A_pspl_parallax_func(p, t, P),
+                dof=5,
+                param_names=("t0", "tE", "u0", "piEN", "piEE"),
+                min_points=6,
+                parallax_projector=P,
+            )
+
+        if k == "fspl_parallax":
+            def q_to_params(q):
+                t0, tE, u0, logrho, piEN, piEE = q
+                return jnp.array([t0, tE, u0, jnp.exp(logrho), piEN, piEE])
+
+            return evaluate_single_lens_fixed(
+                time=time_j,
+                flux=flux_j,
+                ferr=ferr_j,
+                x0=x0_j,
+                build_A=lambda q, t: A_fspl_parallax_logrho_func(q, t, P),
+                dof=6,
+                param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
+                x_to_params=q_to_params,
+                min_points=7,
+                store_raw_params=True,
+                parallax_projector=P,
+            )
+
+        if k == "pspl_space_parallax":
+            return evaluate_single_lens_fixed(
+                time=time_j,
+                flux=flux_j,
+                ferr=ferr_j,
+                x0=x0_j,
+                build_A=lambda p, t: A_pspl_space_parallax_func(p, t, P),
+                dof=5,
+                param_names=("t0", "tE", "u0", "piEN", "piEE"),
+                min_points=6,
+                parallax_projector=P,
+            )
+
+        if k == "fspl_space_parallax":
+            def q_to_params(q):
+                t0, tE, u0, logrho, piEN, piEE = q
+                return jnp.array([t0, tE, u0, jnp.exp(logrho), piEN, piEE])
+
+            return evaluate_single_lens_fixed(
+                time=time_j,
+                flux=flux_j,
+                ferr=ferr_j,
+                x0=x0_j,
+                build_A=lambda q, t: A_fspl_space_parallax_logrho_func(q, t, P),
+                dof=6,
+                param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
+                x_to_params=q_to_params,
+                min_points=7,
+                store_raw_params=True,
+                parallax_projector=P,
+            )
+
+        if k == "fspl_space_parallax_gulls_vbm_fd":
+            return self._fixed_single_lens_from_numpy_model(
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                x0_j=x0_j,
+                dof=6,
+                param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
+                parallax_projector=P,
+            )
+
+        raise ValueError(f"Unknown fitter_kind '{k}'.")
+
+    def _fixed_single_lens_from_numpy_model(
+        self,
+        *,
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        x0_j: jnp.ndarray,
+        dof: int,
+        param_names: tuple[str, ...],
+        parallax_projector,
+    ) -> SingleLensFitResult:
+        if not hasattr(self.fitter, "_model_and_residual"):
+            raise TypeError(
+                f"{type(self.fitter).__name__} does not support fixed-parameter evaluation."
+            )
+
+        time_np = np.asarray(jax.device_get(time_j), dtype=float)
+        flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
+        ferr_np = np.maximum(np.asarray(jax.device_get(ferr_j), dtype=float), 1e-12)
+        q = np.asarray(jax.device_get(x0_j), dtype=float)
+        model, residual, chi2, fs, fb = self.fitter._model_and_residual(q, time_np, flux_np, ferr_np)
+        rho = float(np.exp(np.clip(q[3], -50.0, 10.0)))
+        params = np.asarray([q[0], q[1], q[2], rho, *q[4:]], dtype=float)
+
+        return SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=jnp.asarray(params),
+            param_names=param_names,
+            chi2=jnp.asarray(chi2),
+            chi2_dof=jnp.asarray(chi2 / max(int(time_np.size) - dof, 1)),
+            fs=jnp.asarray(fs),
+            fb=jnp.asarray(fb),
+            model_flux=jnp.asarray(model),
+            residual=jnp.asarray(residual),
+            raw_params=jnp.asarray(q),
+            parallax_projector=parallax_projector,
+        )
 
     def _estimate_single_lens_initial_guesses(
         self,
