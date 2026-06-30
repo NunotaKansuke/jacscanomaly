@@ -3,20 +3,26 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import jit
 
-_mag_fspl = None
+def _make_fspl_disk():
+    try:
+        from microjax.fastlens import fspl_disk
+    except ImportError:
+        return None
+    return fspl_disk()
+
+
+_mag_fspl = _make_fspl_disk()
 
 
 def _get_fspl_disk():
     global _mag_fspl
     if _mag_fspl is None:
-        try:
-            from microjax.fastlens import fspl_disk
-        except ImportError as exc:
+        _mag_fspl = _make_fspl_disk()
+        if _mag_fspl is None:
             raise ImportError(
                 "microjax is required for FSPL magnification. Install it from "
                 "https://github.com/ShotaMiyazaki94/microjax before using FSPL fitters."
-            ) from exc
-        _mag_fspl = fspl_disk()
+            )
     return _mag_fspl
 
 @jit
