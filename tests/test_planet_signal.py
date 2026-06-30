@@ -1,7 +1,81 @@
 import numpy as np
 
-from jacscanomaly import Finder, FinderConfig, PlanetSignalConfig, PlanetSignalExtractor
+from jacscanomaly import (
+    Finder,
+    FinderConfig,
+    FlatBaselineDiagnostic,
+    PlanetSignalCandidate,
+    PlanetSignalClassificationConfig,
+    PlanetSignalConfig,
+    PlanetSignalExtractor,
+    PlanetSignalResult,
+)
+from jacscanomaly.singlelens_fit import SingleLensFitResult
 from jacscanomaly.singlelens_model import A_pspl_func
+
+
+def _flat_diagnostic(use_flat_baseline=False):
+    return FlatBaselineDiagnostic(
+        use_flat_baseline=use_flat_baseline,
+        peak_in_mask=False,
+        u0=0.2,
+        n_peak_support=0,
+        n_unmasked_peak_support=0,
+        masked_peak_fraction=0.0,
+        dchi2_flat_minus_pspl=0.0,
+        improvement_n_eff=0.0,
+        improvement_peak_frac=0.0,
+    )
+
+
+def _classification_result(time, flux, ferr, residual, mask, *, use_flat_baseline=False):
+    params = np.array([10.0, 3.0, 0.2])
+    A = np.asarray(A_pspl_func(params, time))
+    fb = 1.0
+    fs = 2.0
+    model_flux = fs * A + fb
+    fit = SingleLensFitResult(
+        time=time,
+        flux=flux,
+        ferr=ferr,
+        params=params,
+        param_names=("t0", "tE", "u0"),
+        chi2=np.array(float(np.sum((residual / ferr) ** 2))),
+        chi2_dof=np.array(1.0),
+        fs=np.array(fs),
+        fb=np.array(fb),
+        model_flux=model_flux,
+        residual=residual,
+    )
+    candidate = PlanetSignalCandidate(
+        start_index=int(np.flatnonzero(mask)[0]),
+        end_index=int(np.flatnonzero(mask)[-1]) + 1,
+        t_start=float(time[np.flatnonzero(mask)[0]]),
+        t_end=float(time[np.flatnonzero(mask)[-1]]),
+        t_center=float(np.mean(time[mask])),
+        n_points=int(np.sum(mask)),
+        chi2=float(np.sum((residual[mask] / ferr[mask]) ** 2)),
+        reduced_chi2=1.0,
+        max_abs_z=float(np.max(np.abs(residual[mask] / ferr[mask]))),
+        peak_time=float(time[np.argmax(np.abs(residual / ferr))]),
+        peak_z=float(np.max(residual / ferr)),
+        signed_sum_z=float(np.sum(residual[mask] / ferr[mask])),
+    )
+    return PlanetSignalResult(
+        time=time,
+        flux=flux,
+        ferr=ferr,
+        initial_fit=fit,
+        refined_fit=fit,
+        initial_residual=residual,
+        refined_residual=residual,
+        signal_mask=mask,
+        point_weight=np.where(mask, 0.0, 1.0),
+        flat_baseline_diagnostic=_flat_diagnostic(use_flat_baseline=use_flat_baseline),
+        iterations=(),
+        candidates=(candidate,),
+        best=candidate,
+    )
 
 
 def test_planet_signal_extractor_masks_local_unexplained_signal():
@@ -137,13 +211,143 @@ def test_planet_signal_extractor_beam_interval_selects_connected_interval():
     assert np.all(result.signal_mask[(time > 9.4) & (time < 10.4)])
 
 
-def test_planet_signal_extractor_is_pspl_only_for_now():
+def test_planet_signal_extractor_uses_flat_baseline_for_masked_tiny_u0_peak():
+    time = np.linspace(0.0, 20.0, 120)
+    flux = np.ones_like(time) * 2.0
+    ferr = np.full_like(time, 0.1)
+    params = np.array([10.0, 1.0, 1.0e-4])
+    fit = SingleLensFitResult(
+        time=time,
+        flux=flux,
+        ferr=ferr,
+        params=params,
+        param_names=("t0", "tE", "u0"),
+        chi2=np.array(0.0),
+        chi2_dof=np.array(0.0),
+        fs=np.array(1.0),
+        fb=np.array(1.0),
+        model_flux=np.ones_like(time),
+        residual=flux - 1.0,
+    )
+    mask = np.abs(time - 10.0) < 2.0
+    extractor = PlanetSignalExtractor(Finder(FinderConfig()))
+
+    diagnostic = extractor._flat_baseline_diagnostic(fit, mask)
+    assert diagnostic.use_flat_baseline
+    assert diagnostic.peak_in_mask
+    assert diagnostic.n_unmasked_peak_support == 0
+    assert diagnostic.masked_peak_fraction == 1.0
+
+    flat = extractor._fit_flat_baseline_and_evaluate_full(
+        time_j=time,
+        flux_j=flux,
+        ferr_j=ferr,
+        keep_mask_np=~mask,
+        fit=fit,
+    )
+
+    assert flat.fs == 0.0
+    assert np.allclose(flat.model_flux, 2.0)
+    assert np.allclose(np.asarray(flat.params), params)
+
+
+def test_planet_signal_classifier_identifies_single_peak():
+    time = np.linspace(0.0, 20.0, 401)
+    ferr = np.full_like(time, 0.02)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = 0.35 * np.exp(-0.5 * ((time - 9.2) / 0.12) ** 2)
+    flux = model + residual
+    mask = np.abs(time - 9.2) < 0.45
+    result = _classification_result(time, flux, ferr, residual, mask)
+
+    classification = result.classify()
+
+    assert classification.signal_type == "single_peak"
+    assert classification.best is not None
+    assert len(classification.best.peaks) == 1
+    assert abs(classification.best.peaks[0].time - 9.2) < 0.1
+    assert classification.best.peaks[0].strength_ratio > 1.0
+
+
+def test_planet_signal_classifier_identifies_dip():
+    time = np.linspace(0.0, 20.0, 401)
+    ferr = np.full_like(time, 0.02)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = -0.25 * np.exp(-0.5 * ((time - 10.6) / 0.16) ** 2)
+    flux = model + residual
+    mask = np.abs(time - 10.6) < 0.5
+    result = _classification_result(time, flux, ferr, residual, mask)
+
+    classification = result.classify()
+
+    assert classification.signal_type == "dip"
+    assert classification.best is not None
+    assert len(classification.best.dips) == 1
+    assert abs(classification.best.dips[0].time - 10.6) < 0.1
+    assert classification.best.dips[0].strength_ratio < 1.0
+
+
+def test_planet_signal_classifier_identifies_two_peak_crossing_structure():
+    time = np.linspace(0.0, 20.0, 401)
+    ferr = np.full_like(time, 0.02)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = (
+        0.32 * np.exp(-0.5 * ((time - 9.0) / 0.10) ** 2)
+        + 0.30 * np.exp(-0.5 * ((time - 11.0) / 0.10) ** 2)
+        + 0.05 * ((time > 9.2) & (time < 10.8))
+    )
+    flux = model + residual
+    mask = (time > 8.6) & (time < 11.4)
+    result = _classification_result(time, flux, ferr, residual, mask)
+
+    classification = result.classify(
+        PlanetSignalClassificationConfig(min_peak_abs_z=4.0)
+    )
+
+    assert classification.signal_type == "caustic_crossing"
+    assert classification.best is not None
+    assert len(classification.best.peaks) == 2
+    assert abs(classification.best.peaks[0].time - 9.0) < 0.1
+    assert abs(classification.best.peaks[1].time - 11.0) < 0.1
+    assert all(peak.timescale > 0.0 for peak in classification.best.peaks)
+
+
+def test_planet_signal_classifier_marks_flat_baseline_as_whole_event_anomaly():
+    time = np.linspace(0.0, 20.0, 401)
+    ferr = np.full_like(time, 0.02)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = 0.3 * np.exp(-0.5 * ((time - 10.0) / 1.0) ** 2)
+    flux = model + residual
+    mask = np.abs(time - 10.0) < 2.0
+    result = _classification_result(
+        time,
+        flux,
+        ferr,
+        residual,
+        mask,
+        use_flat_baseline=True,
+    )
+
+    classification = result.classify()
+
+    assert classification.signal_type == "whole_event_anomaly"
+
+
+def test_planet_signal_extractor_accepts_non_pspl_fixed_fit():
     finder = Finder(FinderConfig(fitter_kind="fspl", grid_backend="jax"))
     extractor = PlanetSignalExtractor(finder)
 
-    try:
-        extractor.run([0, 1, 2, 3], [1, 1, 1, 1], [0.1, 0.1, 0.1, 0.1], x0=[1, 1, 0.1, -7])
-    except NotImplementedError as exc:
-        assert "pspl" in str(exc)
-    else:
-        raise AssertionError("Expected NotImplementedError.")
+    time = np.linspace(0.0, 4.0, 20)
+    result = extractor.run(
+        time,
+        np.ones_like(time),
+        np.full_like(time, 0.1),
+        x0=[2.0, 1.0, 0.1, -7.0],
+        refit=False,
+    )
+
+    assert tuple(result.refined_fit.param_names) == ("t0", "tE", "u0", "rho")

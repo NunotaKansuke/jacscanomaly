@@ -29,6 +29,11 @@ def _single_lens_model_flux(fit, time) -> np.ndarray:
     params = jnp.asarray(fit.params)
     time_j = jnp.asarray(time)
 
+    if names == ("t0", "tE", "u0", "rho", "piEN", "piEE"):
+        P = getattr(fit, "parallax_projector", None)
+        if P is not None and hasattr(P, "NE_ref"):
+            return _gulls_vbm_model_flux(fit, time)
+
     if names == ("t0", "tE", "u0"):
         A = A_pspl_func(params, time_j)
     elif names == ("t0", "tE", "u0", "rho"):
@@ -37,7 +42,7 @@ def _single_lens_model_flux(fit, time) -> np.ndarray:
         P = getattr(fit, "parallax_projector", None)
         if P is None:
             raise ValueError("Cannot plot parallax model without fit.parallax_projector.")
-        if hasattr(P, "earth"):
+        if hasattr(P, "earth") or hasattr(P, "NE_ref"):
             A = A_pspl_space_parallax_func(params, time_j, P)
         else:
             A = A_pspl_parallax_func(params, time_j, P)
@@ -45,7 +50,7 @@ def _single_lens_model_flux(fit, time) -> np.ndarray:
         P = getattr(fit, "parallax_projector", None)
         if P is None:
             raise ValueError("Cannot plot parallax model without fit.parallax_projector.")
-        if hasattr(P, "earth"):
+        if hasattr(P, "earth") or hasattr(P, "NE_ref"):
             A = A_fspl_space_parallax_func(params, time_j, P)
         else:
             A = A_fspl_parallax_func(params, time_j, P)
@@ -58,6 +63,47 @@ def _single_lens_model_flux(fit, time) -> np.ndarray:
 
     flux = fit.fs * A + fit.fb
     return np.asarray(jax.device_get(flux), dtype=float)
+
+
+def _gulls_vbm_model_flux(fit, time) -> np.ndarray:
+    try:
+        import VBMicrolensing
+    except ImportError as exc:  # pragma: no cover - optional runtime dependency
+        raise ImportError("VBMicrolensing is required to plot GULLS FSPL fits.") from exc
+
+    P = getattr(fit, "parallax_projector", None)
+    if P is None:
+        raise ValueError("Cannot plot GULLS parallax model without fit.parallax_projector.")
+
+    t0, tE, u0, rho, piEN, piEE = map(float, np.asarray(fit.params, dtype=float)[:6])
+    t = np.asarray(time, dtype=float)
+    t_eval = t + float(np.asarray(P.time_add))
+    t_grid = np.asarray(P.t, dtype=float)
+    r_grid = np.asarray(P.r, dtype=float)
+    r_t = np.column_stack([np.interp(t_eval, t_grid, r_grid[:, j]) for j in range(3)])
+    north = np.asarray(P.sky_north, dtype=float)
+    east = np.asarray(P.sky_east, dtype=float)
+    ne_t = np.column_stack([r_t @ north, r_t @ east])
+    d_ne = (
+        ne_t
+        - np.asarray(P.NE_ref, dtype=float)[None, :]
+        - (t_eval - float(np.asarray(P.tref)))[:, None] * np.asarray(P.NE_vref, dtype=float)[None, :]
+    )
+    d_n = d_ne[:, 0]
+    d_e = d_ne[:, 1]
+    d_tau = -(piEN * d_n + piEE * d_e)
+    d_beta = piEE * d_n - piEN * d_e
+    tE_safe = max(abs(tE), 1e-12)
+    tau = (t - t0) / tE_safe + d_tau
+    beta = u0 + d_beta
+    u = np.sqrt(tau * tau + beta * beta)
+
+    vbm = VBMicrolensing.VBMicrolensing()
+    vbm.Tol = 1e-4
+    vbm.RelTol = 1e-4
+    rho_safe = max(float(rho), 1e-12)
+    A = np.asarray([vbm.ESPLMag(float(ui), rho_safe) for ui in u], dtype=float)
+    return float(np.asarray(fit.fs)) * A + float(np.asarray(fit.fb))
 
 
 def _adaptive_single_lens_curve(

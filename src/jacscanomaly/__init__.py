@@ -29,10 +29,16 @@ from .template_free import (
     TemplateFreeSearchResult,
 )
 from .planet_signal import (
+    FlatBaselineDiagnostic,
+    PlanetSignalClassification,
+    PlanetSignalClassificationConfig,
+    PlanetSignalClassifier,
+    PlanetSignalComponentClassification,
     PlanetSignalCandidate,
     PlanetSignalConfig,
     PlanetSignalExtractor,
     PlanetSignalIteration,
+    PlanetSignalPeak,
     PlanetSignalResult,
 )
 
@@ -60,11 +66,17 @@ __all__ = [
     "TemplateFreeScanner",
     "TemplateFreeSearchConfig",
     "TemplateFreeSearchResult",
+    "FlatBaselineDiagnostic",
+    "PlanetSignalClassification",
+    "PlanetSignalClassificationConfig",
+    "PlanetSignalClassifier",
+    "PlanetSignalComponentClassification",
     "PlanetSignalCandidate",
     "PlanetSignalConfig",
     "PlanetSignalExtractor",
     "PlanetSignalIteration",
+    "PlanetSignalPeak",
     "PlanetSignalResult",
 ]
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
