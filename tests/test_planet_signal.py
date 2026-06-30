@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from jacscanomaly import (
     Finder,
@@ -338,6 +339,8 @@ def test_planet_signal_classifier_marks_flat_baseline_as_whole_event_anomaly():
 
 
 def test_planet_signal_extractor_accepts_non_pspl_fixed_fit():
+    pytest.importorskip("microjax.fastlens")
+
     finder = Finder(FinderConfig(fitter_kind="fspl", grid_backend="jax"))
     extractor = PlanetSignalExtractor(finder)
 

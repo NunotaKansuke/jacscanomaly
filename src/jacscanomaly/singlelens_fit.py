@@ -19,6 +19,7 @@ from .singlelens_model import (
     A_fspl_space_parallax_logrho_func,
     A_cv_asymexp_logtau_func,
 )
+from .magnification import _get_fspl_disk
 from .trajectory import make_parallax_projector, make_space_parallax_projector
 
 try:
@@ -370,6 +371,8 @@ class FSPLFitter:
 
     def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
         """Fit FSPL to a light curve (uses logrho parameterization)."""
+        _get_fspl_disk()
+
         def build_A(q, t):
             return A_fspl_logrho_func(q, t)
 
@@ -603,6 +606,8 @@ class FSPLParallaxFitter:
 
     def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
         """Fit FSPL+parallax to a light curve (uses logrho parameterization)."""
+        _get_fspl_disk()
+
         P = self._P
 
         def build_A(q, t):
@@ -727,6 +732,8 @@ class FSPLSpaceParallaxFitter:
         self._last_fit: Optional[SingleLensFitResult] = None
 
     def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        _get_fspl_disk()
+
         P = self._P
 
         def build_A(q, t):

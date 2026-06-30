@@ -5,6 +5,7 @@ import pytest
 import jax.numpy as jnp
 
 from jacscanomaly import Finder, FinderConfig
+import jacscanomaly.magnification as magnification
 from jacscanomaly.singlelens_model import A_fspl_logrho_func, A_pspl_space_parallax_func
 from jacscanomaly import parallax
 from jacscanomaly.trajectory import (
@@ -226,6 +227,7 @@ def test_finder_builds_pspl_space_parallax_fitter():
 
 def test_finder_supports_vbm_finite_difference_fspl():
     pytest.importorskip("VBMicrolensing")
+    pytest.importorskip("microjax.fastlens")
 
     finder = Finder(FinderConfig(fitter_kind="fspl_vbm_fd", grid_backend="cpp"))
     time = jnp.asarray(np.linspace(-5.0, 5.0, 21))
@@ -239,6 +241,24 @@ def test_finder_supports_vbm_finite_difference_fspl():
     assert fit.param_names == ("t0", "tE", "u0", "rho")
     assert np.isfinite(np.asarray(fit.params)).all()
     assert float(fit.chi2_dof) < 1.0e-2
+
+
+def test_fspl_fitter_initializes_magnifier_before_jax_trace():
+    pytest.importorskip("microjax.fastlens")
+
+    finder = Finder(FinderConfig(fitter_kind="fspl", grid_backend="jax"))
+    time = jnp.asarray(np.linspace(-5.0, 5.0, 21))
+    q = jnp.asarray([0.0, 30.0, 0.2, np.log(0.01)])
+    amp = A_fspl_logrho_func(q, time)
+    flux = 1.7 * amp + 0.2
+    ferr = jnp.full_like(time, 0.01)
+
+    magnification._mag_fspl = None
+    fit = finder.fit_single_lens(time, flux, ferr, x0=q)
+
+    assert magnification._mag_fspl is not None
+    assert fit.param_names == ("t0", "tE", "u0", "rho")
+    assert np.isfinite(np.asarray(fit.params)).all()
 
 
 def test_finder_supports_gulls_vbm_finite_difference_fspl_space_parallax(tmp_path):
