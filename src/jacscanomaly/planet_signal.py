@@ -239,6 +239,20 @@ class PlanetSignalResult:
         """
         return PlanetSignalClassifier(config).classify(self)
 
+    def classify_anomaly(self, config=None):
+        """
+        Fit residual-template atoms and generate physical-model seed candidates.
+
+        This is a convenience wrapper around
+        :class:`jacscanomaly.PlanetAnomalyClassifier`.  The returned local
+        morphology classification is intended for seed generation and triage,
+        not as a final binary-lens posterior.
+        """
+        from .planet_class import PlanetAnomalyClassifier, PlanetClassConfig
+
+        cfg = PlanetClassConfig() if config is None else config
+        return PlanetAnomalyClassifier(cfg).fit(self)
+
     def plot_signal(
         self,
         *,

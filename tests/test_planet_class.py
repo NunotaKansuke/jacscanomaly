@@ -489,3 +489,49 @@ def test_validity_penalty_marks_cadence_limited_width_without_changing_bic_proba
     assert atom.validity_penalty > 0.0
     assert any("width is close to cadence" in warning for warning in atom.warnings)
     assert np.isclose(atom.score, atom.delta_chi2 - atom.n_params * np.log(atom.n_data) - atom.validity_penalty)
+
+
+def test_planet_anomaly_fit_result_summary_helpers_and_signal_convenience_api():
+    time = np.linspace(8.0, 12.0, 161)
+    residual = 0.25 / (1.0 + ((time - 9.3) / 0.12) ** 2)
+    mask = np.abs(time - 9.3) < 0.5
+    result = _result_from_residual(time, residual, mask)
+
+    fit = result.classify_anomaly(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=5.0,
+            enable_fold_caustic=False,
+            enable_curved_fold_caustic=False,
+            enable_grazing_fold_caustic=False,
+            enable_limb_darkened_fold_caustic=False,
+            enable_two_fold_caustic=False,
+            enable_cusp_tail=False,
+            enable_canonical_cusp=False,
+            enable_chang_refsdal=False,
+        )
+    )
+
+    summary = fit.summary_dict()
+    assert summary["best_label"] == fit.best_label
+    assert summary["n_segments"] == 1
+    assert "best_bic" in summary
+    assert "best_delta_chi2" in summary
+
+    segment_rows = fit.segment_summary_dicts()
+    atom_rows = fit.atom_summary_dicts()
+    seed_rows = fit.seed_summary_dicts(top_n=3)
+    assert len(segment_rows) == 1
+    assert atom_rows
+    assert len(seed_rows) <= 3
+    assert "best_atom:" in fit.summary_text()
+
+    segment_table = fit.summary_table()
+    atom_table = fit.atom_table()
+    seed_table = fit.seed_table(top_n=2)
+    assert len(segment_table) == 1
+    assert len(atom_table) == len(atom_rows)
+    assert len(seed_table) <= 2
+
+    fig, ax = fit.plot_summary(signal_result=result, show=False, max_seeds=2)
+    assert fig is not None
+    assert ax.get_title().startswith("Planet anomaly classification")
