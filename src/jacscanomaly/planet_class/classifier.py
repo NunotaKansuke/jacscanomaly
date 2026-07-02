@@ -237,8 +237,6 @@ class PlanetAnomalyClassifier:
         weights: dict[str, float] = {}
         for fit in finite:
             weight = float(np.exp(-0.5 * (float(fit.bic) - bic_min)))
-            if not fit.success:
-                weight *= 0.1
             weights[fit.class_label] = weights.get(fit.class_label, 0.0) + weight
         total = sum(weights.values())
         if total <= 0.0:

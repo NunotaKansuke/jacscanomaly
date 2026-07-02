@@ -111,6 +111,9 @@ def test_planet_anomaly_classifier_fits_positive_bump_and_generates_counterpart_
     assert fit.best_label == "major_image_bump"
     assert fit.best_atom is not None
     assert abs(fit.best_atom.params["t_peak"] - 9.3) < 0.05
+    assert fit.best_atom.param_errors is not None
+    assert fit.best_atom.param_errors["t_peak"] > 0.0
+    assert fit.best_atom.param_errors["width"] > 0.0
     assert any(seed.degeneracy_tag == "wide_major" and seed.params["s"] > 1.0 for seed in fit.event_seeds)
     assert any(seed.degeneracy_tag == "close_counterpart" and seed.params["s"] < 1.0 for seed in fit.event_seeds)
 
@@ -434,3 +437,55 @@ def test_chang_refsdal_atom_fits_local_image_perturbation_seed():
     assert atoms
     assert atoms[0].success
     assert any(seed.class_label == "chang_refsdal" for seed in fit.event_seeds)
+
+
+def test_class_probabilities_use_pure_bic_weights():
+    time = np.linspace(8.0, 12.0, 161)
+    residual = 0.25 / (1.0 + ((time - 9.3) / 0.12) ** 2)
+    mask = np.abs(time - 9.3) < 0.5
+    result = _result_from_residual(time, residual, mask)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(min_delta_chi2_for_seed=5.0)
+    ).fit(result)
+    segment = fit.segment_results[0]
+    bic_min = min(atom.bic for atom in segment.atom_fits if np.isfinite(atom.bic))
+    expected = {}
+    for atom in segment.atom_fits:
+        if np.isfinite(atom.bic):
+            expected[atom.class_label] = expected.get(atom.class_label, 0.0) + np.exp(-0.5 * (atom.bic - bic_min))
+    norm = sum(expected.values())
+    expected = {key: value / norm for key, value in expected.items()}
+
+    assert segment.class_probabilities == expected
+
+
+def test_validity_penalty_marks_cadence_limited_width_without_changing_bic_probability():
+    time = np.linspace(8.0, 12.0, 81)
+    residual = np.zeros_like(time)
+    residual[np.argmin(np.abs(time - 9.3))] = 0.4
+    mask = np.abs(time - 9.3) < 0.2
+    result = _result_from_residual(time, residual, mask, ferr_value=0.02)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=1.0,
+            cadence_width_penalty=50.0,
+            enable_central_perturbation=False,
+            enable_fold_caustic=False,
+            enable_curved_fold_caustic=False,
+            enable_grazing_fold_caustic=False,
+            enable_limb_darkened_fold_caustic=False,
+            enable_two_fold_caustic=False,
+            enable_cusp_tail=False,
+            enable_canonical_cusp=False,
+            enable_chang_refsdal=False,
+            enable_second_pspl=False,
+            enable_pspl_misfit=False,
+        )
+    ).fit(result)
+
+    atom = fit.segment_results[0].atom_fits[0]
+    assert atom.validity_penalty > 0.0
+    assert any("width is close to cadence" in warning for warning in atom.warnings)
+    assert np.isclose(atom.score, atom.delta_chi2 - atom.n_params * np.log(atom.n_data) - atom.validity_penalty)

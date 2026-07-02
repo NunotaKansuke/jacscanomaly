@@ -43,6 +43,14 @@ class PlanetClassConfig:
     central_window_factor: float = 3.0
     optimizer_maxiter: int = 300
     optimizer_ftol: float = 1e-8
+    estimate_param_errors: bool = True
+    covariance_step: float = 1e-4
+    covariance_max_condition: float = 1e12
+    warning_penalty: float = 5.0
+    cadence_width_penalty: float = 20.0
+    boundary_penalty: float = 10.0
+    min_width_cadence_ratio: float = 1.5
+    smooth_misfit_warning_delta_bic: float = 5.0
     enable_positive_bump: bool = True
     enable_negative_dip: bool = True
     enable_central_perturbation: bool = True
@@ -108,6 +116,8 @@ class AtomFitResult:
     n_params: int
     success: bool
     warnings: Tuple[str, ...]
+    validity_penalty: float = 0.0
+    fit_diagnostics: Optional[dict[str, float]] = None
 
 
 @dataclass(frozen=True)
