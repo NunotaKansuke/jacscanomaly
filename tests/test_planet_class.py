@@ -146,3 +146,32 @@ def test_planet_anomaly_classifier_can_identify_second_pspl_like_bump():
     assert abs(second[0].params["t0_2"] - 20.0) < 0.2
     assert abs(second[0].params["tE_2"] - 4.0) < 0.2
     assert any(seed.model_type == "1L2S" for seed in fit.event_seeds)
+
+
+def test_planet_anomaly_classifier_generates_central_caustic_seed_family():
+    time = np.linspace(8.0, 12.0, 241)
+    residual = (
+        0.18 / (1.0 + ((time - 9.82) / 0.10) ** 2)
+        + 0.15 / (1.0 + ((time - 10.18) / 0.10) ** 2)
+        - 0.06 / (1.0 + ((time - 10.0) / 0.22) ** 2)
+    )
+    mask = np.abs(time - 10.0) < 0.7
+    result = _result_from_residual(time, residual, mask)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(min_delta_chi2_for_seed=5.0)
+    ).fit(result)
+
+    central = [
+        atom
+        for segment in fit.segment_results
+        for atom in segment.atom_fits
+        if atom.class_label == "central_caustic"
+    ]
+    assert central
+    assert central[0].success
+    central_seeds = [seed for seed in fit.event_seeds if seed.class_label == "central_caustic"]
+    assert central_seeds
+    assert any(seed.params["s"] < 1.0 for seed in central_seeds)
+    assert any(seed.params["s"] > 1.0 for seed in central_seeds)
+    assert all(1e-7 <= seed.params["q"] <= 1.0 for seed in central_seeds)

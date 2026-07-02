@@ -3,7 +3,13 @@ from __future__ import annotations
 import numpy as np
 
 from ..planet_signal import PlanetSignalResult
-from .atoms import NegativeDipAtom, PositiveBumpAtom, PSPLMisfitAtom, SecondPSPLAtom
+from .atoms import (
+    CentralPerturbationAtom,
+    NegativeDipAtom,
+    PositiveBumpAtom,
+    PSPLMisfitAtom,
+    SecondPSPLAtom,
+)
 from .features import segment_features
 from .pspl import pspl_params_from_result
 from .seeds import seeds_from_atom
@@ -111,6 +117,8 @@ class PlanetAnomalyClassifier:
             atoms.append(PositiveBumpAtom(self.config))
         if self.config.enable_negative_dip and sign <= 0.0:
             atoms.append(NegativeDipAtom(self.config))
+        if self.config.enable_central_perturbation and self._is_central(features, segment):
+            atoms.append(CentralPerturbationAtom(self.config))
         if self.config.enable_second_pspl and sign >= 0.0:
             atoms.append(SecondPSPLAtom(self.config))
         if self.config.enable_pspl_misfit:
@@ -142,6 +150,14 @@ class PlanetAnomalyClassifier:
                 continue
             fits.append(fit)
         return tuple(fits)
+
+    def _is_central(self, features: dict[str, float], segment: SegmentData) -> bool:
+        window = float(self.config.central_window_factor) * max(
+            abs(float(segment.pspl.u0)) * float(segment.pspl.tE),
+            float(features.get("fwhm", 0.0)),
+            1e-12,
+        )
+        return abs(float(features.get("t_peak", segment.pspl.t0)) - float(segment.pspl.t0)) <= window
 
     def _seeds_from_fits(self, atom_fits: tuple[AtomFitResult, ...], pspl) -> tuple[SeedCandidate, ...]:
         seeds: list[SeedCandidate] = []

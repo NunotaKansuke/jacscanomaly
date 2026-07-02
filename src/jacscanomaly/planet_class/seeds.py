@@ -17,6 +17,8 @@ def seeds_from_atom(
         return positive_bump_seeds(fit, pspl, config)
     if fit.class_label == "minor_image_dip":
         return negative_dip_seeds(fit, pspl, config)
+    if fit.class_label == "central_caustic":
+        return central_caustic_seeds(fit, pspl, config)
     if fit.class_label == "second_source":
         return second_pspl_seeds(fit, pspl)
     return ()
@@ -111,6 +113,42 @@ def negative_dip_seeds(
                 warnings=warnings,
             )
         )
+    return tuple(seeds)
+
+
+def central_caustic_seeds(
+    fit: AtomFitResult,
+    pspl: PSPLParams,
+    config: PlanetClassConfig,
+) -> tuple[SeedCandidate, ...]:
+    duration = float(fit.params.get("duration", 2.0 * fit.params.get("width", pspl.tE)))
+    duration = max(duration, 0.0)
+    s_grid = np.asarray(config.s_central_grid, dtype=float)
+    q_grid = (duration / max(4.0 * pspl.tE, 1e-12)) * (s_grid - 1.0 / s_grid) ** 2
+    q_grid = np.clip(q_grid, float(config.q_floor), float(config.q_ceil))
+
+    n_alpha = max(1, int(config.alpha_grid_size_central))
+    alpha_center = float(np.arctan2(pspl.u0, 0.0))
+    alpha_grid = alpha_center + np.linspace(-np.pi, np.pi, n_alpha, endpoint=False)
+    seeds: list[SeedCandidate] = []
+    for s, q in zip(s_grid, q_grid):
+        warnings = list(fit.warnings)
+        if np.isclose(float(q), float(config.q_floor)) or np.isclose(float(q), float(config.q_ceil)):
+            warnings.append("q clipped")
+        if abs(float(s) - 1.0) < 0.1:
+            warnings.append("central seed is near resonant separation")
+        for alpha in alpha_grid:
+            seeds.append(
+                SeedCandidate(
+                    model_type="2L1S",
+                    class_label="central_caustic",
+                    params={"s": float(s), "q": float(q), "alpha": float(alpha)},
+                    score=float(fit.score),
+                    source_atom=fit.atom_name,
+                    degeneracy_tag="central_close" if float(s) < 1.0 else "central_wide",
+                    warnings=tuple(warnings),
+                )
+            )
     return tuple(seeds)
 
 

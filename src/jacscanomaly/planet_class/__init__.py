@@ -19,6 +19,7 @@ from .types import (
     SegmentData,
     SegmentModelResult,
 )
+from .seeds import central_caustic_seeds
 
 __all__ = [
     "PlanetAnomalyClassifier",
@@ -38,4 +39,5 @@ __all__ = [
     "r_minor",
     "angle_of",
     "q_grid_from_width",
+    "central_caustic_seeds",
 ]

@@ -22,15 +22,29 @@ class PlanetClassConfig:
     min_points_per_segment: int = 5
     min_delta_chi2_for_seed: float = 20.0
     keep_top_atom_fits: int = 6
-    keep_top_seeds_per_segment: int = 80
+    keep_top_seeds_per_segment: int = 120
     q_floor: float = 1e-7
     q_ceil: float = 1.0
     q_width_factors: Tuple[float, ...] = (0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
+    s_central_grid: Tuple[float, ...] = (
+        0.55,
+        0.65,
+        0.75,
+        0.85,
+        0.92,
+        1.08,
+        1.18,
+        1.35,
+        1.6,
+        2.0,
+    )
+    alpha_grid_size_central: int = 8
     central_window_factor: float = 3.0
     optimizer_maxiter: int = 300
     optimizer_ftol: float = 1e-8
     enable_positive_bump: bool = True
     enable_negative_dip: bool = True
+    enable_central_perturbation: bool = True
     enable_second_pspl: bool = True
     enable_pspl_misfit: bool = True
 
