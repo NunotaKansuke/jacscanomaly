@@ -41,6 +41,16 @@ from .planet_signal import (
     PlanetSignalPeak,
     PlanetSignalResult,
 )
+from .planet_class import (
+    AtomFitResult,
+    PlanetAnomalyClassifier,
+    PlanetAnomalyFitResult,
+    PlanetClassConfig,
+    PSPLParams,
+    SeedCandidate,
+    SegmentData,
+    SegmentModelResult,
+)
 
 __all__ = [
     "FinderConfig",
@@ -77,6 +87,14 @@ __all__ = [
     "PlanetSignalIteration",
     "PlanetSignalPeak",
     "PlanetSignalResult",
+    "AtomFitResult",
+    "PlanetAnomalyClassifier",
+    "PlanetAnomalyFitResult",
+    "PlanetClassConfig",
+    "PSPLParams",
+    "SeedCandidate",
+    "SegmentData",
+    "SegmentModelResult",
 ]
 
 __version__ = "0.3.2"

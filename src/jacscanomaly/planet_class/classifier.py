@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+import numpy as np
+
+from ..planet_signal import PlanetSignalResult
+from .atoms import NegativeDipAtom, PositiveBumpAtom, PSPLMisfitAtom, SecondPSPLAtom
+from .features import segment_features
+from .pspl import pspl_params_from_result
+from .seeds import seeds_from_atom
+from .types import (
+    AtomFitResult,
+    PlanetAnomalyFitResult,
+    PlanetClassConfig,
+    SegmentData,
+    SegmentModelResult,
+    SeedCandidate,
+)
+
+
+class PlanetAnomalyClassifier:
+    """
+    Fit residual-template atoms to extracted planet-signal components.
+
+    This class compares local residual morphologies after
+    :class:`PlanetSignalExtractor` has separated candidate signal points from
+    the refined single-lens baseline.  The fitted atom parameters are local
+    morphology estimates and seed generators for downstream physical models;
+    they are not a replacement for global 2L1S/1L2S model comparison.
+    """
+
+    def __init__(self, config: PlanetClassConfig = PlanetClassConfig()):
+        self.config = config
+
+    def fit(self, result: PlanetSignalResult) -> PlanetAnomalyFitResult:
+        pspl = pspl_params_from_result(result)
+        classification = result.classify()
+        segment_results: list[SegmentModelResult] = []
+        event_warnings: list[str] = []
+
+        for component in classification.components:
+            segment = self._segment_from_component(result, component, pspl)
+            features = segment_features(segment)
+            warnings = self._segment_warnings(segment, features)
+            atom_fits = self._fit_atoms(segment, features)
+            atom_fits = tuple(sorted(atom_fits, key=lambda fit: fit.bic))
+            if self.config.keep_top_atom_fits > 0:
+                atom_fits = atom_fits[: int(self.config.keep_top_atom_fits)]
+            best_fit = atom_fits[0] if atom_fits else None
+            class_probabilities = self._class_probabilities(atom_fits)
+            seeds = self._seeds_from_fits(atom_fits, pspl)
+            segment_results.append(
+                SegmentModelResult(
+                    component=component,
+                    features=features,
+                    atom_fits=atom_fits,
+                    best_fit=best_fit,
+                    class_probabilities=class_probabilities,
+                    seeds=seeds,
+                    warnings=tuple(warnings),
+                )
+            )
+
+        event_seeds = self._deduplicate_seeds(
+            tuple(seed for segment in segment_results for seed in segment.seeds)
+        )
+        best_atom = self._best_atom(segment_results)
+        class_probabilities = self._event_class_probabilities(segment_results)
+        best_label = best_atom.class_label if best_atom is not None else "none"
+        if not segment_results:
+            event_warnings.append("no signal components to classify")
+
+        return PlanetAnomalyFitResult(
+            pspl=pspl,
+            segment_results=tuple(segment_results),
+            event_seeds=event_seeds,
+            best_label=best_label,
+            best_atom=best_atom,
+            class_probabilities=class_probabilities,
+            warnings=tuple(event_warnings),
+        )
+
+    def _segment_from_component(self, result, component, pspl) -> SegmentData:
+        start = int(component.start_index)
+        end = int(component.end_index)
+        sl = slice(start, end)
+        return SegmentData(
+            component=component,
+            time=np.asarray(result.time[sl], dtype=float),
+            flux=np.asarray(result.flux[sl], dtype=float),
+            ferr=np.asarray(result.ferr[sl], dtype=float),
+            residual=np.asarray(result.refined_residual[sl], dtype=float),
+            model_flux=np.asarray(result.refined_fit.model_flux[sl], dtype=float),
+            full_indices=np.arange(start, end, dtype=int),
+            pspl=pspl,
+        )
+
+    def _segment_warnings(self, segment: SegmentData, features: dict[str, float]) -> list[str]:
+        warnings: list[str] = []
+        if int(features.get("n_points", 0)) < int(self.config.min_points_per_segment):
+            warnings.append("segment has too few points")
+        if float(features.get("fwhm", 0.0)) <= 1.5 * float(features.get("cadence", 0.0)):
+            warnings.append("segment width is close to cadence")
+        return warnings
+
+    def _fit_atoms(self, segment: SegmentData, features: dict[str, float]) -> tuple[AtomFitResult, ...]:
+        if int(features.get("n_points", 0)) < 2:
+            return ()
+        atoms = []
+        sign = float(features.get("sign", 0.0))
+        if self.config.enable_positive_bump and sign >= 0.0:
+            atoms.append(PositiveBumpAtom(self.config))
+        if self.config.enable_negative_dip and sign <= 0.0:
+            atoms.append(NegativeDipAtom(self.config))
+        if self.config.enable_second_pspl and sign >= 0.0:
+            atoms.append(SecondPSPLAtom(self.config))
+        if self.config.enable_pspl_misfit:
+            atoms.append(PSPLMisfitAtom(self.config))
+
+        fits: list[AtomFitResult] = []
+        for atom in atoms:
+            try:
+                fit = atom.fit(segment, features)
+            except Exception as exc:  # pragma: no cover - defensive per-atom isolation
+                fits.append(
+                    AtomFitResult(
+                        atom_name=atom.atom_name,
+                        class_label=atom.class_label,
+                        params={},
+                        param_errors=None,
+                        chi2=float("inf"),
+                        chi2_baseline=float(features.get("chi2", np.inf)),
+                        delta_chi2=float("-inf"),
+                        bic=float("inf"),
+                        aic=float("inf"),
+                        score=float("-inf"),
+                        n_data=int(features.get("n_points", 0)),
+                        n_params=0,
+                        success=False,
+                        warnings=(f"fit failed: {exc}",),
+                    )
+                )
+                continue
+            fits.append(fit)
+        return tuple(fits)
+
+    def _seeds_from_fits(self, atom_fits: tuple[AtomFitResult, ...], pspl) -> tuple[SeedCandidate, ...]:
+        seeds: list[SeedCandidate] = []
+        for fit in atom_fits:
+            if not fit.success:
+                continue
+            seeds.extend(seeds_from_atom(fit, pspl, self.config))
+        ranked = tuple(sorted(seeds, key=lambda seed: seed.score, reverse=True))
+        ranked = self._deduplicate_seeds(ranked)
+        if self.config.keep_top_seeds_per_segment > 0:
+            ranked = ranked[: int(self.config.keep_top_seeds_per_segment)]
+        return ranked
+
+    @staticmethod
+    def _class_probabilities(atom_fits: tuple[AtomFitResult, ...]) -> dict[str, float]:
+        finite = [fit for fit in atom_fits if np.isfinite(fit.bic)]
+        if not finite:
+            return {}
+        bic_min = min(float(fit.bic) for fit in finite)
+        weights: dict[str, float] = {}
+        for fit in finite:
+            weight = float(np.exp(-0.5 * (float(fit.bic) - bic_min)))
+            if not fit.success:
+                weight *= 0.1
+            weights[fit.class_label] = weights.get(fit.class_label, 0.0) + weight
+        total = sum(weights.values())
+        if total <= 0.0:
+            return {}
+        return {key: float(value / total) for key, value in sorted(weights.items())}
+
+    @staticmethod
+    def _event_class_probabilities(segment_results: list[SegmentModelResult]) -> dict[str, float]:
+        weights: dict[str, float] = {}
+        for segment in segment_results:
+            strength = max(float(segment.features.get("chi2", 0.0)), 1.0)
+            for label, prob in segment.class_probabilities.items():
+                weights[label] = weights.get(label, 0.0) + strength * float(prob)
+        total = sum(weights.values())
+        if total <= 0.0:
+            return {}
+        return {key: float(value / total) for key, value in sorted(weights.items())}
+
+    @staticmethod
+    def _best_atom(segment_results: list[SegmentModelResult]) -> AtomFitResult | None:
+        candidates = [
+            segment.best_fit
+            for segment in segment_results
+            if segment.best_fit is not None and np.isfinite(segment.best_fit.bic)
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda fit: fit.bic)
+
+    @staticmethod
+    def _deduplicate_seeds(seeds: tuple[SeedCandidate, ...]) -> tuple[SeedCandidate, ...]:
+        unique: dict[tuple, SeedCandidate] = {}
+        for seed in seeds:
+            key = (
+                seed.model_type,
+                seed.class_label,
+                seed.degeneracy_tag,
+                tuple(sorted((k, round(float(v), 10)) for k, v in seed.params.items() if np.isfinite(v))),
+            )
+            current = unique.get(key)
+            if current is None or seed.score > current.score:
+                unique[key] = seed
+        return tuple(sorted(unique.values(), key=lambda seed: seed.score, reverse=True))
