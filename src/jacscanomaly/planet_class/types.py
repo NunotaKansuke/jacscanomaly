@@ -39,6 +39,7 @@ class PlanetClassConfig:
         2.0,
     )
     alpha_grid_size_central: int = 8
+    cusp_tail_powers: Tuple[float, ...] = (1.0, 2.0 / 3.0)
     central_window_factor: float = 3.0
     optimizer_maxiter: int = 300
     optimizer_ftol: float = 1e-8
@@ -46,6 +47,8 @@ class PlanetClassConfig:
     enable_negative_dip: bool = True
     enable_central_perturbation: bool = True
     enable_fold_caustic: bool = True
+    enable_curved_fold_caustic: bool = True
+    enable_cusp_tail: bool = True
     enable_second_pspl: bool = True
     enable_pspl_misfit: bool = True
 

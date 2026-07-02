@@ -5,6 +5,8 @@ import numpy as np
 from ..planet_signal import PlanetSignalResult
 from .atoms import (
     CentralPerturbationAtom,
+    CurvedFoldCausticAtom,
+    CuspTailAtom,
     FoldCausticAtom,
     NegativeDipAtom,
     PositiveBumpAtom,
@@ -122,6 +124,10 @@ class PlanetAnomalyClassifier:
             atoms.append(CentralPerturbationAtom(self.config))
         if self.config.enable_fold_caustic and self._is_fold_like(features, segment):
             atoms.append(FoldCausticAtom(self.config))
+        if self.config.enable_curved_fold_caustic and self._is_fold_like(features, segment):
+            atoms.append(CurvedFoldCausticAtom(self.config))
+        if self.config.enable_cusp_tail and self._is_cusp_like(features, segment):
+            atoms.append(CuspTailAtom(self.config))
         if self.config.enable_second_pspl and sign >= 0.0:
             atoms.append(SecondPSPLAtom(self.config))
         if self.config.enable_pspl_misfit:
@@ -169,6 +175,16 @@ class PlanetAnomalyClassifier:
         if float(features.get("edge_sharpness", 0.0)) >= 0.15:
             return True
         return int(features.get("n_points", 0)) >= 6 and float(features.get("snr", 0.0)) >= 20.0
+
+    @staticmethod
+    def _is_cusp_like(features: dict[str, float], segment: SegmentData) -> bool:
+        if segment.component.signal_type in {"caustic_crossing", "complex"}:
+            return True
+        return (
+            int(features.get("n_points", 0)) >= 8
+            and float(features.get("snr", 0.0)) >= 20.0
+            and float(features.get("duration", 0.0)) > 2.0 * float(features.get("cadence", 0.0))
+        )
 
     def _seeds_from_fits(self, atom_fits: tuple[AtomFitResult, ...], pspl) -> tuple[SeedCandidate, ...]:
         seeds: list[SeedCandidate] = []

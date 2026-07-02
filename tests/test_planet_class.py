@@ -217,3 +217,61 @@ def test_planet_anomaly_classifier_fits_fold_caustic_atom_and_seed():
         and seed.degeneracy_tag == "local_caustic_only"
         for seed in fit.event_seeds
     )
+
+
+def test_planet_anomaly_classifier_fits_curved_fold_caustic_atom():
+    time = np.linspace(8.8, 10.8, 220)
+    tc = 9.75
+    tstar = 0.08
+    q_curv = 0.45
+    sign = 1.0
+    tau = (time - tc) / tstar
+    residual = 0.18 * fold_g0(sign * (tau + q_curv * tau * tau))
+    mask = (time > 9.55) & (time < 10.25)
+    result = _result_from_residual(time, residual, mask, ferr_value=0.01)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(min_delta_chi2_for_seed=5.0, keep_top_atom_fits=10)
+    ).fit(result)
+
+    curved = [
+        atom
+        for segment in fit.segment_results
+        for atom in segment.atom_fits
+        if atom.class_label == "curved_fold_caustic"
+    ]
+    assert curved
+    assert curved[0].success
+    assert np.isfinite(curved[0].params["tc"])
+    assert abs(curved[0].params["q_curv"]) > 0.05
+    assert any(seed.class_label == "curved_fold_caustic" for seed in fit.event_seeds)
+
+
+def test_planet_anomaly_classifier_fits_cusp_tail_atom_and_seed():
+    time = np.linspace(8.0, 12.0, 220)
+    ta = 10.15
+    width = 0.35
+    b = 0.25
+    p = 1.0
+    residual = 0.10 * (b * b + ((time - ta) / width) ** 2) ** (-0.5 * p)
+    mask = np.abs(time - ta) < 1.0
+    result = _result_from_residual(time, residual, mask, ferr_value=0.015)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(min_delta_chi2_for_seed=5.0, keep_top_atom_fits=10)
+    ).fit(result)
+
+    cusp = [
+        atom
+        for segment in fit.segment_results
+        for atom in segment.atom_fits
+        if atom.class_label == "cusp_caustic"
+    ]
+    assert cusp
+    assert cusp[0].success
+    assert abs(cusp[0].params["ta"] - ta) < 0.08
+    assert any(
+        seed.class_label == "cusp_caustic"
+        and seed.degeneracy_tag == "local_cusp_only"
+        for seed in fit.event_seeds
+    )
