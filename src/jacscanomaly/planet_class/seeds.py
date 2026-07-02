@@ -19,6 +19,8 @@ def seeds_from_atom(
         return negative_dip_seeds(fit, pspl, config)
     if fit.class_label == "central_caustic":
         return central_caustic_seeds(fit, pspl, config)
+    if fit.class_label == "fold_caustic":
+        return fold_caustic_seeds(fit)
     if fit.class_label == "second_source":
         return second_pspl_seeds(fit, pspl)
     return ()
@@ -194,3 +196,22 @@ def second_pspl_seeds(fit: AtomFitResult, pspl: PSPLParams) -> tuple[SeedCandida
             )
         )
     return tuple(seeds)
+
+
+def fold_caustic_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
+    return (
+        SeedCandidate(
+            model_type="2L1S",
+            class_label="fold_caustic",
+            params={
+                "t_caustic": float(fit.params.get("tc", np.nan)),
+                "rho_over_sinalpha": float(fit.params.get("rho_over_sinalpha", np.nan)),
+                "entry_exit_sign": float(fit.params.get("entry_exit_sign", np.nan)),
+                "fold_strength": float(fit.params.get("amplitude", np.nan)),
+            },
+            score=float(fit.score),
+            source_atom=fit.atom_name,
+            degeneracy_tag="local_caustic_only",
+            warnings=fit.warnings,
+        ),
+    )

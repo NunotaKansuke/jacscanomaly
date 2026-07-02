@@ -10,6 +10,7 @@ from .pspl import (
     u_abs,
     u_vec,
 )
+from .fold_kernel import FoldKernelLookup, default_fold_kernel_lookup, fold_g0, fold_g0_integral
 from .types import (
     AtomFitResult,
     PlanetAnomalyFitResult,
@@ -40,4 +41,8 @@ __all__ = [
     "angle_of",
     "q_grid_from_width",
     "central_caustic_seeds",
+    "FoldKernelLookup",
+    "default_fold_kernel_lookup",
+    "fold_g0",
+    "fold_g0_integral",
 ]

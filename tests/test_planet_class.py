@@ -7,7 +7,7 @@ from jacscanomaly import (
     PlanetSignalCandidate,
     PlanetSignalResult,
 )
-from jacscanomaly.planet_class import PSPLParams, q_grid_from_width, r_major, r_minor
+from jacscanomaly.planet_class import PSPLParams, fold_g0, fold_g0_integral, q_grid_from_width, r_major, r_minor
 from jacscanomaly.singlelens_fit import SingleLensFitResult
 from jacscanomaly.singlelens_model import A_pspl_func
 
@@ -175,3 +175,45 @@ def test_planet_anomaly_classifier_generates_central_caustic_seed_family():
     assert any(seed.params["s"] < 1.0 for seed in central_seeds)
     assert any(seed.params["s"] > 1.0 for seed in central_seeds)
     assert all(1e-7 <= seed.params["q"] <= 1.0 for seed in central_seeds)
+
+
+def test_fold_kernel_support_and_positive_tail():
+    assert np.allclose(fold_g0(np.array([-3.0, -1.5, -1.0])), 0.0)
+    z = np.array([10.0, 100.0, 1000.0])
+    values = fold_g0(z)
+    assert np.all(values > 0.0)
+    scaled = values * np.sqrt(z)
+    assert np.max(scaled) / np.min(scaled) < 1.2
+    direct = fold_g0_integral(np.array([-0.5, 0.0, 2.0]))
+    lookup = fold_g0(np.array([-0.5, 0.0, 2.0]))
+    assert np.allclose(lookup, direct, rtol=2e-3, atol=2e-3)
+
+
+def test_planet_anomaly_classifier_fits_fold_caustic_atom_and_seed():
+    time = np.linspace(8.8, 10.8, 220)
+    tc = 9.75
+    tstar = 0.08
+    sign = 1.0
+    residual = 0.18 * fold_g0(sign * (time - tc) / tstar)
+    mask = (time > 9.55) & (time < 10.25)
+    result = _result_from_residual(time, residual, mask, ferr_value=0.01)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(min_delta_chi2_for_seed=5.0)
+    ).fit(result)
+
+    fold = [
+        atom
+        for segment in fit.segment_results
+        for atom in segment.atom_fits
+        if atom.class_label == "fold_caustic"
+    ]
+    assert fold
+    assert fold[0].success
+    assert abs(fold[0].params["tc"] - tc) < 0.04
+    assert abs(fold[0].params["tstar"] - tstar) < 0.04
+    assert any(
+        seed.class_label == "fold_caustic"
+        and seed.degeneracy_tag == "local_caustic_only"
+        for seed in fit.event_seeds
+    )

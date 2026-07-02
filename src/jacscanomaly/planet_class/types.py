@@ -45,6 +45,7 @@ class PlanetClassConfig:
     enable_positive_bump: bool = True
     enable_negative_dip: bool = True
     enable_central_perturbation: bool = True
+    enable_fold_caustic: bool = True
     enable_second_pspl: bool = True
     enable_pspl_misfit: bool = True
 
