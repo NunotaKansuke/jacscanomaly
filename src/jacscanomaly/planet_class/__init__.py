@@ -10,7 +10,16 @@ from .pspl import (
     u_abs,
     u_vec,
 )
-from .fold_kernel import FoldKernelLookup, default_fold_kernel_lookup, fold_g0, fold_g0_integral
+from .fold_kernel import (
+    FoldKernelLookup,
+    LimbDarkenedFoldKernelLookup,
+    default_fold_kernel_lookup,
+    default_limb_darkened_fold_kernel_lookup,
+    fold_g0,
+    fold_g0_integral,
+    fold_gn_integral,
+    fold_limb_darkened,
+)
 from .types import (
     AtomFitResult,
     PlanetAnomalyFitResult,
@@ -42,7 +51,11 @@ __all__ = [
     "q_grid_from_width",
     "central_caustic_seeds",
     "FoldKernelLookup",
+    "LimbDarkenedFoldKernelLookup",
     "default_fold_kernel_lookup",
+    "default_limb_darkened_fold_kernel_lookup",
     "fold_g0",
     "fold_g0_integral",
+    "fold_gn_integral",
+    "fold_limb_darkened",
 ]

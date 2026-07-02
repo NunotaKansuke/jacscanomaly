@@ -19,10 +19,18 @@ def seeds_from_atom(
         return negative_dip_seeds(fit, pspl, config)
     if fit.class_label == "central_caustic":
         return central_caustic_seeds(fit, pspl, config)
-    if fit.class_label in {"fold_caustic", "curved_fold_caustic"}:
+    if fit.class_label in {
+        "fold_caustic",
+        "curved_fold_caustic",
+        "grazing_fold_caustic",
+        "limb_darkened_fold_caustic",
+        "two_fold_caustic",
+    }:
         return fold_caustic_seeds(fit)
-    if fit.class_label == "cusp_caustic":
+    if fit.class_label in {"cusp_caustic", "canonical_cusp", "finite_source_cusp"}:
         return cusp_caustic_seeds(fit)
+    if fit.class_label == "chang_refsdal":
+        return chang_refsdal_seeds(fit)
     if fit.class_label == "second_source":
         return second_pspl_seeds(fit, pspl)
     return ()
@@ -211,6 +219,10 @@ def fold_caustic_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
                 "entry_exit_sign": float(fit.params.get("entry_exit_sign", np.nan)),
                 "fold_strength": float(fit.params.get("amplitude", np.nan)),
                 "q_curv": float(fit.params.get("q_curv", np.nan)),
+                "Gamma": float(fit.params.get("Gamma", np.nan)),
+                "z0": float(fit.params.get("z0", np.nan)),
+                "tc1": float(fit.params.get("tc1", np.nan)),
+                "tc2": float(fit.params.get("tc2", np.nan)),
             },
             score=float(fit.score),
             source_atom=fit.atom_name,
@@ -230,11 +242,34 @@ def cusp_caustic_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
                 "width": float(fit.params.get("width", np.nan)),
                 "impact_b": float(fit.params.get("b", np.nan)),
                 "tail_power": float(fit.params.get("p", np.nan)),
+                "eta1_0": float(fit.params.get("eta1_0", np.nan)),
+                "eta2_0": float(fit.params.get("eta2_0", np.nan)),
                 "cusp_strength": float(fit.params.get("amplitude", np.nan)),
             },
             score=float(fit.score),
             source_atom=fit.atom_name,
             degeneracy_tag="local_cusp_only",
+            warnings=fit.warnings,
+        ),
+    )
+
+
+def chang_refsdal_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
+    return (
+        SeedCandidate(
+            model_type="2L1S",
+            class_label="chang_refsdal",
+            params={
+                "image_branch": float(fit.params.get("image_branch", np.nan)),
+                "x_planet": float(fit.params.get("x_planet", np.nan)),
+                "y_planet": float(fit.params.get("y_planet", np.nan)),
+                "image_width": float(fit.params.get("image_width", np.nan)),
+                "gamma_local": float(fit.params.get("gamma_local", np.nan)),
+                "perturbation_strength": float(fit.params.get("amplitude", np.nan)),
+            },
+            score=float(fit.score),
+            source_atom=fit.atom_name,
+            degeneracy_tag="local_chang_refsdal",
             warnings=fit.warnings,
         ),
     )

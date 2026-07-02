@@ -90,9 +90,9 @@ class ResidualAtom:
                 theta = theta0
                 opt_success = True
             chi2, coeff, ok = evaluate(theta)
-            success = bool(ok and opt_success and np.isfinite(chi2))
+            success = bool(ok and np.isfinite(chi2))
             if best is None or chi2 < best[0]:
-                best = (chi2, theta, coeff, success)
+                best = (chi2, theta, coeff, success and bool(opt_success))
 
         if best is None:
             best = (float("inf"), np.asarray(theta0_list[0], dtype=float), np.asarray([], dtype=float), False)
@@ -103,7 +103,12 @@ class ResidualAtom:
         atom_coeff = coeff[n_poly:] if coeff.size > n_poly else np.asarray([], dtype=float)
         if atom_coeff.size:
             params["amplitude"] = float(atom_coeff[0])
+            for i, value in enumerate(atom_coeff, start=1):
+                params[f"amplitude_{i}"] = float(value)
         warnings = list(extra_warnings)
+        if success is False and np.isfinite(chi2):
+            warnings.append("optimizer did not report convergence")
+            success = True
         if expected_amplitude_sign is not None and atom_coeff.size:
             if float(expected_amplitude_sign) * float(atom_coeff[0]) <= 0.0:
                 warnings.append("atom amplitude has unexpected sign")

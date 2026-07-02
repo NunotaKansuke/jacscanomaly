@@ -5,13 +5,19 @@ import numpy as np
 from ..planet_signal import PlanetSignalResult
 from .atoms import (
     CentralPerturbationAtom,
+    CanonicalCuspAtom,
+    ChangRefsdalPerturbationAtom,
     CurvedFoldCausticAtom,
     CuspTailAtom,
+    FiniteSourceCuspAtom,
     FoldCausticAtom,
+    GrazingFoldCausticAtom,
+    LimbDarkenedFoldCausticAtom,
     NegativeDipAtom,
     PositiveBumpAtom,
     PSPLMisfitAtom,
     SecondPSPLAtom,
+    TwoFoldCausticAtom,
 )
 from .features import segment_features
 from .pspl import pspl_params_from_result
@@ -126,8 +132,20 @@ class PlanetAnomalyClassifier:
             atoms.append(FoldCausticAtom(self.config))
         if self.config.enable_curved_fold_caustic and self._is_fold_like(features, segment):
             atoms.append(CurvedFoldCausticAtom(self.config))
+        if self.config.enable_grazing_fold_caustic and self._is_fold_like(features, segment):
+            atoms.append(GrazingFoldCausticAtom(self.config))
+        if self.config.enable_limb_darkened_fold_caustic and self._is_strong_caustic_like(features, segment):
+            atoms.append(LimbDarkenedFoldCausticAtom(self.config))
+        if self.config.enable_two_fold_caustic and self._is_strong_caustic_like(features, segment):
+            atoms.append(TwoFoldCausticAtom(self.config))
         if self.config.enable_cusp_tail and self._is_cusp_like(features, segment):
             atoms.append(CuspTailAtom(self.config))
+        if self.config.enable_canonical_cusp and self._is_strong_caustic_like(features, segment):
+            atoms.append(CanonicalCuspAtom(self.config))
+        if self.config.enable_finite_source_cusp and self._is_strong_caustic_like(features, segment):
+            atoms.append(FiniteSourceCuspAtom(self.config))
+        if self.config.enable_chang_refsdal and self._is_image_perturbation_like(features, segment):
+            atoms.append(ChangRefsdalPerturbationAtom(self.config))
         if self.config.enable_second_pspl and sign >= 0.0:
             atoms.append(SecondPSPLAtom(self.config))
         if self.config.enable_pspl_misfit:
@@ -185,6 +203,18 @@ class PlanetAnomalyClassifier:
             and float(features.get("snr", 0.0)) >= 20.0
             and float(features.get("duration", 0.0)) > 2.0 * float(features.get("cadence", 0.0))
         )
+
+    @staticmethod
+    def _is_strong_caustic_like(features: dict[str, float], segment: SegmentData) -> bool:
+        if segment.component.signal_type in {"caustic_crossing", "complex"}:
+            return True
+        return float(features.get("edge_sharpness", 0.0)) >= 0.15 and float(features.get("snr", 0.0)) >= 20.0
+
+    @staticmethod
+    def _is_image_perturbation_like(features: dict[str, float], segment: SegmentData) -> bool:
+        return segment.component.signal_type in {"single_peak", "dip", "weakpeak", "weakdip", "complex"} or float(
+            features.get("snr", 0.0)
+        ) >= 15.0
 
     def _seeds_from_fits(self, atom_fits: tuple[AtomFitResult, ...], pspl) -> tuple[SeedCandidate, ...]:
         seeds: list[SeedCandidate] = []

@@ -21,7 +21,7 @@ class PlanetClassConfig:
     wide_duration_tE_fraction: float = 0.2
     min_points_per_segment: int = 5
     min_delta_chi2_for_seed: float = 20.0
-    keep_top_atom_fits: int = 6
+    keep_top_atom_fits: int = 14
     keep_top_seeds_per_segment: int = 120
     q_floor: float = 1e-7
     q_ceil: float = 1.0
@@ -49,6 +49,12 @@ class PlanetClassConfig:
     enable_fold_caustic: bool = True
     enable_curved_fold_caustic: bool = True
     enable_cusp_tail: bool = True
+    enable_grazing_fold_caustic: bool = True
+    enable_two_fold_caustic: bool = True
+    enable_limb_darkened_fold_caustic: bool = True
+    enable_canonical_cusp: bool = True
+    enable_finite_source_cusp: bool = False
+    enable_chang_refsdal: bool = True
     enable_second_pspl: bool = True
     enable_pspl_misfit: bool = True
 
