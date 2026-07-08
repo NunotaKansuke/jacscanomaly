@@ -13,13 +13,22 @@ class TemplateFreeSearchConfig:
     """
     Configuration for template-free residual anomaly searches.
 
-    The default mode is a hybrid:
-    1. Flag high-significance fixed-length windows.
-    2. For lower-significance seed windows, search an extended local region
-       for the subsequence with the largest reduced chi2.
+    The current scanner optionally recalibrates residual z-scores within each
+    season using iterative sigma clipping, then grows high-z seeds to local
+    zero-crossing windows and reports candidates above a chi2 threshold.
     """
 
     gap: float = 100.0
+
+    renormalize_z: bool = False
+    sigma_clip_threshold: float = 3.0
+    sigma_clip_max_iter: int = 5
+    seed_z_threshold: float = 3.0
+    zero_crossings_each_side: int = 2
+    candidate_chi2_threshold: float = 150.0
+
+    # Legacy fixed/hybrid scan options are retained for configuration
+    # compatibility with existing notebooks, but are not used by the scanner.
     fixed_window_points: int = 6
     fixed_chi2_threshold: float = 100.0
 
@@ -146,7 +155,7 @@ class TemplateFreeSearchResult:
 
 class TemplateFreeScanner:
     """
-    Template-free anomaly scanner operating on normalized residuals.
+    Template-free anomaly scanner operating on residual z-score excursions.
     """
 
     def __init__(self, config: Optional[TemplateFreeSearchConfig] = None):
@@ -166,33 +175,24 @@ class TemplateFreeScanner:
         if np.any(ferr_np <= 0):
             raise ValueError("ferr must be positive.")
 
-        z = residual_np / ferr_np
+        z_raw = residual_np / ferr_np
+        z = np.empty_like(z_raw)
         seasons = SeasonSplitter(gap=self.config.gap).split(time_np)
 
-        fixed: List[TemplateFreeCandidate] = []
-        hybrid: List[TemplateFreeCandidate] = []
-        blind: List[TemplateFreeCandidate] = []
+        candidates: List[TemplateFreeCandidate] = []
 
         for season_idx, season in enumerate(seasons):
             idx = np.asarray(season.indices, dtype=int)
             t_s = time_np[idx]
-            z_s = z[idx]
-            chi2_s = z_s * z_s
+            z_s = (
+                self._sigma_clipped_z(z_raw[idx])
+                if self.config.renormalize_z
+                else np.asarray(z_raw[idx], dtype=float)
+            )
+            z[idx] = z_s
+            candidates.extend(self._scan_season(season_idx, idx, t_s, z_s))
 
-            fixed_s, seeds_s = self._fixed_window_scan(season_idx, idx, t_s, z_s, chi2_s)
-            fixed.extend(fixed_s)
-
-            for seed in seeds_s:
-                cand = self._hybrid_extended_scan(season_idx, idx, t_s, z_s, chi2_s, seed)
-                if cand is not None:
-                    hybrid.append(cand)
-
-            if self.config.run_blind_reduced_chi2:
-                cand = self._best_reduced_chi2_window(season_idx, idx, t_s, z_s, chi2_s)
-                if cand is not None:
-                    blind.append(cand)
-
-        candidates = self._dedupe_candidates([*fixed, *hybrid, *blind])
+        candidates = sorted(candidates, key=lambda c: c.chi2, reverse=True)
         best = max(candidates, key=lambda c: c.chi2, default=None)
 
         return TemplateFreeSearchResult(
@@ -201,136 +201,139 @@ class TemplateFreeScanner:
             ferr=ferr_np,
             z=z,
             candidates=tuple(candidates),
-            fixed_window_candidates=tuple(fixed),
-            hybrid_candidates=tuple(hybrid),
-            blind_reduced_candidates=tuple(blind),
+            fixed_window_candidates=(),
+            hybrid_candidates=(),
+            blind_reduced_candidates=(),
             best=best,
         )
 
-    def _fixed_window_scan(self, season_idx, global_idx, time, z, chi2):
-        k = int(self.config.fixed_window_points)
-        if k <= 0:
-            raise ValueError("fixed_window_points must be positive.")
-        if chi2.size < k:
-            return [], []
+    def _sigma_clipped_z(self, z_raw):
+        clip = float(self.config.sigma_clip_threshold)
+        max_iter = int(self.config.sigma_clip_max_iter)
+        if clip <= 0:
+            raise ValueError("sigma_clip_threshold must be positive.")
+        if max_iter < 0:
+            raise ValueError("sigma_clip_max_iter must be non-negative.")
+        if z_raw.size == 0:
+            return np.asarray(z_raw, dtype=float)
 
-        csum = np.concatenate([[0.0], np.cumsum(chi2)])
-        window_chi2 = csum[k:] - csum[:-k]
+        retained = np.ones(z_raw.size, dtype=bool)
+        center = float(np.median(z_raw))
+        scale = self._safe_std(z_raw)
 
-        high = np.flatnonzero(window_chi2 >= float(self.config.fixed_chi2_threshold))
-        seed = np.flatnonzero(
-            (window_chi2 >= float(self.config.hybrid_seed_chi2_threshold))
-            & (window_chi2 < float(self.config.fixed_chi2_threshold))
-        )
-
-        fixed = [
-            self._make_candidate(
-                kind="fixed",
-                season_idx=season_idx,
-                global_idx=global_idx,
-                time=time,
-                z=z,
-                start=int(i),
-                end=int(i + k),
-                chi2=float(window_chi2[i]),
-            )
-            for i in high
-        ]
-        fixed = self._select_non_overlapping(fixed)
-
-        seed_windows = [(int(i), int(i + k), float(window_chi2[i])) for i in seed]
-        seed_windows = self._select_seed_windows(seed_windows)
-        return fixed, seed_windows
-
-    def _hybrid_extended_scan(self, season_idx, global_idx, time, z, chi2, seed):
-        seed_start, seed_end, seed_chi2 = seed
-        radius = max(0, int(self.config.hybrid_extension_points))
-        lo = max(0, seed_start - radius)
-        hi = min(chi2.size, seed_end + radius)
-
-        cand = self._best_reduced_chi2_window(
-            season_idx,
-            global_idx,
-            time,
-            z,
-            chi2,
-            lo=lo,
-            hi=hi,
-            require_overlap=(seed_start, seed_end),
-            kind="hybrid",
-            seed=(seed_start, seed_end, seed_chi2),
-        )
-        if cand is None:
-            return None
-        if cand.reduced_chi2 < float(self.config.hybrid_reduced_chi2_threshold):
-            return None
-        return cand
-
-    def _best_reduced_chi2_window(
-        self,
-        season_idx,
-        global_idx,
-        time,
-        z,
-        chi2,
-        *,
-        lo: int = 0,
-        hi: Optional[int] = None,
-        require_overlap: Optional[tuple[int, int]] = None,
-        kind: str = "blind_reduced",
-        seed: Optional[tuple[int, int, float]] = None,
-    ):
-        hi = chi2.size if hi is None else int(hi)
-        lo = int(lo)
-        if hi <= lo:
-            return None
-
-        min_points = max(1, int(self.config.reduced_min_points))
-        max_points = self.config.reduced_max_points
-        if max_points is not None:
-            max_points = max(min_points, int(max_points))
-
-        csum = np.concatenate([[0.0], np.cumsum(chi2)])
-        best = None
-
-        for start in range(lo, hi):
-            end_min = start + min_points
-            if end_min > hi:
+        for _ in range(max_iter):
+            sample = z_raw[retained]
+            if sample.size == 0:
                 break
-            end_max = hi if max_points is None else min(hi, start + max_points)
+            center = float(np.median(sample))
+            scale = self._safe_std(sample)
+            next_retained = np.abs((z_raw - center) / scale) <= clip
+            if np.array_equal(next_retained, retained):
+                break
+            retained = next_retained
 
-            for end in range(end_min, end_max + 1):
-                if require_overlap is not None:
-                    seed_start, seed_end = require_overlap
-                    if end <= seed_start or start >= seed_end:
-                        continue
-                total = float(csum[end] - csum[start])
-                n_points = end - start
-                reduced = total / n_points
-                if best is None or reduced > best[0]:
-                    best = (reduced, total, start, end)
+        sample = z_raw[retained]
+        if sample.size > 0:
+            center = float(np.median(sample))
+            scale = self._safe_std(sample)
+        return (z_raw - center) / scale
 
-        if best is None:
-            return None
+    @staticmethod
+    def _safe_std(values):
+        scale = float(np.std(values))
+        if not np.isfinite(scale) or scale <= 0.0:
+            return 1.0
+        return scale
 
-        reduced, total, start, end = best
-        seed_start = seed_end = seed_chi2 = None
-        if seed is not None:
-            seed_start, seed_end, seed_chi2 = seed
+    def _scan_season(self, season_idx, global_idx, time, z):
+        if z.size == 0:
+            return []
 
-        return self._make_candidate(
-            kind=kind,
-            season_idx=season_idx,
-            global_idx=global_idx,
-            time=time,
-            z=z,
-            start=start,
-            end=end,
-            chi2=total,
-            seed_start=seed_start,
-            seed_end=seed_end,
-            seed_chi2=seed_chi2,
-        )
+        seed_threshold = float(self.config.seed_z_threshold)
+        chi2_threshold = float(self.config.candidate_chi2_threshold)
+        n_cross = int(self.config.zero_crossings_each_side)
+        if seed_threshold <= 0:
+            raise ValueError("seed_z_threshold must be positive.")
+        if n_cross < 0:
+            raise ValueError("zero_crossings_each_side must be non-negative.")
+
+        chi2 = z * z
+        csum = np.concatenate([[0.0], np.cumsum(chi2)])
+        crossings = np.flatnonzero(z[:-1] * z[1:] < 0.0)
+        seeds = np.flatnonzero(np.abs(z) > seed_threshold)
+
+        windows_by_extent = {}
+        for seed in seeds:
+            start, end = self._zero_crossing_window(int(seed), z.size, crossings, n_cross)
+            total = float(csum[end] - csum[start])
+            if total > chi2_threshold:
+                key = (start, end)
+                previous = windows_by_extent.get(key)
+                if previous is None or abs(z[seed]) > abs(z[previous[2]]):
+                    windows_by_extent[key] = (start, end, int(seed), total)
+
+        windows = list(windows_by_extent.values())
+        candidates = self._merge_overlapping_windows(season_idx, global_idx, time, z, windows)
+        max_candidates = max(0, int(self.config.max_candidates_per_season))
+        if max_candidates:
+            candidates = sorted(candidates, key=lambda c: c.chi2, reverse=True)[:max_candidates]
+        return candidates
+
+    @staticmethod
+    def _zero_crossing_window(seed, n_points, crossings, n_cross):
+        if n_cross == 0:
+            return seed, seed + 1
+
+        insert = int(np.searchsorted(crossings, seed, side="left"))
+        if insert >= n_cross:
+            start = int(crossings[insert - n_cross]) + 1
+        else:
+            start = 0
+
+        if crossings.size - insert >= n_cross:
+            end = int(crossings[insert + n_cross - 1]) + 1
+        else:
+            end = n_points
+        start = min(start, seed)
+        end = max(end, seed + 1)
+        return start, end
+
+    def _merge_overlapping_windows(self, season_idx, global_idx, time, z, windows):
+        if not windows:
+            return []
+
+        ordered = sorted(windows, key=lambda item: (item[0], item[1], item[2]))
+        merged = []
+        cur_start, cur_end, cur_windows = ordered[0][0], ordered[0][1], [ordered[0]]
+
+        for start, end, seed, total in ordered[1:]:
+            if start < cur_end:
+                cur_end = max(cur_end, end)
+                cur_windows.append((start, end, seed, total))
+            else:
+                merged.append(cur_windows)
+                cur_start, cur_end, cur_windows = start, end, [(start, end, seed, total)]
+        merged.append(cur_windows)
+
+        candidates = []
+        for group in merged:
+            start, end, seed, total = max(group, key=lambda item: (item[3], abs(z[item[2]])))
+            candidates.append(
+                self._make_candidate(
+                    kind="zero_crossing",
+                    season_idx=season_idx,
+                    global_idx=global_idx,
+                    time=time,
+                    z=z,
+                    start=start,
+                    end=end,
+                    chi2=total,
+                    seed_start=seed,
+                    seed_end=seed + 1,
+                    seed_chi2=float(z[seed] * z[seed]),
+                )
+            )
+        return candidates
 
     def _make_candidate(
         self,
@@ -369,39 +372,3 @@ class TemplateFreeScanner:
             seed_chi2=None if seed_chi2 is None else float(seed_chi2),
         )
 
-    def _select_non_overlapping(self, candidates):
-        ordered = sorted(candidates, key=lambda c: c.chi2, reverse=True)
-        selected = []
-        for cand in ordered:
-            overlaps = any(
-                cand.start_index <= kept.end_index and kept.start_index <= cand.end_index
-                for kept in selected
-            )
-            if not overlaps:
-                selected.append(cand)
-            if len(selected) >= int(self.config.max_candidates_per_season):
-                break
-        return sorted(selected, key=lambda c: c.t_center)
-
-    def _select_seed_windows(self, seed_windows):
-        ordered = sorted(seed_windows, key=lambda item: item[2], reverse=True)
-        selected = []
-        for start, end, chi2 in ordered:
-            overlaps = any(start < kept_end and kept_start < end for kept_start, kept_end, _ in selected)
-            if not overlaps:
-                selected.append((start, end, chi2))
-            if len(selected) >= int(self.config.max_candidates_per_season):
-                break
-        return selected
-
-    def _dedupe_candidates(self, candidates):
-        ordered = sorted(candidates, key=lambda c: c.chi2, reverse=True)
-        selected = []
-        for cand in ordered:
-            overlaps = any(
-                cand.start_index <= kept.end_index and kept.start_index <= cand.end_index
-                for kept in selected
-            )
-            if not overlaps:
-                selected.append(cand)
-        return sorted(selected, key=lambda c: c.chi2, reverse=True)
