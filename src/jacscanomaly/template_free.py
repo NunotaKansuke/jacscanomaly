@@ -13,9 +13,18 @@ class TemplateFreeSearchConfig:
     """
     Configuration for template-free residual anomaly searches.
 
-    The current scanner optionally recalibrates residual z-scores within each
-    season using iterative sigma clipping, then grows high-z seeds to local
-    zero-crossing windows and reports candidates above a chi2 threshold.
+    The scanner splits each season into segments bounded by z=0 sign
+    crossings. Segments whose peak |z| exceeds ``seed_z_threshold`` qualify
+    and immediately gain their neighboring segment on each side, so every
+    window reaches the second zero crossing away from its seed. Windows are
+    then joined whenever the gap between their edges is small compared to the
+    wider window (``max(bridge_floor_points, bridge_fraction * larger
+    width)``), which bridges both single-point noise crossings and the slow
+    zero transitions of smooth residual structures. A merged window becomes a
+    candidate when its total chi2 exceeds ``candidate_chi2_threshold``.
+
+    Optionally, z-scores are recalibrated within each season by iterative
+    sigma clipping before scanning (``renormalize_z``).
     """
 
     gap: float = 100.0
@@ -23,12 +32,14 @@ class TemplateFreeSearchConfig:
     renormalize_z: bool = False
     sigma_clip_threshold: float = 3.0
     sigma_clip_max_iter: int = 5
-    seed_z_threshold: float = 3.0
-    zero_crossings_each_side: int = 2
+    seed_z_threshold: float = 5.0
+    bridge_floor_points: int = 2
+    bridge_fraction: float = 0.25
     candidate_chi2_threshold: float = 150.0
 
-    # Legacy fixed/hybrid scan options are retained for configuration
-    # compatibility with existing notebooks, but are not used by the scanner.
+    # Legacy options retained for configuration compatibility with existing
+    # notebooks, but not used by the current scanner.
+    zero_crossings_each_side: int = 2
     fixed_window_points: int = 6
     fixed_chi2_threshold: float = 100.0
 
@@ -126,7 +137,12 @@ class TemplateFreeSearchResult:
                 label = "anomaly candidate"
                 labeled_candidate = True
             ax.axvspan(item.t_start, item.t_end, color=color, alpha=alpha, zorder=2, label=label)
-            ax.axvline(item.t_center, color=color, lw=1, alpha=0.8, zorder=3)
+            t_seed = (
+                float(self.time[item.seed_start_index])
+                if item.seed_start_index is not None
+                else item.t_center
+            )
+            ax.axvline(t_seed, color=color, lw=1, alpha=0.8, zorder=3)
 
         if cand is not None:
             title = (
@@ -251,73 +267,39 @@ class TemplateFreeScanner:
 
         seed_threshold = float(self.config.seed_z_threshold)
         chi2_threshold = float(self.config.candidate_chi2_threshold)
-        n_cross = int(self.config.zero_crossings_each_side)
+        floor_points = int(self.config.bridge_floor_points)
+        fraction = float(self.config.bridge_fraction)
         if seed_threshold <= 0:
             raise ValueError("seed_z_threshold must be positive.")
-        if n_cross < 0:
-            raise ValueError("zero_crossings_each_side must be non-negative.")
+        if floor_points < 0:
+            raise ValueError("bridge_floor_points must be non-negative.")
+        if fraction < 0:
+            raise ValueError("bridge_fraction must be non-negative.")
 
-        chi2 = z * z
-        csum = np.concatenate([[0.0], np.cumsum(chi2)])
+        # Segment the season at z=0 sign crossings.
         crossings = np.flatnonzero(z[:-1] * z[1:] < 0.0)
-        seeds = np.flatnonzero(np.abs(z) > seed_threshold)
-
-        windows_by_extent = {}
-        for seed in seeds:
-            start, end = self._zero_crossing_window(int(seed), z.size, crossings, n_cross)
-            total = float(csum[end] - csum[start])
-            if total > chi2_threshold:
-                key = (start, end)
-                previous = windows_by_extent.get(key)
-                if previous is None or abs(z[seed]) > abs(z[previous[2]]):
-                    windows_by_extent[key] = (start, end, int(seed), total)
-
-        windows = list(windows_by_extent.values())
-        candidates = self._merge_overlapping_windows(season_idx, global_idx, time, z, windows)
-        max_candidates = max(0, int(self.config.max_candidates_per_season))
-        if max_candidates:
-            candidates = sorted(candidates, key=lambda c: c.chi2, reverse=True)[:max_candidates]
-        return candidates
-
-    @staticmethod
-    def _zero_crossing_window(seed, n_points, crossings, n_cross):
-        if n_cross == 0:
-            return seed, seed + 1
-
-        insert = int(np.searchsorted(crossings, seed, side="left"))
-        if insert >= n_cross:
-            start = int(crossings[insert - n_cross]) + 1
-        else:
-            start = 0
-
-        if crossings.size - insert >= n_cross:
-            end = int(crossings[insert + n_cross - 1]) + 1
-        else:
-            end = n_points
-        start = min(start, seed)
-        end = max(end, seed + 1)
-        return start, end
-
-    def _merge_overlapping_windows(self, season_idx, global_idx, time, z, windows):
-        if not windows:
+        bounds = np.concatenate([[0], crossings + 1, [z.size]])
+        segment_peak = np.maximum.reduceat(np.abs(z), bounds[:-1])
+        qualifying = np.flatnonzero(segment_peak > seed_threshold)
+        if qualifying.size == 0:
             return []
 
-        ordered = sorted(windows, key=lambda item: (item[0], item[1], item[2]))
-        merged = []
-        cur_start, cur_end, cur_windows = ordered[0][0], ordered[0][1], [ordered[0]]
+        # Each qualifying segment gains its neighboring segment on each side,
+        # so the window reaches the second zero crossing away from its peak.
+        n_segments = bounds.size - 1
+        windows = [
+            (int(bounds[max(0, i - 1)]), int(bounds[min(n_segments, i + 2)]))
+            for i in qualifying
+        ]
+        windows = self._join_windows(windows, floor_points, fraction)
 
-        for start, end, seed, total in ordered[1:]:
-            if start < cur_end:
-                cur_end = max(cur_end, end)
-                cur_windows.append((start, end, seed, total))
-            else:
-                merged.append(cur_windows)
-                cur_start, cur_end, cur_windows = start, end, [(start, end, seed, total)]
-        merged.append(cur_windows)
-
+        csum = np.concatenate([[0.0], np.cumsum(z * z)])
         candidates = []
-        for group in merged:
-            start, end, seed, total = max(group, key=lambda item: (item[3], abs(z[item[2]])))
+        for start, end in windows:
+            total = float(csum[end] - csum[start])
+            if total <= chi2_threshold:
+                continue
+            seed = start + int(np.argmax(np.abs(z[start:end])))
             candidates.append(
                 self._make_candidate(
                     kind="zero_crossing",
@@ -333,7 +315,41 @@ class TemplateFreeScanner:
                     seed_chi2=float(z[seed] * z[seed]),
                 )
             )
+
+        max_candidates = max(0, int(self.config.max_candidates_per_season))
+        if max_candidates:
+            candidates = sorted(candidates, key=lambda c: c.chi2, reverse=True)[:max_candidates]
         return candidates
+
+    @staticmethod
+    def _join_windows(windows, floor_points, fraction):
+        """
+        Join windows whose edge gap is small compared to the wider window.
+
+        The allowance ``max(floor_points, fraction * larger width)`` bridges
+        single-point noise crossings and, for wide structures, the slow z=0
+        transitions between their lobes. Joining is iterated to a fixed point
+        because merged windows grow and may enable further bridges.
+        """
+        joined = sorted(windows)
+        changed = True
+        while changed:
+            changed = False
+            merged = [list(joined[0])]
+            for start, end in joined[1:]:
+                previous = merged[-1]
+                gap = start - previous[1]
+                allowance = max(
+                    floor_points,
+                    fraction * max(previous[1] - previous[0], end - start),
+                )
+                if gap <= allowance:
+                    previous[1] = max(previous[1], end)
+                    changed = True
+                else:
+                    merged.append([start, end])
+            joined = merged
+        return [(start, end) for start, end in joined]
 
     def _make_candidate(
         self,
