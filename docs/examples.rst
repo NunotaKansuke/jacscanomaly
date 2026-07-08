@@ -131,4 +131,4 @@ The repository includes:
    Standard bell-template residual scan.
 
 ``example/template_free_example.ipynb``
-   Template-free residual chi-square scan.
+   Template-free zero-crossing residual scan.
