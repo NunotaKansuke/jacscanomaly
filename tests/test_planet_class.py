@@ -9,13 +9,16 @@ from jacscanomaly import (
 )
 from jacscanomaly.planet_class import (
     PSPLParams,
+    cr_relative_magnification,
     fold_g0,
     fold_g0_integral,
     fold_limb_darkened,
     q_grid_from_width,
     r_major,
     r_minor,
+    warm_chang_refsdal_lookup_cache,
 )
+from jacscanomaly.planet_class.atoms.fold import CurvedFoldCausticAtom
 from jacscanomaly.singlelens_fit import SingleLensFitResult
 from jacscanomaly.singlelens_model import A_pspl_func
 
@@ -98,6 +101,32 @@ def test_q_grid_width_scaling_is_quadratic():
     assert np.isclose(q2 / q1, 4.0)
 
 
+def test_chang_refsdal_lookup_has_caustic_structure_and_far_field_normalization():
+    center = cr_relative_magnification(np.asarray([0.0]), np.asarray([0.0]), 0.2)[0]
+    far = cr_relative_magnification(np.asarray([10.0]), np.asarray([0.0]), 0.2)[0]
+    flank = cr_relative_magnification(np.asarray([1.2]), np.asarray([0.0]), 0.2)[0]
+
+    assert center > 1.0
+    assert np.isclose(far, 1.0)
+    assert np.isfinite(flank)
+
+
+def test_chang_refsdal_finite_source_lookup_and_cache_warmup():
+    x = np.linspace(-1.5, 1.5, 21)
+    y = np.zeros_like(x)
+    point = cr_relative_magnification(x, y, 0.2, source_radius_hat=0.0, grid_size=96)
+    finite = cr_relative_magnification(x, y, 0.2, source_radius_hat=0.4, grid_size=96)
+
+    assert point.shape == finite.shape
+    assert np.all(np.isfinite(finite))
+    assert np.std(finite) < np.std(point)
+    warm_chang_refsdal_lookup_cache(
+        gamma_values=(0.0, 0.2),
+        source_radius_hat_values=(0.0, 0.4),
+        grid_size=64,
+    )
+
+
 def test_planet_anomaly_classifier_fits_positive_bump_and_generates_counterpart_seeds():
     time = np.linspace(8.0, 12.0, 161)
     residual = 0.25 / (1.0 + ((time - 9.3) / 0.12) ** 2)
@@ -118,6 +147,35 @@ def test_planet_anomaly_classifier_fits_positive_bump_and_generates_counterpart_
     assert any(seed.degeneracy_tag == "close_counterpart" and seed.params["s"] < 1.0 for seed in fit.event_seeds)
 
 
+def test_planet_anomaly_classifier_fits_pspl_positive_bump_atom():
+    time = np.linspace(8.0, 16.0, 240)
+    u0 = 0.35
+    tE = 1.2
+    u = np.sqrt(u0 * u0 + ((time - 11.0) / tE) ** 2)
+    residual = 0.04 * ((u * u + 2.0) / (u * np.sqrt(u * u + 4.0)) - 1.0)
+    mask = np.abs(time - 11.0) < 2.8
+    result = _result_from_residual(time, residual, mask, ferr_value=0.01)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=5.0,
+            enable_positive_bump=False,
+            enable_second_pspl=False,
+        )
+    ).fit(result)
+
+    atoms = [
+        atom
+        for segment in fit.segment_results
+        for atom in segment.atom_fits
+        if atom.class_label == "major_image_pspl_bump"
+    ]
+    assert atoms
+    assert atoms[0].success
+    assert abs(atoms[0].params["t_peak"] - 11.0) < 0.15
+    assert any(seed.class_label == "major_image_bump" for seed in fit.event_seeds)
+
+
 def test_planet_anomaly_classifier_fits_negative_dip_and_generates_minor_image_seeds():
     time = np.linspace(8.0, 12.0, 161)
     residual = -0.22 / (1.0 + ((time - 10.6) / 0.15) ** 2)
@@ -135,6 +193,34 @@ def test_planet_anomaly_classifier_fits_negative_dip_and_generates_minor_image_s
     assert any(seed.degeneracy_tag == "wide_counterpart" and seed.params["s"] > 1.0 for seed in fit.event_seeds)
 
 
+def test_planet_anomaly_classifier_fits_minor_image_box_trough_atom():
+    time = np.linspace(8.0, 12.0, 220)
+    edge = 0.06
+    sigmoid = lambda x: 1.0 / (1.0 + np.exp(-x))
+    residual = -0.18 * (sigmoid((time - 9.3) / edge) - sigmoid((time - 10.7) / edge))
+    mask = (time > 9.0) & (time < 11.0)
+    result = _result_from_residual(time, residual, mask, ferr_value=0.01)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=5.0,
+            enable_negative_dip=False,
+        )
+    ).fit(result)
+
+    atoms = [
+        atom
+        for segment in fit.segment_results
+        for atom in segment.atom_fits
+        if atom.class_label == "minor_image_box_trough"
+    ]
+    assert atoms
+    assert atoms[0].success
+    assert abs(atoms[0].params["t_start"] - 9.3) < 0.1
+    assert abs(atoms[0].params["t_end"] - 10.7) < 0.1
+    assert any(seed.class_label == "minor_image_dip" for seed in fit.event_seeds)
+
+
 def test_planet_anomaly_classifier_can_identify_second_pspl_like_bump():
     time = np.linspace(0.0, 30.0, 400)
     params2 = np.array([20.0, 4.0, 0.35])
@@ -150,13 +236,98 @@ def test_planet_anomaly_classifier_can_identify_second_pspl_like_bump():
         atom
         for segment in fit.segment_results
         for atom in segment.atom_fits
-        if atom.class_label == "second_source"
+        if atom.class_label == "second_pspl_like"
     ]
     assert second
     assert second[0].success
     assert abs(second[0].params["t0_2"] - 20.0) < 0.2
     assert abs(second[0].params["tE_2"] - 4.0) < 0.2
-    assert any(seed.model_type == "1L2S" for seed in fit.event_seeds)
+    assert any(seed.model_type == "1L2S" and seed.class_label == "second_source" for seed in fit.event_seeds)
+    assert any(seed.model_type == "2L1S" and seed.class_label == "wide_repeating" for seed in fit.event_seeds)
+    assert all(
+        seed.source_atom == "second_pspl_like_residual"
+        for seed in fit.event_seeds
+        if seed.class_label in {"second_source", "wide_repeating"}
+    )
+
+
+def test_shear_quadrupole_atom_generates_diagnostic_grid_seeds():
+    time = np.linspace(0.0, 30.0, 300)
+    tau = (time - 16.0) / 5.0
+    residual = 0.08 * (tau * tau - np.mean(tau * tau)) / (1.0 + tau * tau) + 0.03 * tau / (1.0 + tau * tau)
+    mask = np.abs(time - 16.0) < 8.0
+    result = _result_from_residual(time, residual, mask, ferr_value=0.015)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=5.0,
+            enable_positive_bump=False,
+            enable_negative_dip=False,
+            enable_central_perturbation=False,
+            enable_fold_caustic=False,
+            enable_curved_fold_caustic=False,
+            enable_grazing_fold_caustic=False,
+            enable_limb_darkened_fold_caustic=False,
+            enable_rim_trough_caustic=False,
+            enable_two_fold_caustic=False,
+            enable_cusp_tail=False,
+            enable_canonical_cusp=False,
+            enable_chang_refsdal=False,
+            enable_second_pspl=False,
+            enable_pspl_misfit=False,
+        )
+    ).fit(result)
+
+    atoms = [atom for seg in fit.segment_results for atom in seg.atom_fits if atom.class_label == "shear_quadrupole"]
+    assert atoms
+    assert atoms[0].success
+    assert atoms[0].params["gamma"] > 0.0
+    assert any(seed.class_label == "shear_quadrupole" for seed in fit.event_seeds)
+
+
+def test_systematics_candidate_atom_fits_sparse_outliers_without_seeds():
+    time = np.linspace(8.0, 12.0, 80)
+    residual = np.zeros_like(time)
+    residual[30] = 0.22
+    residual[32] = -0.18
+    mask = np.zeros_like(time, dtype=bool)
+    mask[29:34] = True
+    result = _result_from_residual(time, residual, mask, ferr_value=0.01)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=5.0,
+            enable_positive_bump=False,
+            enable_pspl_positive_bump=False,
+            enable_negative_dip=False,
+            enable_minor_image_box_trough=False,
+            enable_central_perturbation=False,
+            enable_central_double_cusp=False,
+            enable_fold_caustic=False,
+            enable_curved_fold_caustic=False,
+            enable_grazing_fold_caustic=False,
+            enable_limb_darkened_fold_caustic=False,
+            enable_rim_trough_caustic=False,
+            enable_two_fold_caustic=False,
+            enable_cusp_tail=False,
+            enable_canonical_cusp=False,
+            enable_chang_refsdal=False,
+            enable_second_pspl=False,
+            enable_shear_quadrupole=False,
+            enable_pspl_misfit=False,
+        )
+    ).fit(result)
+
+    atoms = [
+        atom
+        for segment in fit.segment_results
+        for atom in segment.atom_fits
+        if atom.class_label == "systematics_candidate"
+    ]
+    assert atoms
+    assert atoms[0].success
+    assert atoms[0].params["n_spikes"] >= 2.0
+    assert not fit.event_seeds
 
 
 def test_planet_anomaly_classifier_generates_central_caustic_seed_family():
@@ -186,6 +357,37 @@ def test_planet_anomaly_classifier_generates_central_caustic_seed_family():
     assert any(seed.params["s"] < 1.0 for seed in central_seeds)
     assert any(seed.params["s"] > 1.0 for seed in central_seeds)
     assert all(1e-7 <= seed.params["q"] <= 1.0 for seed in central_seeds)
+
+
+def test_planet_anomaly_classifier_fits_central_double_cusp_atom():
+    time = np.linspace(8.0, 12.0, 260)
+    residual = (
+        0.20 / (1.0 + ((time - 9.75) / 0.08) ** 2)
+        + 0.16 / (1.0 + ((time - 10.25) / 0.08) ** 2)
+        - 0.12 / (1.0 + ((time - 10.0) / 0.20) ** 2)
+    )
+    mask = np.abs(time - 10.0) < 0.75
+    result = _result_from_residual(time, residual, mask, ferr_value=0.01)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=5.0,
+            enable_central_perturbation=False,
+            enable_rim_trough_caustic=False,
+        )
+    ).fit(result)
+
+    atoms = [
+        atom
+        for segment in fit.segment_results
+        for atom in segment.atom_fits
+        if atom.class_label == "central_double_cusp"
+    ]
+    assert atoms
+    assert atoms[0].success
+    assert abs(atoms[0].params["t_center"] - 10.0) < 0.1
+    assert atoms[0].params["cusp_separation"] > 0.2
+    assert any(seed.class_label == "central_caustic" for seed in fit.event_seeds)
 
 
 def test_fold_kernel_support_and_positive_tail():
@@ -256,6 +458,25 @@ def test_planet_anomaly_classifier_fits_curved_fold_caustic_atom():
     assert np.isfinite(curved[0].params["tc"])
     assert abs(curved[0].params["q_curv"]) > 0.05
     assert any(seed.class_label == "curved_fold_caustic" for seed in fit.event_seeds)
+
+
+def test_curved_fold_caustic_reports_entry_exit_times_from_quadratic_roots():
+    tc = 9.75
+    tstar = 0.08
+    q_curv = 0.2
+    sign = 1.0
+
+    limb = CurvedFoldCausticAtom._solve_time_roots(tc, tstar, q_curv, sign, z_value=-1.0)
+    center = CurvedFoldCausticAtom._solve_time_roots(tc, tstar, q_curv, sign, z_value=0.0)
+
+    assert len(limb) == 2
+    assert len(center) == 2
+    assert limb[0] < limb[1]
+    assert center[0] < center[1]
+    assert np.isclose(sign * (((limb[0] - tc) / tstar) + q_curv * ((limb[0] - tc) / tstar) ** 2), -1.0)
+    assert np.isclose(sign * (((limb[1] - tc) / tstar) + q_curv * ((limb[1] - tc) / tstar) ** 2), -1.0)
+    assert np.isclose(sign * (((center[0] - tc) / tstar) + q_curv * ((center[0] - tc) / tstar) ** 2), 0.0)
+    assert np.isclose(sign * (((center[1] - tc) / tstar) + q_curv * ((center[1] - tc) / tstar) ** 2), 0.0)
 
 
 def test_planet_anomaly_classifier_fits_cusp_tail_atom_and_seed():
@@ -367,8 +588,100 @@ def test_two_fold_atom_fits_unresolved_pair_seed():
     atoms = [atom for seg in fit.segment_results for atom in seg.atom_fits if atom.class_label == "two_fold_caustic"]
     assert atoms
     assert atoms[0].success
+    assert atoms[0].atom_name == "two_fold_caustic"
     assert atoms[0].params["tc2"] > atoms[0].params["tc1"]
+    assert atoms[0].params["fold_ratio"] > 0.0
+    assert "amplitude_2" not in atoms[0].params
     assert any(seed.class_label == "two_fold_caustic" for seed in fit.event_seeds)
+
+
+def test_full_caustic_crossing_atom_fits_entry_exit_transit():
+    time = np.linspace(8.0, 13.0, 260)
+    t_entry, t_exit = 9.2, 11.7
+    tstar_entry, tstar_exit = 0.07, 0.10
+    center = 0.5 * (t_entry + t_exit)
+    half = 0.5 * (t_exit - t_entry)
+    tau = (time - center) / half
+    window = 1.0 / (1.0 + np.exp(-(time - t_entry) / 0.08)) / (1.0 + np.exp(-(t_exit - time) / 0.08))
+    residual = (
+        0.18 * fold_g0((time - t_entry) / tstar_entry)
+        + 0.14 * fold_g0(-(time - t_exit) / tstar_exit)
+        + window * (0.05 - 0.03 * tau + 0.02 * (tau * tau - 1.0 / 3.0))
+    )
+    mask = (time > 8.8) & (time < 12.1)
+    result = _result_from_residual(time, residual, mask, ferr_value=0.01)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=5.0,
+            enable_positive_bump=False,
+            enable_pspl_positive_bump=False,
+            enable_negative_dip=False,
+            enable_minor_image_box_trough=False,
+            enable_central_perturbation=False,
+            enable_central_double_cusp=False,
+            enable_fold_caustic=False,
+            enable_curved_fold_caustic=False,
+            enable_grazing_fold_caustic=False,
+            enable_limb_darkened_fold_caustic=False,
+            enable_rim_trough_caustic=False,
+            enable_two_fold_caustic=False,
+            enable_cusp_tail=False,
+            enable_canonical_cusp=False,
+            enable_chang_refsdal=False,
+            enable_second_pspl=False,
+            enable_shear_quadrupole=False,
+            enable_systematics_diagnostic=False,
+            enable_pspl_misfit=False,
+        )
+    ).fit(result)
+
+    atoms = [atom for seg in fit.segment_results for atom in seg.atom_fits if atom.class_label == "full_caustic_crossing"]
+    assert atoms
+    assert atoms[0].success
+    assert atoms[0].params["t_entry"] < atoms[0].params["t_exit"]
+    assert atoms[0].params["caustic_inside_duration"] > 0.5
+    assert any(seed.class_label == "full_caustic_crossing" for seed in fit.event_seeds)
+
+
+def test_rim_trough_atom_fits_bump_dip_bump_seed():
+    time = np.linspace(8.8, 10.8, 180)
+    left, trough, right = 9.65, 10.0, 10.32
+    residual = (
+        0.11 / (1.0 + ((time - left) / 0.08) ** 2)
+        - 0.22 / (1.0 + ((time - trough) / 0.16) ** 2)
+        + 0.15 / (1.0 + ((time - right) / 0.08) ** 2)
+    )
+    mask = (time > 9.35) & (time < 10.55)
+    result = _result_from_residual(time, residual, mask, ferr_value=0.012)
+
+    fit = PlanetAnomalyClassifier(
+        PlanetClassConfig(
+            min_delta_chi2_for_seed=5.0,
+            enable_positive_bump=False,
+            enable_negative_dip=False,
+            enable_central_perturbation=False,
+            enable_fold_caustic=False,
+            enable_curved_fold_caustic=False,
+            enable_grazing_fold_caustic=False,
+            enable_limb_darkened_fold_caustic=False,
+            enable_two_fold_caustic=False,
+            enable_cusp_tail=False,
+            enable_canonical_cusp=False,
+            enable_chang_refsdal=False,
+            enable_second_pspl=False,
+            enable_pspl_misfit=False,
+        )
+    ).fit(result)
+
+    atoms = [atom for seg in fit.segment_results for atom in seg.atom_fits if atom.class_label == "rim_trough_caustic"]
+    assert atoms
+    assert atoms[0].success
+    assert atoms[0].params["tc1"] < atoms[0].params["t_trough"] < atoms[0].params["tc2"]
+    assert atoms[0].params["rim_ratio"] > 0.0
+    assert atoms[0].params["trough_ratio"] > 0.0
+    assert atoms[0].params["polarity"] == 1.0
+    assert any(seed.class_label == "rim_trough_caustic" for seed in fit.event_seeds)
 
 
 def test_canonical_and_finite_source_cusp_atoms_fit_seed():

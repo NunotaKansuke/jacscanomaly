@@ -4,6 +4,7 @@ import numpy as np
 
 from ..planet_signal import PlanetSignalResult
 from .atoms import (
+    CentralDoubleCuspAtom,
     CentralPerturbationAtom,
     CanonicalCuspAtom,
     ChangRefsdalPerturbationAtom,
@@ -11,12 +12,19 @@ from .atoms import (
     CuspTailAtom,
     FiniteSourceCuspAtom,
     FoldCausticAtom,
+    FullCausticCrossingAtom,
     GrazingFoldCausticAtom,
     LimbDarkenedFoldCausticAtom,
+    MinorImageBoxTroughAtom,
     NegativeDipAtom,
     PositiveBumpAtom,
+    PSPLPositiveBumpAtom,
     PSPLMisfitAtom,
+    RimTroughCausticAtom,
     SecondPSPLAtom,
+    ShearQuadrupoleAtom,
+    SignedTwoFoldCausticAtom,
+    SystematicsArtifactAtom,
     TwoFoldCausticAtom,
 )
 from .features import segment_features
@@ -78,9 +86,9 @@ class PlanetAnomalyClassifier:
         event_seeds = self._deduplicate_seeds(
             tuple(seed for segment in segment_results for seed in segment.seeds)
         )
-        best_atom = self._best_atom(segment_results)
         class_probabilities = self._event_class_probabilities(segment_results)
-        best_label = best_atom.class_label if best_atom is not None else "none"
+        best_label = max(class_probabilities, key=class_probabilities.get) if class_probabilities else "none"
+        best_atom = self._best_atom(segment_results, class_label=best_label)
         if not segment_results:
             event_warnings.append("no signal components to classify")
 
@@ -124,20 +132,36 @@ class PlanetAnomalyClassifier:
         sign = float(features.get("sign", 0.0))
         if self.config.enable_positive_bump and sign >= 0.0:
             atoms.append(PositiveBumpAtom(self.config))
+        if self.config.enable_pspl_positive_bump and sign >= 0.0:
+            atoms.append(PSPLPositiveBumpAtom(self.config))
         if self.config.enable_negative_dip and sign <= 0.0:
             atoms.append(NegativeDipAtom(self.config))
+        if self.config.enable_minor_image_box_trough and sign <= 0.0:
+            atoms.append(MinorImageBoxTroughAtom(self.config))
         if self.config.enable_central_perturbation and self._is_central(features, segment):
             atoms.append(CentralPerturbationAtom(self.config))
+        if (
+            self.config.enable_central_double_cusp
+            and self._is_central(features, segment)
+            and self._is_mixed_signed_like(features, segment)
+        ):
+            atoms.append(CentralDoubleCuspAtom(self.config))
         if self.config.enable_fold_caustic and self._is_fold_like(features, segment):
             atoms.append(FoldCausticAtom(self.config))
         if self.config.enable_curved_fold_caustic and self._is_fold_like(features, segment):
             atoms.append(CurvedFoldCausticAtom(self.config))
+        if self.config.enable_full_caustic_crossing and self._is_full_caustic_crossing_like(features, segment):
+            atoms.append(FullCausticCrossingAtom(self.config))
         if self.config.enable_grazing_fold_caustic and self._is_fold_like(features, segment):
             atoms.append(GrazingFoldCausticAtom(self.config))
         if self.config.enable_limb_darkened_fold_caustic and self._is_strong_caustic_like(features, segment):
             atoms.append(LimbDarkenedFoldCausticAtom(self.config))
+        if self.config.enable_rim_trough_caustic and self._is_rim_trough_like(features, segment):
+            atoms.append(RimTroughCausticAtom(self.config))
         if self.config.enable_two_fold_caustic and self._is_strong_caustic_like(features, segment):
             atoms.append(TwoFoldCausticAtom(self.config))
+        if self.config.enable_signed_two_fold_caustic and self._is_strong_caustic_like(features, segment):
+            atoms.append(SignedTwoFoldCausticAtom(self.config))
         if self.config.enable_cusp_tail and self._is_cusp_like(features, segment):
             atoms.append(CuspTailAtom(self.config))
         if self.config.enable_canonical_cusp and self._is_strong_caustic_like(features, segment):
@@ -148,6 +172,10 @@ class PlanetAnomalyClassifier:
             atoms.append(ChangRefsdalPerturbationAtom(self.config))
         if self.config.enable_second_pspl and sign >= 0.0:
             atoms.append(SecondPSPLAtom(self.config))
+        if self.config.enable_shear_quadrupole and self._is_smooth_distortion_like(features, segment):
+            atoms.append(ShearQuadrupoleAtom(self.config))
+        if self.config.enable_systematics_diagnostic and self._is_systematics_like(features, segment):
+            atoms.append(SystematicsArtifactAtom(self.config))
         if self.config.enable_pspl_misfit:
             atoms.append(PSPLMisfitAtom(self.config))
 
@@ -211,10 +239,65 @@ class PlanetAnomalyClassifier:
         return float(features.get("edge_sharpness", 0.0)) >= 0.15 and float(features.get("snr", 0.0)) >= 20.0
 
     @staticmethod
+    def _is_full_caustic_crossing_like(features: dict[str, float], segment: SegmentData) -> bool:
+        if int(features.get("n_points", 0)) < 20:
+            return False
+        if segment.component.signal_type in {"whole_event_anomaly", "caustic_crossing"}:
+            return True
+        if segment.component.signal_type == "complex" and float(features.get("snr", 0.0)) >= 30.0:
+            return True
+        return (
+            float(features.get("duration", 0.0)) >= 0.05 * max(float(segment.pspl.tE), 1e-12)
+            and float(features.get("edge_sharpness", 0.0)) >= 0.08
+            and float(features.get("snr", 0.0)) >= 30.0
+        )
+
+    @staticmethod
+    def _is_rim_trough_like(features: dict[str, float], segment: SegmentData) -> bool:
+        if int(features.get("n_points", 0)) < 8:
+            return False
+        positive = float(features.get("positive_chi2", 0.0))
+        negative = float(features.get("negative_chi2", 0.0))
+        if min(positive, negative) <= 0.05 * max(positive, negative, 1e-12):
+            return False
+        if segment.component.signal_type in {"dip", "complex", "caustic_crossing"}:
+            return True
+        return float(features.get("edge_sharpness", 0.0)) >= 0.12 and float(features.get("snr", 0.0)) >= 20.0
+
+    @staticmethod
+    def _is_mixed_signed_like(features: dict[str, float], segment: SegmentData) -> bool:
+        if int(features.get("n_points", 0)) < 8:
+            return False
+        positive = float(features.get("positive_chi2", 0.0))
+        negative = float(features.get("negative_chi2", 0.0))
+        if min(positive, negative) > 0.03 * max(positive, negative, 1e-12):
+            return True
+        return segment.component.signal_type in {"complex", "caustic_crossing"}
+
+    @staticmethod
     def _is_image_perturbation_like(features: dict[str, float], segment: SegmentData) -> bool:
         return segment.component.signal_type in {"single_peak", "dip", "weakpeak", "weakdip", "complex"} or float(
             features.get("snr", 0.0)
         ) >= 15.0
+
+    @staticmethod
+    def _is_smooth_distortion_like(features: dict[str, float], segment: SegmentData) -> bool:
+        if segment.component.signal_type in {"complex", "low_significance"}:
+            return True
+        duration = float(features.get("duration", 0.0))
+        return duration >= 0.05 * max(float(segment.pspl.tE), 1e-12) and float(features.get("snr", 0.0)) >= 15.0
+
+    @staticmethod
+    def _is_systematics_like(features: dict[str, float], segment: SegmentData) -> bool:
+        n_points = int(features.get("n_points", 0))
+        if n_points <= 3:
+            return True
+        cadence = float(features.get("cadence", 0.0))
+        if cadence > 0.0 and float(features.get("fwhm", 0.0)) <= 1.5 * cadence:
+            return True
+        if segment.component.signal_type in {"low_significance", "weakpeak", "weakdip"}:
+            return True
+        return float(features.get("kurtosis", 0.0)) >= 8.0 and float(features.get("edge_sharpness", 0.0)) >= 0.5
 
     def _seeds_from_fits(self, atom_fits: tuple[AtomFitResult, ...], pspl) -> tuple[SeedCandidate, ...]:
         seeds: list[SeedCandidate] = []
@@ -256,15 +339,32 @@ class PlanetAnomalyClassifier:
         return {key: float(value / total) for key, value in sorted(weights.items())}
 
     @staticmethod
-    def _best_atom(segment_results: list[SegmentModelResult]) -> AtomFitResult | None:
-        candidates = [
-            segment.best_fit
-            for segment in segment_results
-            if segment.best_fit is not None and np.isfinite(segment.best_fit.bic)
-        ]
+    def _best_atom(segment_results: list[SegmentModelResult], *, class_label: str | None = None) -> AtomFitResult | None:
+        if class_label is None or class_label == "none":
+            candidates = [
+                segment.best_fit
+                for segment in segment_results
+                if segment.best_fit is not None and np.isfinite(segment.best_fit.bic)
+            ]
+            if not candidates:
+                return None
+            return min(candidates, key=lambda fit: fit.bic)
+
+        candidates: list[tuple[float, AtomFitResult]] = []
+        for segment in segment_results:
+            segment_candidates = [
+                fit
+                for fit in segment.atom_fits
+                if fit.class_label == class_label and np.isfinite(fit.bic)
+            ]
+            if not segment_candidates:
+                continue
+            strength = max(float(segment.features.get("chi2", 0.0)), 1.0)
+            contribution = strength * float(segment.class_probabilities.get(class_label, 0.0))
+            candidates.append((contribution, min(segment_candidates, key=lambda fit: fit.bic)))
         if not candidates:
             return None
-        return min(candidates, key=lambda fit: fit.bic)
+        return max(candidates, key=lambda item: item[0])[1]
 
     @staticmethod
     def _deduplicate_seeds(seeds: tuple[SeedCandidate, ...]) -> tuple[SeedCandidate, ...]:

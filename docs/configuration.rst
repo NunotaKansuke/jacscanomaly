@@ -36,6 +36,18 @@ Supported values:
    FSPL with annual parallax plus a spacecraft ephemeris. Requires
    ``ra_deg``, ``dec_deg``, and ``satellite_ephemeris_path``.
 
+``"fspl_space_parallax_gulls_vbm_fd"``
+   Finite-difference FSPL space-parallax fit using VBMicrolensing and the
+   GULLS trajectory convention. Requires the ``vbm`` optional dependency,
+   ``ra_deg``, ``dec_deg``, and ``satellite_ephemeris_path``.
+
+``"bic_single_lens"``
+   Compare PSPL and finite-difference FSPL fits by BIC, then return the
+   selected fit. Set ``bic_include_space_parallax=True`` to also compare the
+   GULLS/VBMicrolensing FSPL space-parallax model; that option requires the
+   same sky coordinates, satellite table, and optional dependency as
+   ``"fspl_space_parallax_gulls_vbm_fd"``.
+
 For parallax models:
 
 .. code-block:: python
@@ -62,6 +74,28 @@ For space-parallax models, pass a VBMicrolensing/RTModel satellite table:
 The satellite table is expected to contain rows of
 ``JD RA_deg Dec_deg distance_AU`` inside an optional ``$$SOE`` / ``$$EOE``
 block, matching the VBMicrolensing satellite-table convention.
+
+For the GULLS/VBMicrolensing finite-difference fitter, install the optional
+dependencies with ``pip install 'jacscanomaly[vbm]'``. Its parallax components
+can be bounded and softly penalized through ``max_piE``,
+``piE_prior_weight``, and ``piE_prior_eps``:
+
+.. code-block:: python
+
+   config = FinderConfig(
+       fitter_kind="bic_single_lens",
+       bic_include_space_parallax=True,
+       ra_deg=267.623337808,
+       dec_deg=-29.1164180355,
+       tref=2459000.0,
+       satellite_ephemeris_path="satellitedir/satellite1.txt",
+       max_piE=1.0,
+       piE_prior_weight=0.0,
+   )
+
+The BIC-selection result includes ``model_kind``, ``bic``, and
+``model_selection`` attributes that record the selected model and the BIC
+values of successful trials.
 
 Automatic single-lens initialization
 ------------------------------------

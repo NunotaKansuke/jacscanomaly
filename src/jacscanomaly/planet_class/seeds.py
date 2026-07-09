@@ -13,11 +13,11 @@ def seeds_from_atom(
 ) -> tuple[SeedCandidate, ...]:
     if fit.delta_chi2 < float(config.min_delta_chi2_for_seed):
         return ()
-    if fit.class_label == "major_image_bump":
+    if fit.class_label in {"major_image_bump", "major_image_pspl_bump"}:
         return positive_bump_seeds(fit, pspl, config)
-    if fit.class_label == "minor_image_dip":
+    if fit.class_label in {"minor_image_dip", "minor_image_box_trough"}:
         return negative_dip_seeds(fit, pspl, config)
-    if fit.class_label == "central_caustic":
+    if fit.class_label in {"central_caustic", "central_double_cusp"}:
         return central_caustic_seeds(fit, pspl, config)
     if fit.class_label in {
         "fold_caustic",
@@ -25,14 +25,18 @@ def seeds_from_atom(
         "grazing_fold_caustic",
         "limb_darkened_fold_caustic",
         "two_fold_caustic",
+        "rim_trough_caustic",
+        "full_caustic_crossing",
     }:
         return fold_caustic_seeds(fit)
     if fit.class_label in {"cusp_caustic", "canonical_cusp", "finite_source_cusp"}:
         return cusp_caustic_seeds(fit)
     if fit.class_label == "chang_refsdal":
         return chang_refsdal_seeds(fit)
-    if fit.class_label == "second_source":
+    if fit.class_label == "second_pspl_like":
         return second_pspl_seeds(fit, pspl)
+    if fit.class_label == "shear_quadrupole":
+        return shear_quadrupole_seeds(fit, pspl, config)
     return ()
 
 
@@ -171,9 +175,6 @@ def second_pspl_seeds(fit: AtomFitResult, pspl: PSPLParams) -> tuple[SeedCandida
     fs_ratio = float(fit.params.get("Fs_2_over_Fs_1", np.nan))
     if not np.isfinite(fs_ratio):
         fs_ratio = float(fit.params.get("amplitude", np.nan)) / max(abs(pspl.Fs), 1e-12)
-    q = (tE_2 / max(pspl.tE, 1e-12)) ** 2
-    dx = (t0_2 - pspl.t0) / max(pspl.tE, 1e-12)
-    dy_abs = u0_2 * np.sqrt(max(q, 0.0))
     seeds = [
         SeedCandidate(
             model_type="1L2S",
@@ -192,6 +193,9 @@ def second_pspl_seeds(fit: AtomFitResult, pspl: PSPLParams) -> tuple[SeedCandida
             warnings=fit.warnings,
         )
     ]
+    q = (tE_2 / max(pspl.tE, 1e-12)) ** 2
+    dx = (t0_2 - pspl.t0) / max(pspl.tE, 1e-12)
+    dy_abs = u0_2 * np.sqrt(max(q, 0.0))
     for sign in (1.0, -1.0):
         dy = pspl.u0 + sign * dy_abs
         seeds.append(
@@ -202,6 +206,44 @@ def second_pspl_seeds(fit: AtomFitResult, pspl: PSPLParams) -> tuple[SeedCandida
                 score=float(fit.score) - 2.0,
                 source_atom=fit.atom_name,
                 degeneracy_tag="wide_repeating_plus" if sign > 0 else "wide_repeating_minus",
+                warnings=fit.warnings,
+            )
+        )
+    return tuple(seeds)
+
+
+def shear_quadrupole_seeds(
+    fit: AtomFitResult,
+    pspl: PSPLParams,
+    config: PlanetClassConfig,
+) -> tuple[SeedCandidate, ...]:
+    gamma = abs(float(fit.params.get("gamma", np.nan)))
+    if not np.isfinite(gamma) or gamma <= 0.0:
+        return ()
+    seeds: list[SeedCandidate] = []
+    for s in (1.5, 2.0, 3.0, 5.0):
+        q = min(max(gamma * s * s, config.q_floor), config.q_ceil)
+        seeds.append(
+            SeedCandidate(
+                model_type="2L1S",
+                class_label="shear_quadrupole",
+                params={"s": float(s), "q": float(q), "alpha": 0.0},
+                score=float(fit.score) - 5.0,
+                source_atom=fit.atom_name,
+                degeneracy_tag="wide_shear_grid",
+                warnings=fit.warnings,
+            )
+        )
+    for s in (0.25, 0.35, 0.5, 0.7):
+        q = min(max(gamma / max(s * s, 1e-12), config.q_floor), config.q_ceil)
+        seeds.append(
+            SeedCandidate(
+                model_type="2L1S",
+                class_label="shear_quadrupole",
+                params={"s": float(s), "q": float(q), "alpha": 0.0},
+                score=float(fit.score) - 6.0,
+                source_atom=fit.atom_name,
+                degeneracy_tag="close_quadrupole_grid",
                 warnings=fit.warnings,
             )
         )
@@ -223,6 +265,16 @@ def fold_caustic_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
                 "z0": float(fit.params.get("z0", np.nan)),
                 "tc1": float(fit.params.get("tc1", np.nan)),
                 "tc2": float(fit.params.get("tc2", np.nan)),
+                "t_entry": float(fit.params.get("t_entry", np.nan)),
+                "t_exit": float(fit.params.get("t_exit", np.nan)),
+                "caustic_inside_duration": float(fit.params.get("caustic_inside_duration", np.nan)),
+                "rho_over_sinalpha_entry": float(fit.params.get("rho_over_sinalpha_entry", np.nan)),
+                "rho_over_sinalpha_exit": float(fit.params.get("rho_over_sinalpha_exit", np.nan)),
+                "entry_exit_asymmetry": float(fit.params.get("entry_exit_asymmetry", np.nan)),
+                "t_trough": float(fit.params.get("t_trough", np.nan)),
+                "rim_ratio": float(fit.params.get("rim_ratio", np.nan)),
+                "trough_ratio": float(fit.params.get("trough_ratio", np.nan)),
+                "polarity": float(fit.params.get("polarity", np.nan)),
             },
             score=float(fit.score),
             source_atom=fit.atom_name,
@@ -264,6 +316,10 @@ def chang_refsdal_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
                 "x_planet": float(fit.params.get("x_planet", np.nan)),
                 "y_planet": float(fit.params.get("y_planet", np.nan)),
                 "image_width": float(fit.params.get("image_width", np.nan)),
+                "sqrt_q_local": float(fit.params.get("sqrt_q_local", np.nan)),
+                "q_local": float(fit.params.get("q_local", np.nan)),
+                "rho_over_sqrt_q": float(fit.params.get("rho_over_sqrt_q", np.nan)),
+                "rho_local": float(fit.params.get("rho_local", np.nan)),
                 "gamma_local": float(fit.params.get("gamma_local", np.nan)),
                 "perturbation_strength": float(fit.params.get("amplitude", np.nan)),
             },

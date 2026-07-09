@@ -62,6 +62,7 @@ class FinderConfig:
         "pspl_space_parallax",
         "fspl_space_parallax",
         "fspl_space_parallax_gulls_vbm_fd",
+        "bic_single_lens",
     ] = "pspl"
     """
     Choice of single-lens model used for the initial fit.
@@ -86,6 +87,9 @@ class FinderConfig:
     - ``"fspl_space_parallax_gulls_vbm_fd"`` :
         GULLS-convention FSPL space-parallax fitter using VBMicrolensing ESPL
         magnification and finite-difference SciPy least squares.
+    - ``"bic_single_lens"`` :
+        Select the lowest-BIC fit among PSPL and finite-difference FSPL, with
+        an optional GULLS FSPL space-parallax trial.
     """
 
     ra_deg: Optional[float] = None
@@ -106,8 +110,9 @@ class FinderConfig:
     Path to the spacecraft/observer ephemeris table used by space-parallax
     models.
 
-    Required for ``"pspl_space_parallax"``, ``"fspl_space_parallax"``, and
-    ``"fspl_space_parallax_gulls_vbm_fd"``. Expected columns are
+    Required for ``"pspl_space_parallax"``, ``"fspl_space_parallax"``,
+    ``"fspl_space_parallax_gulls_vbm_fd"``, and ``"bic_single_lens"`` when
+    ``bic_include_space_parallax`` is enabled. Expected columns are
     ``JD RA_deg Dec_deg distance_AU``. The interpretation of the position is
     controlled by ``space_parallax_convention``.
     """
@@ -131,6 +136,18 @@ class FinderConfig:
     light-travel correction is included in the source trajectory, matching
     VBMicrolensing's ``t_in_HJD=0`` convention.
     """
+
+    max_piE: float = 1.0
+    """Symmetric bound applied to fitted ``piEN`` and ``piEE`` when supported."""
+
+    piE_prior_weight: float = 0.0
+    """Weight for the optional linear ``|piE|`` penalty in finite-difference fits."""
+
+    piE_prior_eps: float = 1.0e-3
+    """Small numerical floor used by the finite-difference ``|piE|`` penalty."""
+
+    bic_include_space_parallax: bool = False
+    """If True, ``bic_single_lens`` also tries the GULLS FSPL space-parallax model."""
 
     # ==================================================
     # 0b) Automatic single-lens initialization

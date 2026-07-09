@@ -225,6 +225,27 @@ def test_finder_builds_pspl_space_parallax_fitter():
     assert finder.fitter.__class__.__name__ == "PSPLSpaceParallaxFitter"
 
 
+def test_finder_builds_bic_single_lens_without_parallax_inputs():
+    finder = Finder(FinderConfig(fitter_kind="bic_single_lens"))
+
+    finder._ensure_fitter(2459000.0)
+
+    assert finder.fitter.__class__.__name__ == "BICSingleLensFitter"
+    assert not finder.fitter.include_space_parallax
+
+
+def test_bic_single_lens_space_parallax_requires_inputs():
+    finder = Finder(
+        FinderConfig(
+            fitter_kind="bic_single_lens",
+            bic_include_space_parallax=True,
+        )
+    )
+
+    with pytest.raises(ValueError, match="ra_deg and dec_deg"):
+        finder._ensure_fitter(2459000.0)
+
+
 def test_finder_supports_vbm_finite_difference_fspl():
     pytest.importorskip("VBMicrolensing")
     pytest.importorskip("microjax.fastlens")

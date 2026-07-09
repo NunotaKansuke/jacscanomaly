@@ -58,3 +58,137 @@ class PSPLMisfitAtom(ResidualAtom):
             cols.append((pspl_flux(time, p_hi) - pspl_flux(time, p_lo)) / (2.0 * step))
         cols.append(np.ones_like(base))
         return np.column_stack(cols)
+
+
+class ShearQuadrupoleAtom(ResidualAtom):
+    atom_name = "shear_quadrupole_smooth"
+    class_label = "shear_quadrupole"
+
+    def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
+        t = np.asarray(segment.time, dtype=float)
+        y = np.asarray(segment.residual, dtype=float)
+        ferr = np.maximum(np.asarray(segment.ferr, dtype=float), 1e-12)
+        chi2_baseline = float(np.sum((y / ferr) ** 2))
+        center = float(features.get("t_peak", np.mean(t) if t.size else 0.0))
+        scale = max(float(features.get("duration", 0.0)), float(features.get("fwhm", 0.0)), 1e-6)
+        tau = (t - center) / scale
+        envelope = 1.0 / (1.0 + tau * tau)
+        design = np.column_stack(
+            (
+                envelope * (tau * tau - np.mean(tau * tau)),
+                envelope * tau,
+                envelope,
+                np.ones_like(tau),
+            )
+        )
+        coeff, _model, chi2, ok = weighted_linear_fit(design, y, ferr)
+        n_params = int(design.shape[1])
+        n_data = int(t.size)
+        delta_chi2 = float(chi2_baseline - chi2)
+        bic = float(chi2 + n_params * np.log(max(n_data, 1)))
+        gamma_c = float(coeff[0]) if coeff.size else float("nan")
+        gamma_s = float(coeff[1]) if coeff.size > 1 else float("nan")
+        params = {
+            "t_center": center,
+            "width": scale,
+            "gamma_c": gamma_c,
+            "gamma_s": gamma_s,
+            "gamma": float(np.hypot(gamma_c, gamma_s)),
+        }
+        return AtomFitResult(
+            atom_name=self.atom_name,
+            class_label=self.class_label,
+            params=params,
+            param_errors=None,
+            chi2=float(chi2),
+            chi2_baseline=chi2_baseline,
+            delta_chi2=delta_chi2,
+            bic=bic,
+            aic=float(chi2 + 2 * n_params),
+            score=float(delta_chi2 - n_params * np.log(max(n_data, 1))),
+            n_data=n_data,
+            n_params=n_params,
+            success=bool(ok and np.isfinite(chi2)),
+            warnings=("diagnostic shear/quadrupole atom; do not infer unique q,s",),
+        )
+
+
+class SystematicsArtifactAtom(ResidualAtom):
+    atom_name = "sparse_systematics_artifact"
+    class_label = "systematics_candidate"
+
+    def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
+        t = np.asarray(segment.time, dtype=float)
+        y = np.asarray(segment.residual, dtype=float)
+        ferr = np.maximum(np.asarray(segment.ferr, dtype=float), 1e-12)
+        z = y / ferr
+        chi2_baseline = float(np.sum(z * z))
+        n_data = int(t.size)
+        if n_data == 0:
+            raise ValueError("Cannot fit an empty segment.")
+
+        cadence = max(float(features.get("cadence", 0.0)), 1e-12)
+        width = max(0.65 * cadence, 1e-12)
+        order = np.argsort(np.abs(z))[::-1]
+        max_spikes = min(8, max(1, n_data // 2))
+        selected = tuple(int(i) for i in order[:max_spikes] if abs(float(z[i])) >= 3.0)
+        if not selected:
+            selected = (int(order[0]),)
+
+        cols = [np.ones_like(t)]
+        for index in selected:
+            cols.append(np.exp(-0.5 * ((t - t[index]) / width) ** 2))
+        design = np.column_stack(cols)
+        coeff, model, chi2, ok = weighted_linear_fit(design, y, ferr)
+        n_params = int(design.shape[1])
+        delta_chi2 = float(chi2_baseline - chi2)
+        bic = float(chi2 + n_params * np.log(max(n_data, 1)))
+        spike_times = [float(t[i]) for i in selected]
+        spike_z = [float(z[i]) for i in selected]
+        warnings = ["diagnostic artifact atom; no planet seed generated"]
+        if float(features.get("fwhm", 0.0)) <= 1.5 * cadence:
+            warnings.append("feature width is close to cadence")
+        if len(selected) <= 2:
+            warnings.append("fit dominated by one or two points")
+        diagnostics = self._display_diagnostics(segment, features, model)
+        return AtomFitResult(
+            atom_name=self.atom_name,
+            class_label=self.class_label,
+            params={
+                "n_spikes": float(len(selected)),
+                "spike_width": float(width),
+                "t_peak": float(spike_times[0]),
+                "max_abs_z": float(np.max(np.abs(z))),
+            },
+            param_errors=None,
+            chi2=float(chi2),
+            chi2_baseline=chi2_baseline,
+            delta_chi2=delta_chi2,
+            bic=bic,
+            aic=float(chi2 + 2 * n_params),
+            score=float(delta_chi2 - n_params * np.log(max(n_data, 1))),
+            n_data=n_data,
+            n_params=n_params,
+            success=bool(ok and np.isfinite(chi2)),
+            warnings=tuple(warnings),
+            fit_diagnostics={
+                **diagnostics,
+                "spike_times": spike_times,
+                "spike_z": spike_z,
+            },
+        )
+
+    def _display_diagnostics(
+        self,
+        segment: SegmentData,
+        features: dict[str, float],
+        model_at_data: np.ndarray,
+    ) -> dict[str, object]:
+        t = np.asarray(segment.time, dtype=float)
+        if t.size == 0:
+            return {}
+        return {
+            "display_time": t.tolist(),
+            "display_model_residual": np.asarray(model_at_data, dtype=float).tolist(),
+            "display_atom_residual": np.asarray(model_at_data, dtype=float).tolist(),
+        }

@@ -9,6 +9,10 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 ## [Unreleased]
 
 ### Added
+- Planet-signal refinement and residual-morphology classification, including
+  physical-model seed generation for downstream 2L1S/1L2S fitting.
+- BIC-based PSPL/FSPL single-lens model selection, with an optional GULLS
+  FSPL space-parallax trial when VBMicrolensing is installed.
 - Candidate quality diagnostics for the grid scan, including `n_window`,
   `n_contrib`, `n_eff`, `peak_frac`, `rho1`, and `longest_run`.
 - `AnomalyResult.grid_metrics_all` and per-season `SeasonSummary.grid_metrics`
@@ -19,6 +23,8 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
   `print_summary()`, and `summary_table()`.
 
 ### Changed
+- The GULLS finite-difference space-parallax fitter now supports bounded and
+  optionally penalized parallax components.
 - Replaced the old internal `n_out` metric with richer per-candidate quality
   diagnostics.
 - Updated documentation to show result summaries and candidate quality metrics.

@@ -138,6 +138,15 @@ class ResidualAtom:
             bounds=bounds,
             n_poly=n_poly,
         )
+        diagnostics.update(
+            self._display_model_diagnostics(
+                segment=segment,
+                features=features,
+                theta=theta,
+                coeff=coeff,
+                shape_from_theta=shape_from_theta,
+            )
+        )
         validity_penalty, validity_warnings = self._validity_penalty(
             params=params,
             features=features,
@@ -165,6 +174,39 @@ class ResidualAtom:
             validity_penalty=float(validity_penalty),
             fit_diagnostics=diagnostics,
         )
+
+    def _display_model_diagnostics(
+        self,
+        *,
+        segment: SegmentData,
+        features: dict[str, float],
+        theta: np.ndarray,
+        coeff: np.ndarray,
+        shape_from_theta,
+    ) -> dict[str, object]:
+        t = np.asarray(segment.time, dtype=float)
+        if t.size == 0 or coeff.size == 0:
+            return {}
+        n_grid = int(min(4000, max(800, 12 * t.size)))
+        td = np.linspace(float(t[0]), float(t[-1]), n_grid)
+        center = float(features.get("t_peak", np.mean(t) if t.size else 0.0))
+        poly = polynomial_design(td, center=center, order=self._poly_order(segment, features))
+        shape = np.asarray(shape_from_theta(theta, td), dtype=float)
+        if shape.ndim == 1:
+            shape = shape[:, None]
+        design = np.column_stack((poly, shape))
+        if design.shape[1] != coeff.size:
+            return {}
+        model = design @ coeff
+        atom_coeff = coeff[poly.shape[1] :] if coeff.size > poly.shape[1] else np.asarray([], dtype=float)
+        atom_model = shape @ atom_coeff if atom_coeff.size else np.zeros_like(td)
+        if not (np.all(np.isfinite(td)) and np.all(np.isfinite(model)) and np.all(np.isfinite(atom_model))):
+            return {}
+        return {
+            "display_time": td.tolist(),
+            "display_model_residual": model.tolist(),
+            "display_atom_residual": atom_model.tolist(),
+        }
 
     def _estimate_errors(
         self,

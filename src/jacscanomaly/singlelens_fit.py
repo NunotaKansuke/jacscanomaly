@@ -790,6 +790,9 @@ class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
     tol: float = 1e-6
     vbm_tol: float = 1e-4
     vbm_reltol: float = 1e-4
+    max_piE: float = 1.0
+    piE_prior_weight: float = 0.0
+    piE_prior_eps: float = 1.0e-3
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
@@ -852,6 +855,20 @@ class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
         chi2 = float(np.sum(resn * resn))
         return model, residual, chi2, fs, fb
 
+    def _piE_prior_residual(self, q: np.ndarray) -> np.ndarray:
+        weight = max(float(self.piE_prior_weight), 0.0)
+        if weight <= 0.0:
+            return np.empty(0, dtype=float)
+        piE = float(np.hypot(float(q[4]), float(q[5])))
+        eps = max(float(self.piE_prior_eps), 1e-12)
+        return np.asarray([np.sqrt(weight * max(piE, eps))], dtype=float)
+
+    def _penalized_chi2(self, chi2: float, q: np.ndarray) -> float:
+        prior = self._piE_prior_residual(q)
+        if prior.size == 0:
+            return float(chi2)
+        return float(chi2) + float(np.sum(prior * prior))
+
     def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
         time_np = np.asarray(time, dtype=float)
         flux_np = np.asarray(flux, dtype=float)
@@ -864,13 +881,16 @@ class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
             _model, residual, chi2, _fs, _fb = self._model_and_residual(q, time_np, flux_np, ferr_np)
             if not np.isfinite(chi2):
                 return np.full_like(flux_np, 1e50, dtype=float)
-            return residual / ferr_np
+            return np.r_[residual / ferr_np, self._piE_prior_residual(q)]
 
         lower = np.full(6, -np.inf, dtype=float)
         upper = np.full(6, np.inf, dtype=float)
         lower[1] = 1e-6
         lower[3] = -50.0
         upper[3] = 10.0
+        if np.isfinite(float(self.max_piE)) and float(self.max_piE) > 0.0:
+            lower[4:6] = -float(self.max_piE)
+            upper[4:6] = float(self.max_piE)
         result = least_squares(
             residual_fun,
             q0_np,
@@ -884,6 +904,7 @@ class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
         )
         q = np.asarray(result.x, dtype=float)
         model, residual, chi2, fs, fb = self._model_and_residual(q, time_np, flux_np, ferr_np)
+        chi2_fit = self._penalized_chi2(chi2, q)
         n = int(time_np.size)
         rho = float(np.exp(np.clip(q[3], -50.0, 10.0)))
         params = np.asarray([q[0], q[1], q[2], rho, q[4], q[5]], dtype=float)
@@ -893,8 +914,8 @@ class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
             ferr=ferr_np,
             params=jnp.asarray(params),
             param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
-            chi2=jnp.asarray(chi2),
-            chi2_dof=jnp.asarray(chi2 / max(n - 6, 1)),
+            chi2=jnp.asarray(chi2_fit),
+            chi2_dof=jnp.asarray(chi2_fit / max(n - 6, 1)),
             fs=jnp.asarray(fs),
             fb=jnp.asarray(fb),
             model_flux=jnp.asarray(model),
@@ -902,6 +923,121 @@ class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
             raw_params=jnp.asarray(q),
             parallax_projector=self._P,
         )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+
+@dataclass
+class BICSingleLensFitter:
+    """
+    Select PSPL, FSPL, or GULLS FSPL space-parallax by BIC.
+    """
+
+    RA: float
+    Dec: float
+    tref: float
+    satellite_ephemeris_path: str
+    max_piE: float = 1.0
+    piE_prior_weight: float = 0.0
+    piE_prior_eps: float = 1.0e-3
+    include_space_parallax: bool = False
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._last_fit: Optional[SingleLensFitResult] = None
+
+    @staticmethod
+    def _annotate_fit(
+        fit: SingleLensFitResult,
+        *,
+        model_kind: str,
+        bic: float,
+        model_selection: dict,
+    ) -> SingleLensFitResult:
+        object.__setattr__(fit, "model_kind", model_kind)
+        object.__setattr__(fit, "bic", float(bic))
+        object.__setattr__(fit, "model_selection", model_selection)
+        return fit
+
+    def _initial_values(self, q0: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        q = np.asarray(q0, dtype=float).ravel()
+        t0 = float(q[0])
+        tE = float(q[1])
+        u0 = float(q[2])
+        if q.size >= 4:
+            raw_rho = float(q[3])
+            logrho = raw_rho if raw_rho <= 0.0 else float(np.log(max(raw_rho, 1e-12)))
+        else:
+            logrho = -7.0
+        if q.size >= 6:
+            piEN = float(q[4])
+            piEE = float(q[5])
+        else:
+            piEN = 0.0
+            piEE = 0.0
+        return (
+            np.asarray([t0, tE, u0], dtype=float),
+            np.asarray([t0, tE, u0, logrho], dtype=float),
+            np.asarray([t0, tE, u0, logrho, piEN, piEE], dtype=float),
+        )
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        time_np = np.asarray(time, dtype=float)
+        q_pspl, q_fspl, q_space = self._initial_values(np.asarray(q0, dtype=float))
+        n = max(int(time_np.size), 1)
+        trials: list[tuple[str, SingleLensFitResult, float]] = []
+        errors: dict[str, str] = {}
+
+        q0_size = int(np.asarray(q0, dtype=float).size)
+        if q0_size == 4:
+            candidates = [("fspl_vbm_fd", VBMFiniteDiffFSPLFitter(), q_fspl)]
+        else:
+            candidates = [
+                ("pspl", PSPLFitter(), q_pspl),
+                ("fspl_vbm_fd", VBMFiniteDiffFSPLFitter(), q_fspl),
+            ]
+        if bool(self.include_space_parallax) and q0_size != 4:
+            candidates.append(
+                (
+                "fspl_space_parallax_gulls_vbm_fd",
+                VBMFiniteDiffGullsFSPLSpaceParallaxFitter(
+                    RA=float(self.RA),
+                    Dec=float(self.Dec),
+                    tref=float(self.tref),
+                    satellite_ephemeris_path=str(self.satellite_ephemeris_path),
+                    max_piE=float(self.max_piE),
+                    piE_prior_weight=float(self.piE_prior_weight),
+                    piE_prior_eps=float(self.piE_prior_eps),
+                ),
+                q_space,
+                )
+            )
+
+        for model_kind, fitter, x0 in candidates:
+            try:
+                fit = fitter.fit(time, flux, ferr, jnp.asarray(x0, dtype=float))
+                k = len(tuple(fit.param_names)) + 2
+                bic = float(np.asarray(fit.chi2)) + float(k) * float(np.log(n))
+                if np.isfinite(bic):
+                    trials.append((model_kind, fit, bic))
+            except Exception as exc:  # pragma: no cover - depends on optional backends
+                errors[model_kind] = f"{type(exc).__name__}: {exc}"
+
+        if not trials:
+            raise RuntimeError(f"All BIC single-lens fits failed: {errors}")
+
+        model_kind, fit, bic = min(trials, key=lambda item: item[2])
+        selection = {
+            "selected": model_kind,
+            "bic": {kind: float(value) for kind, _fit, value in trials},
+            "errors": errors,
+        }
+        fit = self._annotate_fit(fit, model_kind=model_kind, bic=bic, model_selection=selection)
         self._last_fit = fit
         return fit
 

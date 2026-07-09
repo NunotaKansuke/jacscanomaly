@@ -8,14 +8,14 @@ from ..types import AtomFitResult, SegmentData
 
 
 class SecondPSPLAtom(ResidualAtom):
-    atom_name = "second_pspl_residual"
-    class_label = "second_source"
+    atom_name = "second_pspl_like_residual"
+    class_label = "second_pspl_like"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
         if t.size == 0:
             raise ValueError("Cannot fit an empty segment.")
-        t_peak = float(features.get("t_peak", t[int(np.argmax(segment.residual))]))
+        t_peak = float(features.get("t_positive_peak", t[int(np.argmax(segment.residual))]))
         width = max(float(features.get("fwhm", 0.0)), float(features.get("cadence", 0.0)), 1e-6)
         lo_t, hi_t = float(t[0]), float(t[-1])
         min_tE = max(float(features.get("cadence", 0.0)), 1e-5)

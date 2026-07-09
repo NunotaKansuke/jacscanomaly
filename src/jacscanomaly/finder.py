@@ -21,6 +21,7 @@ from .singlelens_fit import (
     PSPLSpaceParallaxFitter,
     FSPLSpaceParallaxFitter,
     VBMFiniteDiffGullsFSPLSpaceParallaxFitter,
+    BICSingleLensFitter,
     evaluate_single_lens_fixed,
 )
 from .singlelens_model import (
@@ -143,6 +144,7 @@ class Finder:
             "pspl_space_parallax",
             "fspl_space_parallax",
             "fspl_space_parallax_gulls_vbm_fd",
+            "bic_single_lens",
         }
         if k not in valid:
             raise ValueError(
@@ -159,7 +161,7 @@ class Finder:
             "pspl_space_parallax",
             "fspl_space_parallax",
             "fspl_space_parallax_gulls_vbm_fd",
-        }
+        } or (k == "bic_single_lens" and self.config.bic_include_space_parallax)
         if needs_sky:
             if self.config.ra_deg is None or self.config.dec_deg is None:
                 raise ValueError(
@@ -170,7 +172,7 @@ class Finder:
             "pspl_space_parallax",
             "fspl_space_parallax",
             "fspl_space_parallax_gulls_vbm_fd",
-        }
+        } or (k == "bic_single_lens" and self.config.bic_include_space_parallax)
         if needs_satellite and self.config.satellite_ephemeris_path is None:
             raise ValueError(
                 f"{k} requires satellite_ephemeris_path in FinderConfig."
@@ -240,6 +242,22 @@ class Finder:
                 Dec=self.config.dec_deg,
                 tref=tref,
                 satellite_ephemeris_path=self.config.satellite_ephemeris_path,
+                max_piE=float(self.config.max_piE),
+                piE_prior_weight=float(self.config.piE_prior_weight),
+                piE_prior_eps=float(self.config.piE_prior_eps),
+            )
+            return
+
+        if k == "bic_single_lens":
+            self.fitter = BICSingleLensFitter(
+                RA=self.config.ra_deg,
+                Dec=self.config.dec_deg,
+                tref=tref,
+                satellite_ephemeris_path=self.config.satellite_ephemeris_path,
+                max_piE=float(self.config.max_piE),
+                piE_prior_weight=float(self.config.piE_prior_weight),
+                piE_prior_eps=float(self.config.piE_prior_eps),
+                include_space_parallax=bool(self.config.bic_include_space_parallax),
             )
             return
     

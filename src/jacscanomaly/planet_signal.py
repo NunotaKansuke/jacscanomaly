@@ -41,6 +41,7 @@ class PlanetSignalConfig:
     mask_core_pad_teff: float = 0.25
     max_mask_fraction: float = 0.5
     max_unmasked_chi2_dof_increase: float = 0.05
+    max_refined_chi2_dof_ratio: float = 1000.0
     candidate_min_points: int = 1
     candidate_min_chi2: float = 0.0
     robust_max_iter: int = 6
@@ -867,6 +868,15 @@ class PlanetSignalClassifier:
         hi = int(index)
         while hi + 1 < cell_end and values[hi + 1] >= threshold:
             hi += 1
+        t_start, t_end = self._interpolated_threshold_bounds(
+            time=time,
+            values=values,
+            lo=lo,
+            hi=hi,
+            cell_start=cell_start,
+            cell_end=cell_end,
+            threshold=threshold,
+        )
 
         pspl_mag, observed_mag, strength_ratio = self._magnification_strength(
             result=result,
@@ -885,26 +895,24 @@ class PlanetSignalClassifier:
                 index=index,
                 cell_start=cell_start,
                 cell_end=cell_end,
-                t_start=float(time[lo]),
-                t_end=float(time[hi]),
+                t_start=float(t_start),
+                t_end=float(t_end),
             )
             if fit is not None:
                 fitted_t0, fitted_teff, fitted_chi2 = fit
                 half_width = float(self.config.fit_template_half_width_scale) * float(fitted_teff)
                 if np.isfinite(half_width) and half_width > 0.0:
-                    lo = int(np.searchsorted(time, float(fitted_t0) - half_width, side="left"))
-                    hi = int(np.searchsorted(time, float(fitted_t0) + half_width, side="right") - 1)
-                    lo = max(int(cell_start), min(lo, int(index)))
-                    hi = min(int(cell_end) - 1, max(hi, int(index)))
+                    t_start = max(float(time[cell_start]), float(fitted_t0) - half_width)
+                    t_end = min(float(time[cell_end - 1]), float(fitted_t0) + half_width)
 
         return PlanetSignalPeak(
             index=int(index),
             time=float(time[index]),
             z=float(z[index]),
             residual=float(residual[index]),
-            timescale=float(time[hi] - time[lo]) if hi > lo else 0.0,
-            t_start=float(time[lo]),
-            t_end=float(time[hi]),
+            timescale=max(float(t_end) - float(t_start), 0.0),
+            t_start=float(t_start),
+            t_end=float(t_end),
             pspl_magnification=float(pspl_mag),
             observed_magnification=float(observed_mag),
             strength_ratio=float(strength_ratio),
@@ -912,6 +920,41 @@ class PlanetSignalClassifier:
             fitted_teff=float(fitted_teff),
             fitted_chi2=float(fitted_chi2),
         )
+
+    @staticmethod
+    def _interpolated_threshold_bounds(
+        *,
+        time: np.ndarray,
+        values: np.ndarray,
+        lo: int,
+        hi: int,
+        cell_start: int,
+        cell_end: int,
+        threshold: float,
+    ) -> tuple[float, float]:
+        def crossing(left: int, right: int) -> float:
+            t0 = float(time[left])
+            t1 = float(time[right])
+            y0 = float(values[left])
+            y1 = float(values[right])
+            if not (np.isfinite(t0) and np.isfinite(t1) and np.isfinite(y0) and np.isfinite(y1)):
+                return t1
+            denom = y1 - y0
+            if denom == 0.0:
+                return 0.5 * (t0 + t1)
+            frac = (float(threshold) - y0) / denom
+            frac = min(max(float(frac), 0.0), 1.0)
+            return t0 + frac * (t1 - t0)
+
+        start = float(time[lo])
+        end = float(time[hi])
+        if lo > cell_start:
+            start = crossing(lo - 1, lo)
+        if hi + 1 < cell_end:
+            end = crossing(hi, hi + 1)
+        if end < start:
+            start, end = end, start
+        return start, end
 
     def _fit_template_peak(
         self,
@@ -1084,6 +1127,7 @@ class PlanetSignalExtractor:
         *,
         refit: bool = True,
         verbose: bool = False,
+        prior_signal_windows: tuple[tuple[float, float], ...] = (),
     ) -> PlanetSignalResult:
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self.finder._to_arrays(
             time, flux, ferr, x0
@@ -1128,6 +1172,26 @@ class PlanetSignalExtractor:
                 "PlanetSignalConfig.baseline_mode must be 'mask', 'robust', or 'beam_interval'."
             )
 
+        if self._fit_is_catastrophically_worse(initial_fit, current_fit):
+            current_fit = initial_fit
+            signal_mask = np.zeros(time_np.shape, dtype=bool)
+            point_weight = np.ones(time_np.shape, dtype=float)
+            iterations = []
+
+        prior_mask = self._prior_signal_window_mask(time_np, prior_signal_windows)
+        if np.any(prior_mask & ~signal_mask):
+            signal_mask = signal_mask | prior_mask
+            point_weight = np.where(signal_mask, 0.0, point_weight)
+            candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                keep_mask_np=~signal_mask,
+                x0_j=self._raw_params_for_refit(current_fit),
+            )
+            if not self._fit_is_catastrophically_worse(current_fit, candidate_fit):
+                current_fit = candidate_fit
+
         flat_diagnostic = self._flat_baseline_diagnostic(current_fit, signal_mask)
         if flat_diagnostic.use_flat_baseline:
             current_fit = self._fit_flat_baseline_and_evaluate_full(
@@ -1158,6 +1222,20 @@ class PlanetSignalExtractor:
             candidates=tuple(candidates),
             best=best,
         )
+
+    @staticmethod
+    def _prior_signal_window_mask(
+        time: np.ndarray,
+        prior_signal_windows: tuple[tuple[float, float], ...],
+    ) -> np.ndarray:
+        mask = np.zeros(np.asarray(time).shape, dtype=bool)
+        for center, half_width in tuple(prior_signal_windows):
+            center_f = float(center)
+            half_width_f = max(float(half_width), 0.0)
+            if not (np.isfinite(center_f) and np.isfinite(half_width_f)):
+                continue
+            mask |= np.abs(np.asarray(time, dtype=float) - center_f) <= half_width_f
+        return mask
 
     def _run_mask_baseline(
         self,
@@ -1388,6 +1466,13 @@ class PlanetSignalExtractor:
                         )
                     except ValueError:
                         continue
+                    old_unmasked = self._masked_chi2_dof(branch.fit, ~combined)
+                    new_unmasked = self._masked_chi2_dof(candidate_fit, ~combined)
+                    allowed = old_unmasked * (1.0 + float(self.config.max_unmasked_chi2_dof_increase))
+                    if np.isfinite(old_unmasked) and new_unmasked > allowed:
+                        continue
+                    if self._fit_is_catastrophically_worse(branch.fit, candidate_fit):
+                        continue
 
                     added = int(np.sum(combined) - np.sum(branch.mask))
                     score = self._beam_score(candidate_fit, combined)
@@ -1415,6 +1500,20 @@ class PlanetSignalExtractor:
         best_branch = min(branches, key=lambda b: b.score)
         point_weight = np.where(best_branch.mask, 0.0, 1.0)
         return best_branch.fit, best_branch.mask, point_weight, list(best_branch.iterations)
+
+    def _fit_is_catastrophically_worse(
+        self,
+        reference_fit: SingleLensFitResult,
+        candidate_fit: SingleLensFitResult,
+    ) -> bool:
+        ratio = float(self.config.max_refined_chi2_dof_ratio)
+        if not np.isfinite(ratio) or ratio <= 0.0:
+            return False
+        reference = float(np.asarray(reference_fit.chi2_dof))
+        candidate = float(np.asarray(candidate_fit.chi2_dof))
+        if not (np.isfinite(reference) and np.isfinite(candidate)):
+            return False
+        return candidate > max(reference * ratio, reference + 1.0)
 
     def _beam_interval_masks_from_seed(
         self,

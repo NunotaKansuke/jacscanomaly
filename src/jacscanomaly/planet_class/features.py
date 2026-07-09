@@ -18,6 +18,12 @@ def segment_features(segment: SegmentData) -> dict[str, float]:
     peak_index = int(np.argmax(abs_z))
     t_peak = float(t[peak_index])
     peak_z = float(z[peak_index])
+    pos_index = int(np.argmax(z))
+    neg_index = int(np.argmin(z))
+    t_positive_peak = float(t[pos_index])
+    t_negative_peak = float(t[neg_index])
+    positive_peak_z = float(z[pos_index])
+    negative_peak_z = float(z[neg_index])
     duration = float(t[-1] - t[0]) if t.size > 1 else 0.0
     chi2 = float(np.sum(z * z))
     positive_chi2 = float(np.sum(np.where(z > 0.0, z * z, 0.0)))
@@ -45,6 +51,10 @@ def segment_features(segment: SegmentData) -> dict[str, float]:
     return {
         "t_peak": t_peak,
         "peak_z": peak_z,
+        "t_positive_peak": t_positive_peak,
+        "positive_peak_z": positive_peak_z,
+        "t_negative_peak": t_negative_peak,
+        "negative_peak_z": negative_peak_z,
         "sign": sign,
         "duration": duration,
         "fwhm": max(fwhm, cadence, 0.0),

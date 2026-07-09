@@ -271,6 +271,28 @@ def test_planet_signal_classifier_identifies_single_peak():
     assert classification.best.peaks[0].strength_ratio > 1.0
 
 
+def test_planet_signal_peak_timescale_uses_interpolated_half_width():
+    time = np.arange(9.0, 11.0001, 0.2)
+    ferr = np.full_like(time, 0.02)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    sigma = 0.2
+    residual = 0.2 * np.exp(-0.5 * ((time - 10.0) / sigma) ** 2)
+    flux = model + residual
+    mask = np.abs(time - 10.0) < 0.8
+    result = _classification_result(time, flux, ferr, residual, mask)
+
+    classification = result.classify(
+        PlanetSignalClassificationConfig(smooth_points=1)
+    )
+
+    assert classification.best is not None
+    peak = classification.best.peaks[0]
+    assert 9.70 < peak.t_start < 9.80
+    assert 10.20 < peak.t_end < 10.30
+    assert peak.timescale > 0.45
+
+
 def test_planet_signal_classifier_identifies_dip():
     time = np.linspace(0.0, 20.0, 401)
     ferr = np.full_like(time, 0.02)

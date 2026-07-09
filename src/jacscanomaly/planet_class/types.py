@@ -51,19 +51,32 @@ class PlanetClassConfig:
     boundary_penalty: float = 10.0
     min_width_cadence_ratio: float = 1.5
     smooth_misfit_warning_delta_bic: float = 5.0
+    cr_lookup_grid_size: int = 192
+    cr_lookup_extent: float = 4.5
+    cr_lookup_gamma_step: float = 0.025
+    cr_lookup_source_radius_grid: Tuple[float, ...] = (0.0, 0.03, 0.1, 0.3, 1.0)
+    cr_lookup_sqrt_q_factors: Tuple[float, ...] = (0.5, 1.0, 2.0)
     enable_positive_bump: bool = True
+    enable_pspl_positive_bump: bool = True
     enable_negative_dip: bool = True
+    enable_minor_image_box_trough: bool = True
     enable_central_perturbation: bool = True
+    enable_central_double_cusp: bool = True
     enable_fold_caustic: bool = True
     enable_curved_fold_caustic: bool = True
+    enable_full_caustic_crossing: bool = True
     enable_cusp_tail: bool = True
     enable_grazing_fold_caustic: bool = True
     enable_two_fold_caustic: bool = True
+    enable_signed_two_fold_caustic: bool = False
+    enable_rim_trough_caustic: bool = True
     enable_limb_darkened_fold_caustic: bool = True
     enable_canonical_cusp: bool = True
     enable_finite_source_cusp: bool = False
     enable_chang_refsdal: bool = True
     enable_second_pspl: bool = True
+    enable_shear_quadrupole: bool = True
+    enable_systematics_diagnostic: bool = True
     enable_pspl_misfit: bool = True
 
 
@@ -117,7 +130,7 @@ class AtomFitResult:
     success: bool
     warnings: Tuple[str, ...]
     validity_penalty: float = 0.0
-    fit_diagnostics: Optional[dict[str, float]] = None
+    fit_diagnostics: Optional[dict[str, object]] = None
 
     def summary_dict(self, *, prefix: str = "") -> dict[str, object]:
         row: dict[str, object] = {
@@ -249,6 +262,10 @@ class PlanetAnomalyFitResult:
             for rank, atom in enumerate(segment.atom_fits):
                 row = {"segment_index": i, "rank": rank}
                 row.update(atom.summary_dict())
+                if atom.fit_diagnostics:
+                    for key, value in atom.fit_diagnostics.items():
+                        if key.startswith("display_"):
+                            row[key] = value
                 rows.append(row)
         return tuple(rows)
 

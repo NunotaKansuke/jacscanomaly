@@ -40,6 +40,8 @@ If you are using the package for the first time:
 * use :doc:`method` to understand ``dchi2``, ``score``, and ``n_eff``,
 * use :doc:`configuration` when tuning a survey run,
 * use :doc:`results` when building candidate tables or downstream analysis.
+* use :doc:`planet_classification` to refine and classify extracted planetary
+  residual signals.
 
 .. toctree::
    :maxdepth: 2
@@ -51,6 +53,7 @@ If you are using the package for the first time:
    method
    configuration
    results
+   planet_classification
 
 .. toctree::
    :maxdepth: 2

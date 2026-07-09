@@ -14,6 +14,12 @@ Main workflow
    jacscanomaly.Finder
    jacscanomaly.FinderConfig
    jacscanomaly.CandidateCriteria
+   jacscanomaly.PlanetSignalExtractor
+   jacscanomaly.PlanetSignalConfig
+   jacscanomaly.PlanetSignalResult
+   jacscanomaly.PlanetAnomalyClassifier
+   jacscanomaly.PlanetClassConfig
+   jacscanomaly.PlanetAnomalyFitResult
 
 Result containers
 -----------------
@@ -45,6 +51,10 @@ Single-lens fitting
    jacscanomaly.FSPLFitter
    jacscanomaly.PSPLParallaxFitter
    jacscanomaly.FSPLParallaxFitter
+   jacscanomaly.PSPLSpaceParallaxFitter
+   jacscanomaly.FSPLSpaceParallaxFitter
+   jacscanomaly.VBMFiniteDiffGullsFSPLSpaceParallaxFitter
+   jacscanomaly.BICSingleLensFitter
    jacscanomaly.CVFitter
    jacscanomaly.SingleLensFitResult
 
@@ -69,4 +79,6 @@ Module reference
    jacscanomaly.singlelens_fit
    jacscanomaly.singlelens_model
    jacscanomaly.template_free
+   jacscanomaly.planet_signal
+   jacscanomaly.planet_class
    jacscanomaly.plot

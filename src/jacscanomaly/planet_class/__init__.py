@@ -20,6 +20,7 @@ from .fold_kernel import (
     fold_gn_integral,
     fold_limb_darkened,
 )
+from .atoms.chang_refsdal import cr_relative_magnification, warm_chang_refsdal_lookup_cache
 from .types import (
     AtomFitResult,
     PlanetAnomalyFitResult,
@@ -58,4 +59,6 @@ __all__ = [
     "fold_g0_integral",
     "fold_gn_integral",
     "fold_limb_darkened",
+    "cr_relative_magnification",
+    "warm_chang_refsdal_lookup_cache",
 ]

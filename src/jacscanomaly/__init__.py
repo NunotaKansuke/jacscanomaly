@@ -20,6 +20,7 @@ from .singlelens_fit import (
     PSPLSpaceParallaxFitter,
     FSPLSpaceParallaxFitter,
     VBMFiniteDiffGullsFSPLSpaceParallaxFitter,
+    BICSingleLensFitter,
     CVFitter,
 )
 from .template_free import (
@@ -70,6 +71,7 @@ __all__ = [
     "PSPLSpaceParallaxFitter",
     "FSPLSpaceParallaxFitter",
     "VBMFiniteDiffGullsFSPLSpaceParallaxFitter",
+    "BICSingleLensFitter",
     "CVFitter",
     "SingleLensFitResult",
     "TemplateFreeCandidate",
