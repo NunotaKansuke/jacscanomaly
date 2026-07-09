@@ -20,6 +20,9 @@ Main workflow
    jacscanomaly.PlanetAnomalyClassifier
    jacscanomaly.PlanetClassConfig
    jacscanomaly.PlanetAnomalyFitResult
+   jacscanomaly.TemplateFreeScanner
+   jacscanomaly.TemplateFreeSearchConfig
+   jacscanomaly.TemplateFreeSearchResult
 
 Result containers
 -----------------

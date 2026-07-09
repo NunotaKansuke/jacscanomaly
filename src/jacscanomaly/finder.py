@@ -330,13 +330,27 @@ class Finder:
         verbose : bool, optional
             If True, print progress messages.
         log : logging.Logger, optional
-            Logger used for detailed progress reporting.
+            Logger used for progress reporting. When omitted, module-level
+            logging is used. ``verbose=False`` suppresses progress messages.
 
         Returns
         -------
         AnomalyResult
             Object containing the single-lens fit, residuals,
             per-season cluster summaries, and the best anomaly candidate.
+
+        Raises
+        ------
+        ValueError
+            If the input arrays are not finite one-dimensional arrays of equal
+            length, ``ferr`` is non-positive, or ``refit=False`` is used
+            without ``x0``.
+
+        Notes
+        -----
+        ``refit=False`` fixes only nonlinear model parameters. The linear
+        source and blend fluxes are still solved for the supplied data before
+        residuals are scanned. See :doc:`workflows` for when to use this mode.
         """
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self._to_arrays(
             time, flux, ferr, x0
@@ -404,6 +418,30 @@ class Finder:
         Run a template-free anomaly search on single-lens residuals.
 
         This leaves the existing bell-template anomaly pipeline untouched.
+
+        Parameters
+        ----------
+        time, flux, ferr : array-like
+            One-dimensional light-curve arrays. ``ferr`` is used to normalize
+            the residuals even when ``fit`` is supplied.
+        x0 : array-like, optional
+            Nonlinear initial values used only when ``fit`` is omitted.
+        fit : SingleLensFitResult, optional
+            Existing baseline fit whose residuals should be searched. Passing
+            this skips all single-lens fitting.
+        config : TemplateFreeSearchConfig, optional
+            Template-free search settings. If omitted, the finder season gap is
+            reused and all other settings use their defaults.
+
+        Returns
+        -------
+        TemplateFreeSearchResult
+            Residual z-scores and ranked zero-crossing candidates.
+
+        Notes
+        -----
+        To scan residuals without constructing a ``Finder`` or a
+        ``SingleLensFitResult``, call :class:`TemplateFreeScanner` directly.
         """
         time_j, flux_j, ferr_j, x0_j, time_np, _, ferr_np = self._to_arrays(
             time, flux, ferr, x0

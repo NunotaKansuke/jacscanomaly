@@ -55,6 +55,27 @@ class PlanetAnomalyClassifier:
         self.config = config
 
     def fit(self, result: PlanetSignalResult) -> PlanetAnomalyFitResult:
+        """
+        Fit enabled local morphology atoms to extracted signal components.
+
+        Parameters
+        ----------
+        result : PlanetSignalResult
+            Output of :class:`PlanetSignalExtractor`. The classifier uses its
+            refined residual, component classification, and refined PSPL fit.
+
+        Returns
+        -------
+        PlanetAnomalyFitResult
+            Ranked atom fits for each component, local parameter estimates and
+            uncertainty estimates when available, class probabilities, and
+            deduplicated 2L1S/1L2S seed candidates.
+
+        Notes
+        -----
+        Atoms are local residual models. Their BIC ranking is useful for
+        triage, but must not be treated as a global physical-model comparison.
+        """
         pspl = pspl_params_from_result(result)
         classification = result.classify()
         segment_results: list[SegmentModelResult] = []

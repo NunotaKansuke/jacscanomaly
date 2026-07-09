@@ -63,6 +63,7 @@ If you are using the package for the first time:
    :caption: Reference
 
    api
+   reference
    testing
    development
 

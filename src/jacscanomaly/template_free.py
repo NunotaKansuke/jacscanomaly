@@ -14,7 +14,8 @@ class TemplateFreeSearchConfig:
     Configuration for template-free residual anomaly searches.
 
     The scanner splits each season into segments bounded by z=0 sign
-    crossings. Segments whose peak |z| exceeds ``seed_z_threshold`` qualify
+    crossings. Segments whose peak absolute z-score exceeds
+    ``seed_z_threshold`` qualify
     and immediately gain their neighboring segment on each side, so every
     window reaches the second zero crossing away from its seed. Windows are
     then joined whenever the gap between their edges is small compared to the
@@ -177,6 +178,31 @@ class TemplateFreeScanner:
         self.config = TemplateFreeSearchConfig() if config is None else config
 
     def run(self, time, residual, ferr) -> TemplateFreeSearchResult:
+        """
+        Search externally supplied residuals without fitting a baseline model.
+
+        Parameters
+        ----------
+        time : array-like
+            Observation times. Large gaps split independent observing seasons.
+        residual : array-like
+            Flux residuals on the same cadence as ``time``.
+        ferr : array-like
+            Positive one-sigma flux errors. The scanner works with
+            ``z = residual / ferr``.
+
+        Returns
+        -------
+        TemplateFreeSearchResult
+            Normalized residuals and candidates made from joined
+            zero-crossing windows.
+
+        Raises
+        ------
+        ValueError
+            If inputs are not finite one-dimensional arrays of equal length,
+            or any error is non-positive.
+        """
         time_np = np.asarray(time, dtype=float)
         residual_np = np.asarray(residual, dtype=float)
         ferr_np = np.asarray(ferr, dtype=float)

@@ -41,6 +41,38 @@ shape labels such as peaks, dips, caustic crossings, and complex signals.
 ``signal.classify_anomaly()`` fits a set of local residual atoms to those
 components and ranks candidate physical-model seeds.
 
+Peak and duration estimates
+---------------------------
+
+``signal.classify()`` is the light-weight first measurement stage. Each
+component has a time span, a broad ``signal_type``, and lists of ``peaks`` and
+``dips``. A peak records its observed time, residual, z-score, interpolated
+duration, and the corresponding baseline and observed magnifications.
+
+Set ``fit_template_timescale=True`` when a local analytic template fit should
+refine the timing estimate of sufficiently sampled extrema:
+
+.. code-block:: python
+
+   from jacscanomaly import PlanetSignalClassificationConfig
+
+   shape = signal.classify(
+       PlanetSignalClassificationConfig(
+           fit_template_timescale=True,
+           fit_template_min_points=6,
+           fit_template_min_teff=0.01,
+           fit_template_max_teff=10.0,
+       )
+   )
+   for component in shape.components:
+       for peak in component.peaks:
+           print(peak.fitted_t0, peak.fitted_teff, peak.fitted_chi2)
+
+``fitted_t0`` and ``fitted_teff`` are local template measurements, while
+``t_start``, ``t_end``, and ``timescale`` are threshold-crossing estimates.
+They describe a residual feature and should not be read as physical binary-lens
+parameters.
+
 To preserve a trusted baseline geometry, pass the same fixed parameters used
 by :meth:`jacscanomaly.Finder.run`:
 
@@ -162,6 +194,64 @@ objects. A seed has ``model_type`` (for example ``"2L1S"`` or ``"1L2S"``),
 ``params``, a source atom, and an optional close/wide degeneracy tag. It is an
 initialization proposal for a later global fit, not a posterior sample or a
 final classification.
+
+The atom stage performs the more detailed local parameter estimation. It uses
+the refined residual in each extracted component, adds a low-order local
+baseline where appropriate, fits all enabled morphology atoms, and sorts the
+successful fits by BIC. For example:
+
+.. code-block:: python
+
+   from jacscanomaly import PlanetClassConfig
+
+   anomaly = signal.classify_anomaly(
+       PlanetClassConfig(
+           estimate_param_errors=True,
+           min_delta_chi2_for_seed=20.0,
+       )
+   )
+   for segment in anomaly.segment_results:
+       for atom in segment.atom_fits:
+           print(atom.atom_name, atom.params, atom.param_errors, atom.bic)
+
+``AtomFitResult.params`` is intentionally atom-specific. Bump-like atoms may
+report a peak time and width; fold/cusp atoms report contact or crossing times
+and finite-source scales; central and Chang-Refsdal atoms report their local
+geometry parameters. ``param_errors`` is populated only when the local
+covariance estimate is well conditioned. Check ``success``, ``warnings``, and
+``validity_penalty`` before using any estimate.
+
+The default enabled set includes simple positive/negative perturbations,
+central perturbations, fold variants, cusp variants, Chang-Refsdal,
+second-PSPL-like, smooth-misfit, shear, and systematics atoms. Disable
+unneeded families with the corresponding ``enable_*`` fields in
+``PlanetClassConfig`` to make a targeted fit faster and easier to inspect.
+
+Interpreting fit tables
+-----------------------
+
+``anomaly.summary_table()`` has one row per extracted component and its best
+atom. ``anomaly.atom_table()`` has one row per retained atom fit. The most
+useful columns are:
+
+``atom_name`` / ``class_label``
+   Local model identity and a human-readable morphology label.
+
+``chi2`` / ``delta_chi2`` / ``bic``
+   Local fit quality. Larger ``delta_chi2`` is an improvement over the local
+   baseline; lower BIC is preferred among the fitted local alternatives.
+
+``score`` / ``validity_penalty`` / ``warnings``
+   Triage diagnostics. A fit can be statistically competitive but receive a
+   validity warning for cadence-limited width or a boundary solution.
+
+``*_err``
+   Finite-difference local covariance uncertainty for the matching parameter,
+   when the estimate is available.
+
+``anomaly.seed_table()`` has one row per deduplicated physical-model seed. Its
+``params`` are flattened into columns, so it can be exported directly to a
+global-model fitting queue.
 
 Interpretation
 --------------

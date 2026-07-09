@@ -237,6 +237,18 @@ class PlanetSignalResult:
     ) -> PlanetSignalClassification:
         """
         Classify the extracted signal morphology.
+
+        Parameters
+        ----------
+        config : PlanetSignalClassificationConfig, optional
+            Peak, dip, smoothing, and optional local-template-timescale
+            settings.
+
+        Returns
+        -------
+        PlanetSignalClassification
+            Broad component labels, prominent peaks, and prominent dips. This
+            is a shape summary and does not fit a physical lens model.
         """
         return PlanetSignalClassifier(config).classify(self)
 
@@ -248,6 +260,18 @@ class PlanetSignalResult:
         :class:`jacscanomaly.PlanetAnomalyClassifier`.  The returned local
         morphology classification is intended for seed generation and triage,
         not as a final binary-lens posterior.
+
+        Parameters
+        ----------
+        config : PlanetClassConfig, optional
+            Atom-selection, optimization, uncertainty, and seed-generation
+            settings. Defaults to :class:`PlanetClassConfig`.
+
+        Returns
+        -------
+        PlanetAnomalyFitResult
+            Per-component atom fits, local parameter estimates, uncertainties
+            when available, and deduplicated downstream model seeds.
         """
         from .planet_class import PlanetAnomalyClassifier, PlanetClassConfig
 
@@ -269,8 +293,25 @@ class PlanetSignalResult:
         """
         Plot the refined baseline and highlight extracted signal points.
 
-        Returns ``(fig, axes)`` with peak light curve, signal zoom, and residual
-        zoom panels.
+        Parameters
+        ----------
+        show : bool, optional
+            Display the figure immediately when True.
+        peak_xlim, signal_xlim : tuple[float, float], optional
+            Explicit time limits for the full-event and signal panels.
+        peak_tE_width, signal_pad, max_signal_width : float, optional
+            Controls used to derive plot limits when explicit limits are not
+            supplied.
+        show_classification : bool, optional
+            Overlay broad shape-classification markers.
+        classification_config : PlanetSignalClassificationConfig, optional
+            Configuration used for that overlay.
+
+        Returns
+        -------
+        tuple
+            ``(fig, axes)`` with peak light curve, signal zoom, and residual
+            zoom panels.
         """
         import matplotlib.pyplot as plt
 
@@ -1129,6 +1170,43 @@ class PlanetSignalExtractor:
         verbose: bool = False,
         prior_signal_windows: tuple[tuple[float, float], ...] = (),
     ) -> PlanetSignalResult:
+        """
+        Separate localized residual signal while refining a baseline fit.
+
+        Parameters
+        ----------
+        time, flux, ferr : array-like
+            One-dimensional light-curve arrays with positive flux errors.
+        x0 : array-like, optional
+            Initial nonlinear single-lens parameters. Required when
+            ``refit=False``.
+        refit : bool, optional
+            Optimize the initial single-lens fit when True. When False, keep
+            ``x0`` fixed and solve only the linear flux terms.
+        verbose : bool, optional
+            Emit refinement progress through the finder's logging path.
+        prior_signal_windows : tuple[tuple[float, float], ...], optional
+            Known signal windows expressed as ``(center_time, half_width)``.
+            They are added to the final mask and trigger one guarded refit.
+
+        Returns
+        -------
+        PlanetSignalResult
+            Initial and refined fits, residuals, signal mask, selected
+            intervals, and refinement history.
+
+        Raises
+        ------
+        ValueError
+            If ``baseline_mode`` is not ``"mask"``, ``"robust"``, or
+            ``"beam_interval"``, or if fixed-baseline inputs are incomplete.
+
+        Notes
+        -----
+        The extractor uses the finder's template grid to propose signal
+        intervals, but does not call ``Finder.run``. Read
+        :doc:`planet_classification` for mode selection and interpretation.
+        """
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self.finder._to_arrays(
             time, flux, ferr, x0
         )
