@@ -36,6 +36,44 @@ For each grid point, the package computes:
 Large positive ``dchi2`` means that a localized anomaly template improves the
 fit relative to a flat residual model.
 
+Local anomaly templates
+-----------------------
+
+The standard grid scan is a fast local detector, not a binary-lens fit. At
+every ``(t0, teff)`` grid point it compares a constant residual level with the
+better of two linear-amplitude templates:
+
+.. math::
+
+   A_0(t) = \left[1 + \left(\frac{t-t_0}{t_\mathrm{eff}}\right)^2\right]^{-1/2}
+
+and
+
+.. math::
+
+   A_1(t) =
+   \frac{Q + 2}{\sqrt{Q(Q+4)}},
+   \qquad
+   Q = 1 + \left(\frac{t-t_0}{t_\mathrm{eff}}\right)^2.
+
+For each template, the amplitude and constant term are solved by weighted
+linear least squares in the local window. The lower-:math:`\chi^2` template is
+used to form ``dchi2``. The fitted local amplitude may be positive or negative,
+so the scan can identify bumps and dips.
+
+``t0`` is the trial anomaly center. ``teff`` is a detector timescale that sets
+both the template width and, through ``teff_coeff``, the local evaluation half
+window:
+
+.. math::
+
+   [t_0 - \mathtt{teff\_coeff}\,t_\mathrm{eff},
+    t_0 + \mathtt{teff\_coeff}\,t_\mathrm{eff}].
+
+It is useful for locating and ranking a residual feature; it is not itself a
+physical planet parameter. Use the planet-signal workflow to refine a baseline
+and generate physical-model seeds after detection.
+
 Candidate score
 ---------------
 
@@ -118,3 +156,12 @@ Backends
    development and comparison.
 
 Other single-lens model families continue to use the JAX fitters.
+
+What the standard scan does not do
+----------------------------------
+
+The standard scan does not choose a 2L1S or 1L2S model, fit caustic geometry,
+or estimate a planet mass ratio. It reports local residual candidates.
+:doc:`planet_classification` adds local morphology fits and physical-model
+seeds, but final model comparison must still be performed on the full light
+curve.

@@ -37,6 +37,8 @@ If you are using the package for the first time:
 
 * read :doc:`installation` to install the package and optional dependencies,
 * follow :doc:`quickstart` to run a light curve,
+* use :doc:`workflows` to choose between fitted, fixed-baseline, residual-only,
+  and signal-refinement searches,
 * use :doc:`method` to understand ``dchi2``, ``score``, and ``n_eff``,
 * use :doc:`configuration` when tuning a survey run,
 * use :doc:`results` when building candidate tables or downstream analysis.
@@ -49,6 +51,7 @@ If you are using the package for the first time:
 
    installation
    quickstart
+   workflows
    examples
    method
    configuration

@@ -2,6 +2,8 @@ Configuration
 =============
 
 All high-level options are stored in :class:`jacscanomaly.FinderConfig`.
+The relationship between configuration and the available search workflows is
+described in :doc:`workflows`.
 
 Single-lens model
 -----------------
@@ -196,3 +198,8 @@ when comparing backend behavior:
 
 ``single_fit_backend="cpp"`` applies to ``fitter_kind="pspl"``. Other baseline
 model families use the JAX fitters.
+
+For large JAX grids, set ``grid_chunked=True`` to always process the grid in
+chunks, or set ``grid_chunk_auto=True`` to enable chunking only when the number
+of grid points exceeds ``grid_chunk_threshold``. ``grid_chunk_size`` controls
+the number of grid points in each chunk.
