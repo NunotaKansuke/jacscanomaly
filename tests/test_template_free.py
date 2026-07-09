@@ -19,19 +19,19 @@ def _run(z, *, time=None, **config):
     ).run(time, z, ferr)
 
 
-def test_zero_crossing_scan_splits_at_exact_zeros():
+def test_zero_crossing_scan_joins_exact_zero_segments():
     result = _run([0, 6, 5, 0, -5, -5, 0, 5, 5, 0])
 
     spans = [(cand.start_index, cand.end_index) for cand in result.candidates]
-    assert spans == [(0, 3), (4, 6), (7, 9)]
+    assert spans == [(0, 9)]
     assert {cand.kind for cand in result.candidates} == {"zero_crossing"}
 
 
-def test_zero_crossing_scan_splits_direct_sign_changes():
+def test_zero_crossing_scan_joins_direct_sign_change_segments():
     result = _run([0.1, 6, 5, -0.1, -5, -5, 0.1, 5, 5, 0.1])
 
     spans = [(cand.start_index, cand.end_index) for cand in result.candidates]
-    assert spans == [(0, 2), (6, 9), (3, 5)]
+    assert spans == [(0, 9)]
 
 
 def test_zero_crossing_scan_respects_season_boundaries():
