@@ -24,6 +24,14 @@ The high-level pipeline is:
 7. Extract non-overlapping clusters and keep one representative per cluster.
 8. Select the best candidate after optional quality criteria.
 
+The following pages document the later stages in detail:
+
+* :doc:`template_free_method` explains the residual-only zero-crossing search.
+* :doc:`signal_extraction_method` explains iterative baseline refinement and
+  signal masking.
+* :doc:`morphology_classification_method` explains shape classification,
+  residual atoms, BIC weights, and seed generation.
+
 Detection statistic
 -------------------
 
@@ -165,3 +173,13 @@ or estimate a planet mass ratio. It reports local residual candidates.
 :doc:`planet_classification` adds local morphology fits and physical-model
 seeds, but final model comparison must still be performed on the full light
 curve.
+
+Method details
+--------------
+
+.. toctree::
+   :maxdepth: 1
+
+   template_free_method
+   signal_extraction_method
+   morphology_classification_method
