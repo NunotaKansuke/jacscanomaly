@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Optional
+from typing import Literal, Optional
 import logging
 
 import numpy as np
@@ -279,6 +279,8 @@ class Finder:
         flux,
         ferr,
         x0=None,
+        *,
+        data_kind: Literal["flux", "mag"] = "flux",
     ) -> SingleLensFitResult:
         """
         Run only the single-lens fit selected by the current configuration.
@@ -286,17 +288,24 @@ class Finder:
         Parameters
         ----------
         time, flux, ferr : array-like
-            One-dimensional light-curve arrays.
+            One-dimensional light-curve arrays. With ``data_kind="mag"``,
+            ``flux`` and ``ferr`` are interpreted as magnitude and magnitude
+            error, respectively, and are converted to relative flux internally.
         x0 : array-like, optional
             Initial guess for the nonlinear model parameters.
             If omitted, initial values are estimated from a scan of the light curve.
+        data_kind : {"flux", "mag"}, optional
+            Input photometry representation. The default ``"flux"`` preserves
+            the existing API. Magnitude inputs are converted to relative flux.
 
         Returns
         -------
         SingleLensFitResult
             Result of the single-lens fit.
         """
-        time_j, flux_j, ferr_j, x0_j, time_np, _, _ = self._to_arrays(time, flux, ferr, x0)
+        time_j, flux_j, ferr_j, x0_j, time_np, _, _ = self._to_arrays(
+            time, flux, ferr, x0, data_kind=data_kind
+        )
         self._ensure_fitter(float(np.median(time_np)))
         if x0_j is None:
             return self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
@@ -309,6 +318,7 @@ class Finder:
         ferr,
         x0=None,
         *,
+        data_kind: Literal["flux", "mag"] = "flux",
         refit: bool = True,
         verbose: bool = True,
         log: Optional[logging.Logger] = None,
@@ -319,10 +329,15 @@ class Finder:
         Parameters
         ----------
         time, flux, ferr : array-like
-            One-dimensional light-curve arrays.
+            One-dimensional light-curve arrays. With ``data_kind="mag"``,
+            pass ``mag`` and ``magerr`` in these positions; they are converted
+            to relative flux and flux error before fitting and scanning.
         x0 : array-like, optional
             Initial guess for the single-lens model parameters. If omitted, the
             finder estimates multiple initial values and uses the best fit.
+        data_kind : {"flux", "mag"}, optional
+            Input photometry representation. ``"mag"`` converts magnitudes to
+            a numerically stable relative-flux scale internally.
         refit : bool, optional
             If True, optimize the single-lens nonlinear parameters starting from
             ``x0``. If False, require ``x0`` and use it as fixed nonlinear
@@ -353,7 +368,7 @@ class Finder:
         residuals are scanned. See :doc:`workflows` for when to use this mode.
         """
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self._to_arrays(
-            time, flux, ferr, x0
+            time, flux, ferr, x0, data_kind=data_kind
         )
 
         self._ensure_fitter(float(np.median(time_np)))
@@ -411,6 +426,7 @@ class Finder:
         ferr,
         x0=None,
         *,
+        data_kind: Literal["flux", "mag"] = "flux",
         fit: Optional[SingleLensFitResult] = None,
         config: Optional[TemplateFreeSearchConfig] = None,
     ) -> TemplateFreeSearchResult:
@@ -422,10 +438,14 @@ class Finder:
         Parameters
         ----------
         time, flux, ferr : array-like
-            One-dimensional light-curve arrays. ``ferr`` is used to normalize
-            the residuals even when ``fit`` is supplied.
+            One-dimensional light-curve arrays. With ``data_kind="mag"``,
+            ``flux`` and ``ferr`` are interpreted as magnitude and magnitude
+            error. Flux errors are used to normalize residuals even when
+            ``fit`` is supplied.
         x0 : array-like, optional
             Nonlinear initial values used only when ``fit`` is omitted.
+        data_kind : {"flux", "mag"}, optional
+            Input photometry representation.
         fit : SingleLensFitResult, optional
             Existing baseline fit whose residuals should be searched. Passing
             this skips all single-lens fitting.
@@ -444,7 +464,7 @@ class Finder:
         ``SingleLensFitResult``, call :class:`TemplateFreeScanner` directly.
         """
         time_j, flux_j, ferr_j, x0_j, time_np, _, ferr_np = self._to_arrays(
-            time, flux, ferr, x0
+            time, flux, ferr, x0, data_kind=data_kind
         )
 
         if fit is None:
@@ -463,14 +483,21 @@ class Finder:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _to_arrays(self, time, flux, ferr, x0):
+    def _to_arrays(self, time, flux, ferr, x0, *, data_kind: Literal["flux", "mag"] = "flux"):
         """
-        Validate inputs and convert them to both NumPy and JAX arrays.
+        Validate inputs and convert them to flux-space NumPy and JAX arrays.
+
+        ``data_kind="mag"`` treats ``flux`` and ``ferr`` as magnitude and
+        magnitude error. The conversion uses a median magnitude zero point so
+        that the relative flux is of order unity, avoiding numerical underflow
+        for the large magnitude zero points commonly used in catalogs.
         """
         time_np = np.asarray(time, dtype=float)
         flux_np = np.asarray(flux, dtype=float)
         ferr_np = np.asarray(ferr, dtype=float)
 
+        if data_kind not in {"flux", "mag"}:
+            raise ValueError("data_kind must be either 'flux' or 'mag'.")
         if time_np.ndim != 1 or flux_np.ndim != 1 or ferr_np.ndim != 1:
             raise ValueError("time/flux/ferr must be 1D arrays.")
         if not (len(time_np) == len(flux_np) == len(ferr_np)):
@@ -479,6 +506,17 @@ class Finder:
             raise ValueError("time/flux/ferr must be finite.")
         if np.any(ferr_np <= 0):
             raise ValueError("ferr must be positive.")
+
+        if data_kind == "mag":
+            mag0 = float(np.median(flux_np))
+            exponent = -0.4 * np.log(10.0) * (flux_np - mag0)
+            float_info = np.finfo(np.float32)
+            exponent = np.clip(exponent, np.log(float_info.tiny), np.log(float_info.max))
+            flux_np = np.exp(exponent)
+            ferr_np = np.maximum(
+                (np.log(10.0) / 2.5) * flux_np * ferr_np,
+                float_info.tiny,
+            )
 
         time_j = jnp.asarray(time_np)
         flux_j = jnp.asarray(flux_np)

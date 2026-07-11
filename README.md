@@ -66,6 +66,9 @@ config = FinderConfig(
 finder = Finder(config)
 result = finder.run(time, flux, ferr)
 
+# For magnitude data, pass mag and magerr in the same positions and select it:
+# result = finder.run(time, mag, magerr, data_kind="mag")
+
 # You can still pass an explicit initial guess if desired:
 # p0 = np.array([10000, 10, 0.3])
 # result = finder.run(time, flux, ferr, p0)

@@ -10,6 +10,15 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [0.3.4] - 2026-07-11
+
+### Added
+- ``Finder`` now accepts magnitude and magnitude-error input through
+  ``data_kind="mag"``. Magnitudes are converted to numerically stable relative
+  flux internally; the default input representation remains ``"flux"``.
+
+---
+
 ## [0.3.3] - 2026-07-11
 
 ### Added

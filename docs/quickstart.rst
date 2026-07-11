@@ -21,8 +21,19 @@ The main inputs are one-dimensional arrays of time, flux, and flux error:
 
    finder = Finder(config)
    result = finder.run(time, flux, ferr)
-
    result.print_summary()
+
+Magnitude input
+---------------
+
+Flux is the default input representation. To provide magnitudes and magnitude
+errors instead, pass them in the same positions and set ``data_kind="mag"``.
+The finder converts them to a relative flux scale internally before fitting and
+scanning:
+
+.. code-block:: python
+
+   result = finder.run(time, mag, magerr, data_kind="mag")
 
 The returned :class:`jacscanomaly.AnomalyResult` contains the original data,
 the single-lens fit, residuals, per-season grid summaries, extracted clusters,
