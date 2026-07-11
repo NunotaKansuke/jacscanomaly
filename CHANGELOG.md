@@ -8,6 +8,10 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ## [Unreleased]
 
+---
+
+## [0.3.3] - 2026-07-11
+
 ### Added
 - Planet-signal refinement and residual-morphology classification, including
   physical-model seed generation for downstream 2L1S/1L2S fitting.
@@ -23,6 +27,9 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
   `print_summary()`, and `summary_table()`.
 
 ### Changed
+- The C++ grid backend is now built as a required extension during installation.
+  Source distributions include the backend source and fail with an actionable
+  error if a C++17 compiler or OpenMP runtime is unavailable.
 - The GULLS finite-difference space-parallax fitter now supports bounded and
   optionally penalized parallax components.
 - Replaced the old internal `n_out` metric with richer per-candidate quality
