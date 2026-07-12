@@ -63,3 +63,34 @@ def q_grid_from_width(
 ) -> np.ndarray:
     q_base = max((max(float(width), 0.0) / max(abs(float(tE)), 1e-12)) ** 2, float(q_floor))
     return np.clip(q_base * np.asarray(factors, dtype=float), float(q_floor), float(q_ceil))
+
+
+def planetary_image_diagnostics(
+    t_anom: float,
+    width: float,
+    pspl: PSPLParams,
+    *,
+    branch: str,
+) -> dict[str, float]:
+    """Approximate 2L1S geometry implied by a localized image perturbation."""
+    u = float(u_abs(t_anom, pspl))
+    source = u_vec(t_anom, pspl)
+    q_base = (max(float(width), 0.0) / max(abs(float(pspl.tE)), 1e-12)) ** 2
+    if branch == "major":
+        s_primary = float(r_major(u))
+        alpha = angle_of(source)
+        prefix = "wide"
+    elif branch == "minor":
+        s_primary = float(r_minor(u))
+        alpha = angle_of(-source)
+        prefix = "close"
+    else:
+        raise ValueError(f"Unknown image branch: {branch!r}")
+    return {
+        "u_anom": u,
+        "q_base": float(q_base),
+        f"s_{prefix}": s_primary,
+        "s_counterpart": 1.0 / max(s_primary, 1e-12),
+        "alpha_seed": alpha,
+        "alpha_counterpart": alpha + np.pi,
+    }

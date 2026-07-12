@@ -251,11 +251,17 @@ def shear_quadrupole_seeds(
 
 
 def fold_caustic_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
+    retained = {
+        key: float(value)
+        for key, value in fit.params.items()
+        if np.isscalar(value) and np.isfinite(float(value))
+    }
     return (
         SeedCandidate(
             model_type="2L1S",
             class_label=fit.class_label,
             params={
+                **retained,
                 "t_caustic": float(fit.params.get("tc", np.nan)),
                 "rho_over_sinalpha": float(fit.params.get("rho_over_sinalpha", np.nan)),
                 "entry_exit_sign": float(fit.params.get("entry_exit_sign", np.nan)),
@@ -285,11 +291,17 @@ def fold_caustic_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
 
 
 def cusp_caustic_seeds(fit: AtomFitResult) -> tuple[SeedCandidate, ...]:
+    retained = {
+        key: float(value)
+        for key, value in fit.params.items()
+        if np.isscalar(value) and np.isfinite(float(value))
+    }
     return (
         SeedCandidate(
             model_type="2L1S",
             class_label="cusp_caustic",
             params={
+                **retained,
                 "t_cusp": float(fit.params.get("ta", np.nan)),
                 "width": float(fit.params.get("width", np.nan)),
                 "impact_b": float(fit.params.get("b", np.nan)),

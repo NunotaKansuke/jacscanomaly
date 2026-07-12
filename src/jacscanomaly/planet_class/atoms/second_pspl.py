@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from .base import ResidualAtom
@@ -35,7 +37,7 @@ class SecondPSPLAtom(ResidualAtom):
             u = np.sqrt(u0_2 * u0_2 + ((time - t0_2) / tE_2) ** 2)
             return pspl_magnification_from_u(u) - 1.0
 
-        return self._fit_profiled(
+        fit = self._fit_profiled(
             segment=segment,
             features=features,
             theta0_list=guesses,
@@ -49,3 +51,30 @@ class SecondPSPLAtom(ResidualAtom):
             },
             expected_amplitude_sign=1.0,
         )
+        params = dict(fit.params)
+        t0_2 = float(params["t0_2"])
+        tE_2 = float(params["tE_2"])
+        u0_2 = float(params["u0_2"])
+        ratio = tE_2 / max(float(segment.pspl.tE), 1e-12)
+        q_wide = ratio * ratio
+        dx = (t0_2 - float(segment.pspl.t0)) / max(float(segment.pspl.tE), 1e-12)
+        dy_offset = u0_2 * np.sqrt(max(q_wide, 0.0))
+        params.update(
+            {
+                "Fs_2_over_Fs_1": float(params.get("amplitude", np.nan)) / max(abs(float(segment.pspl.Fs)), 1e-12),
+                "q_flux": float(params.get("amplitude", np.nan)) / max(abs(float(segment.pspl.Fs)), 1e-12),
+                "tE_ratio": ratio,
+                "q_wide_repeating": q_wide,
+                "separation_x": dx,
+            }
+        )
+        for suffix, sign in (("plus", 1.0), ("minus", -1.0)):
+            dy = float(segment.pspl.u0) + sign * dy_offset
+            params[f"separation_y_{suffix}"] = dy
+            params[f"s_{suffix}"] = float(np.hypot(dx, dy))
+            params[f"alpha_{suffix}"] = float(np.arctan2(dy, dx))
+        errors = dict(fit.param_errors or {})
+        if "amplitude" in errors:
+            errors["Fs_2_over_Fs_1"] = errors["amplitude"] / max(abs(float(segment.pspl.Fs)), 1e-12)
+            errors["q_flux"] = errors["Fs_2_over_Fs_1"]
+        return replace(fit, params=params, param_errors=errors or None)

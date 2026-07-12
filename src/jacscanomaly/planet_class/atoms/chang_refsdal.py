@@ -68,6 +68,8 @@ class ChangRefsdalPerturbationAtom(ResidualAtom):
                         "image_branch": 1.0 if br == "major" else -1.0,
                         "x_planet": float(theta[0]),
                         "y_planet": float(theta[1]),
+                        "s_local": float(np.hypot(theta[0], theta[1])),
+                        "alpha_local": float(np.arctan2(theta[1], theta[0])),
                         "sqrt_q_local": float(np.exp(theta[2])),
                         "q_local": float(np.exp(2.0 * theta[2])),
                         "image_width": float(np.exp(theta[2])),

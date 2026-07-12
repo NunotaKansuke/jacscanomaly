@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .base import ResidualAtom
+from ..pspl import planetary_image_diagnostics
 from ..types import AtomFitResult, SegmentData
 
 
@@ -36,6 +37,7 @@ class PositiveBumpAtom(ResidualAtom):
                 "t_peak": float(theta[0]),
                 "width": float(np.exp(theta[1])),
                 "nu": 1.0,
+                **planetary_image_diagnostics(theta[0], np.exp(theta[1]), segment.pspl, branch="major"),
             },
             expected_amplitude_sign=1.0,
         )
@@ -85,6 +87,7 @@ class PSPLPositiveBumpAtom(ResidualAtom):
                 "width": float(np.exp(theta[1])),
                 "tE_pert": float(np.exp(theta[1])),
                 "u0_pert": float(np.exp(theta[2])),
+                **planetary_image_diagnostics(theta[0], np.exp(theta[1]), segment.pspl, branch="major"),
             },
             expected_amplitude_sign=1.0,
         )
@@ -120,6 +123,7 @@ class NegativeDipAtom(ResidualAtom):
                 "t_peak": float(theta[0]),
                 "width": float(np.exp(theta[1])),
                 "nu": 1.0,
+                **planetary_image_diagnostics(theta[0], np.exp(theta[1]), segment.pspl, branch="minor"),
             },
             expected_amplitude_sign=1.0,
         )
@@ -176,6 +180,7 @@ class MinorImageBoxTroughAtom(ResidualAtom):
                 "t_end": float(theta[0] + np.exp(theta[1])),
                 "width": float(2.0 * np.exp(theta[1])),
                 "edge_width": float(np.exp(theta[2])),
+                **planetary_image_diagnostics(theta[0], 2.0 * np.exp(theta[1]), segment.pspl, branch="minor"),
             },
             expected_amplitude_sign=1.0,
         )

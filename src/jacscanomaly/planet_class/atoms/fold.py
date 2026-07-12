@@ -40,6 +40,7 @@ class FoldCausticAtom(ResidualAtom):
                 params_from_theta=lambda theta, sign=entry_exit_sign: {
                     "tc": float(theta[0]),
                     "tstar": float(np.exp(theta[1])),
+                    "t_limb": float(theta[0] - sign * np.exp(theta[1])),
                     "entry_exit_sign": float(sign),
                     "rho_over_sinalpha": float(np.exp(theta[1]) / max(segment.pspl.tE, 1e-12)),
                 },
@@ -128,14 +129,18 @@ class CurvedFoldCausticAtom(ResidualAtom):
         limb_contacts = cls._solve_time_roots(tc, tstar, q_curv, sign, z_value=-1.0)
         if len(limb_contacts) >= 2:
             t_entry, t_exit = limb_contacts[0], limb_contacts[-1]
+            local_entry = cls._local_crossing_scale(t_entry, tc, tstar, q_curv, sign)
+            local_exit = cls._local_crossing_scale(t_exit, tc, tstar, q_curv, sign)
             params.update(
                 {
                     "t_entry": t_entry,
                     "t_exit": t_exit,
                     "caustic_inside_duration": t_exit - t_entry,
-                    "rho_over_sinalpha_entry": tstar / max(segment.pspl.tE, 1e-12),
-                    "rho_over_sinalpha_exit": tstar / max(segment.pspl.tE, 1e-12),
-                    "entry_exit_asymmetry": 0.0,
+                    "tstar_entry": local_entry,
+                    "tstar_exit": local_exit,
+                    "rho_over_sinalpha_entry": local_entry / max(segment.pspl.tE, 1e-12),
+                    "rho_over_sinalpha_exit": local_exit / max(segment.pspl.tE, 1e-12),
+                    "entry_exit_asymmetry": (local_exit - local_entry) / max(local_exit + local_entry, 1e-12),
                 }
             )
 
@@ -147,6 +152,12 @@ class CurvedFoldCausticAtom(ResidualAtom):
         elif len(center_crossings) == 1:
             params["tc1"] = center_crossings[0]
         return params
+
+    @staticmethod
+    def _local_crossing_scale(t: float, tc: float, tstar: float, q_curv: float, sign: float) -> float:
+        x = (float(t) - float(tc)) / max(float(tstar), 1e-12)
+        dz_dt = float(sign) * (1.0 + 2.0 * float(q_curv) * x) / max(float(tstar), 1e-12)
+        return 1.0 / max(abs(dz_dt), 1e-12)
 
     @staticmethod
     def _solve_time_roots(tc: float, tstar: float, q_curv: float, sign: float, *, z_value: float) -> list[float]:
@@ -195,15 +206,61 @@ class GrazingFoldCausticAtom(ResidualAtom):
             shape_from_theta=lambda theta, time: fold_g0(
                 theta[1] + (time - theta[0]) / np.exp(theta[2]) + theta[3] * ((time - theta[0]) / np.exp(theta[2])) ** 2
             ),
-            params_from_theta=lambda theta: {
-                "ta": float(theta[0]),
-                "z0": float(theta[1]),
-                "width": float(np.exp(theta[2])),
-                "q_curv": float(theta[3]),
-            },
+            params_from_theta=lambda theta: self._params(theta, segment),
             expected_amplitude_sign=None,
             extra_warnings=(),
         )
+
+    @staticmethod
+    def _roots(ta: float, width: float, z0: float, q_curv: float, z_value: float) -> list[float]:
+        # z = z0 + x + q*x^2, x=(t-ta)/width.
+        c = z0 - z_value
+        if abs(q_curv) < 1e-10:
+            xs = [-c]
+        else:
+            disc = 1.0 - 4.0 * q_curv * c
+            if disc < -1e-12:
+                return []
+            root = float(np.sqrt(max(disc, 0.0)))
+            xs = [(-1.0 - root) / (2.0 * q_curv), (-1.0 + root) / (2.0 * q_curv)]
+        return sorted({float(ta + width * x) for x in xs if np.isfinite(x)})
+
+    @classmethod
+    def _params(cls, theta: np.ndarray, segment: SegmentData) -> dict[str, float]:
+        ta, z0 = float(theta[0]), float(theta[1])
+        width, q_curv = float(np.exp(theta[2])), float(theta[3])
+        tE = max(float(segment.pspl.tE), 1e-12)
+        params = {
+            "ta": ta,
+            "z0": z0,
+            "width": width,
+            "q_curv": q_curv,
+            "a1": 1.0 / width,
+            "a2": q_curv / (width * width),
+            "local_scale_over_tE_at_ta": width / tE,
+        }
+        if abs(q_curv) > 1e-10:
+            x_vertex = -1.0 / (2.0 * q_curv)
+            t_stationary = ta + width * x_vertex
+            z_stationary = z0 + x_vertex + q_curv * x_vertex * x_vertex
+            params["t_stationary"] = t_stationary
+            params["z_stationary"] = z_stationary
+            params["stationary_curvature"] = 2.0 * q_curv / (width * width)
+            if q_curv > 0.0:
+                params["t_closest"] = t_stationary
+                params["z_closest"] = z_stationary
+        for prefix, z_value in (("contact", -1.0), ("center_crossing", 0.0)):
+            roots = cls._roots(ta, width, z0, q_curv, z_value)
+            for index, root in enumerate(roots, start=1):
+                params[f"t_{prefix}_{index}"] = root
+                slope = abs((1.0 + 2.0 * q_curv * ((root - ta) / width)) / width)
+                local_tstar = 1.0 / max(slope, 1e-12)
+                params[f"tstar_{prefix}_{index}"] = local_tstar
+                params[f"rho_over_sinalpha_{prefix}_{index}"] = local_tstar / tE
+        contacts = cls._roots(ta, width, z0, q_curv, -1.0)
+        if len(contacts) == 2:
+            params["contact_duration"] = contacts[1] - contacts[0]
+        return params
 
 
 class LimbDarkenedFoldCausticAtom(ResidualAtom):
@@ -238,6 +295,7 @@ class LimbDarkenedFoldCausticAtom(ResidualAtom):
                 params_from_theta=lambda theta, sign=entry_exit_sign: {
                     "tc": float(theta[0]),
                     "tstar": float(np.exp(theta[1])),
+                    "t_limb": float(theta[0] - sign * np.exp(theta[1])),
                     "Gamma": float(theta[2]),
                     "entry_exit_sign": float(sign),
                     "rho_over_sinalpha": float(np.exp(theta[1]) / max(segment.pspl.tE, 1e-12)),
@@ -354,7 +412,9 @@ class RimTroughCausticAtom(ResidualAtom):
             "rim_ratio": float(np.exp(theta[5])),
             "trough_ratio": float(np.exp(theta[6])),
             "polarity": float(polarity),
-            "rho_over_sinalpha": float(max(rim_width, trough_width) / max(segment.pspl.tE, 1e-12)),
+            "rim_separation": left_gap + right_gap,
+            "rim_time_asymmetry": (right_gap - left_gap) / max(right_gap + left_gap, 1e-12),
+            "characteristic_scale_over_tE": float(max(rim_width, trough_width) / max(segment.pspl.tE, 1e-12)),
         }
 
     @staticmethod
@@ -437,10 +497,15 @@ class TwoFoldCausticAtom(ResidualAtom):
                     "tc2": float(theta[0] + np.exp(theta[1])),
                     "caustic_inside_duration": float(np.exp(theta[1])),
                     "tstar": float(np.exp(theta[2])),
+                    "tstar_1": float(np.exp(theta[2])),
+                    "tstar_2": float(np.exp(theta[2])),
                     "fold_ratio": float(np.exp(theta[3])),
                     "entry_exit_sign_1": float(ss[0]),
                     "entry_exit_sign_2": float(ss[1]),
                     "rho_over_sinalpha": float(np.exp(theta[2]) / max(segment.pspl.tE, 1e-12)),
+                    "rho_over_sinalpha_1": float(np.exp(theta[2]) / max(segment.pspl.tE, 1e-12)),
+                    "rho_over_sinalpha_2": float(np.exp(theta[2]) / max(segment.pspl.tE, 1e-12)),
+                    "contact_separation_over_2tstar": float(np.exp(theta[1]) / (2.0 * np.exp(theta[2]))),
                 },
                 expected_amplitude_sign=None,
                 extra_warnings=(),
@@ -699,9 +764,14 @@ class SignedTwoFoldCausticAtom(ResidualAtom):
                     "tc2": float(theta[0] + np.exp(theta[1])),
                     "caustic_inside_duration": float(np.exp(theta[1])),
                     "tstar": float(np.exp(theta[2])),
+                    "tstar_1": float(np.exp(theta[2])),
+                    "tstar_2": float(np.exp(theta[2])),
                     "entry_exit_sign_1": float(ss[0]),
                     "entry_exit_sign_2": float(ss[1]),
                     "rho_over_sinalpha": float(np.exp(theta[2]) / max(segment.pspl.tE, 1e-12)),
+                    "rho_over_sinalpha_1": float(np.exp(theta[2]) / max(segment.pspl.tE, 1e-12)),
+                    "rho_over_sinalpha_2": float(np.exp(theta[2]) / max(segment.pspl.tE, 1e-12)),
+                    "contact_separation_over_2tstar": float(np.exp(theta[1]) / (2.0 * np.exp(theta[2]))),
                 },
                 expected_amplitude_sign=None,
                 extra_warnings=(),

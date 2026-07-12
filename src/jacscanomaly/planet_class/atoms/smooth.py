@@ -88,12 +88,19 @@ class ShearQuadrupoleAtom(ResidualAtom):
         bic = float(chi2 + n_params * np.log(max(n_data, 1)))
         gamma_c = float(coeff[0]) if coeff.size else float("nan")
         gamma_s = float(coeff[1]) if coeff.size > 1 else float("nan")
+        flux_scale = max(abs(float(segment.pspl.Fs)), 1e-12)
+        gamma_c_proxy = gamma_c / flux_scale
+        gamma_s_proxy = gamma_s / flux_scale
         params = {
             "t_center": center,
             "width": scale,
-            "gamma_c": gamma_c,
-            "gamma_s": gamma_s,
-            "gamma": float(np.hypot(gamma_c, gamma_s)),
+            "shear_coeff_c_flux": gamma_c,
+            "shear_coeff_s_flux": gamma_s,
+            "gamma_c": gamma_c_proxy,
+            "gamma_s": gamma_s_proxy,
+            "gamma": float(np.hypot(gamma_c_proxy, gamma_s_proxy)),
+            "shear_basis_angle": float(0.5 * np.arctan2(gamma_s_proxy, gamma_c_proxy)),
+            "shear_width_over_tE": float(scale / max(segment.pspl.tE, 1e-12)),
         }
         return AtomFitResult(
             atom_name=self.atom_name,
@@ -109,7 +116,7 @@ class ShearQuadrupoleAtom(ResidualAtom):
             n_data=n_data,
             n_params=n_params,
             success=bool(ok and np.isfinite(chi2)),
-            warnings=("diagnostic shear/quadrupole atom; do not infer unique q,s",),
+            warnings=("dimensionless shear proxy from a generic smooth basis; q,s grids are approximate",),
         )
 
 

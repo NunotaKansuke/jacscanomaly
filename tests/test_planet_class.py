@@ -242,6 +242,10 @@ def test_planet_anomaly_classifier_can_identify_second_pspl_like_bump():
     assert second[0].success
     assert abs(second[0].params["t0_2"] - 20.0) < 0.2
     assert abs(second[0].params["tE_2"] - 4.0) < 0.2
+    assert np.isfinite(second[0].params["q_flux"])
+    assert np.isclose(second[0].params["q_wide_repeating"], (second[0].params["tE_2"] / fit.pspl.tE) ** 2)
+    assert second[0].params["s_plus"] > 0.0
+    assert second[0].params["s_minus"] > 0.0
     assert any(seed.model_type == "1L2S" and seed.class_label == "second_source" for seed in fit.event_seeds)
     assert any(seed.model_type == "2L1S" and seed.class_label == "wide_repeating" for seed in fit.event_seeds)
     assert all(
@@ -425,6 +429,7 @@ def test_planet_anomaly_classifier_fits_fold_caustic_atom_and_seed():
     assert fold[0].success
     assert abs(fold[0].params["tc"] - tc) < 0.04
     assert abs(fold[0].params["tstar"] - tstar) < 0.04
+    assert np.isclose(fold[0].params["t_limb"], fold[0].params["tc"] - fold[0].params["entry_exit_sign"] * fold[0].params["tstar"])
     assert any(
         seed.class_label == "fold_caustic"
         and seed.degeneracy_tag == "local_caustic_only"
@@ -562,6 +567,12 @@ def test_grazing_fold_atom_fits_limb_contact_seed():
     assert atoms
     assert atoms[0].success
     assert -1.5 <= atoms[0].params["z0"] <= 3.0
+    assert np.isclose(atoms[0].params["a1"], 1.0 / atoms[0].params["width"])
+    if "t_contact_1" in atoms[0].params:
+        x = (atoms[0].params["t_contact_1"] - atoms[0].params["ta"]) / atoms[0].params["width"]
+        z = atoms[0].params["z0"] + x + atoms[0].params["q_curv"] * x * x
+        assert np.isclose(z, -1.0)
+        assert atoms[0].params["rho_over_sinalpha_contact_1"] > 0.0
     assert any(seed.class_label == "grazing_fold_caustic" for seed in fit.event_seeds)
 
 
@@ -591,6 +602,7 @@ def test_two_fold_atom_fits_unresolved_pair_seed():
     assert atoms[0].atom_name == "two_fold_caustic"
     assert atoms[0].params["tc2"] > atoms[0].params["tc1"]
     assert atoms[0].params["fold_ratio"] > 0.0
+    assert np.isclose(atoms[0].params["contact_separation_over_2tstar"], (atoms[0].params["tc2"] - atoms[0].params["tc1"]) / (2.0 * atoms[0].params["tstar"]))
     assert "amplitude_2" not in atoms[0].params
     assert any(seed.class_label == "two_fold_caustic" for seed in fit.event_seeds)
 
@@ -717,6 +729,10 @@ def test_canonical_and_finite_source_cusp_atoms_fit_seed():
     labels = {atom.class_label for seg in fit.segment_results for atom in seg.atom_fits if atom.success}
     assert "canonical_cusp" in labels
     assert "finite_source_cusp" in labels
+    cusp_atoms = [atom for seg in fit.segment_results for atom in seg.atom_fits if atom.class_label in {"canonical_cusp", "finite_source_cusp"}]
+    assert all("t_cusp_closest" in atom.params and "cusp_impact" in atom.params for atom in cusp_atoms)
+    finite = next(atom for atom in cusp_atoms if atom.class_label == "finite_source_cusp")
+    assert np.isclose(finite.params["rho_over_sinalpha_cusp_local"], finite.params["width"] / fit.pspl.tE)
     assert any(seed.source_atom == "canonical_cusp_map" for seed in fit.event_seeds)
     assert any(seed.source_atom == "finite_source_cusp_lookup" for seed in fit.event_seeds)
 

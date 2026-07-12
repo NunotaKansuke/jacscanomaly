@@ -47,6 +47,8 @@ class CuspTailAtom(ResidualAtom):
                     "width": float(np.exp(theta[1])),
                     "b": float(np.exp(theta[2])),
                     "p": float(power),
+                    "effective_core_duration": float(np.exp(theta[1] + theta[2])),
+                    "cusp_scale_over_tE": float(np.exp(theta[1]) / max(segment.pspl.tE, 1e-12)),
                 },
                 expected_amplitude_sign=None,
                 extra_warnings=self._warnings(features),
@@ -145,16 +147,35 @@ class CanonicalCuspAtom(ResidualAtom):
             theta0_list=guesses,
             bounds=[(lo_t, hi_t), (np.log(min_width), np.log(max_width)), (-3.0, 3.0), (-3.0, 3.0)],
             shape_from_theta=shape,
-            params_from_theta=lambda theta: {
-                "ta": float(theta[0]),
-                "width": float(np.exp(theta[1])),
-                "eta1_0": float(theta[2]),
-                "eta2_0": float(theta[3]),
-            },
+            params_from_theta=lambda theta: self._params(theta, segment, finite_source=finite_source),
             expected_amplitude_sign=None,
             extra_warnings=(),
         )
         return fit
+
+    @staticmethod
+    def _params(theta: np.ndarray, segment: SegmentData, *, finite_source: bool) -> dict[str, float]:
+        ta = float(theta[0])
+        width = float(np.exp(theta[1]))
+        eta1, eta2 = float(theta[2]), float(theta[3])
+        t_closest = ta - eta1 * width
+        params = {
+            "ta": ta,
+            "width": width,
+            "eta1_0": eta1,
+            "eta2_0": eta2,
+            "omega1": 1.0 / width,
+            "omega2": 0.0,
+            "trajectory_angle_cusp": 0.0,
+            "t_cusp_closest": t_closest,
+            "cusp_impact": abs(eta2),
+            "cusp_discriminant_closest": (eta2 / 2.0) ** 2,
+            "cusp_scale_over_tE": width / max(segment.pspl.tE, 1e-12),
+        }
+        if finite_source:
+            params["tstar_cusp_local"] = width
+            params["rho_over_sinalpha_cusp_local"] = width / max(segment.pspl.tE, 1e-12)
+        return params
 
 
 class FiniteSourceCuspAtom(CanonicalCuspAtom):
