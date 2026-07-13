@@ -8,6 +8,11 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ## [Unreleased]
 
+### Added
+- Documented the complete residual-template atlas, including each atom's
+  fitted coordinates, analytically derived timing and finite-source
+  constraints, approximate physical seeds, and interpretation limits.
+
 ---
 
 ## [0.3.4] - 2026-07-11

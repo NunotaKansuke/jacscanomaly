@@ -221,6 +221,27 @@ geometry parameters. ``param_errors`` is populated only when the local
 covariance estimate is well conditioned. Check ``success``, ``warnings``, and
 ``validity_penalty`` before using any estimate.
 
+The complete template atlas, model equations, exact parameter names, and the
+distinction between direct constraints and approximate physical seeds are in
+:doc:`morphology_classification_method`. In particular, do not read
+``q_curv`` as a mass ratio, a generic ``width/tE`` as ``rho``, or a
+``shear_quadrupole`` proxy as a measured Chang--Refsdal shear.
+
+To inspect only finite, physically useful quantities without assuming that
+all templates share the same parameter set:
+
+.. code-block:: python
+
+   import numpy as np
+
+   best = anomaly.best_atom
+   useful = {
+       name: value
+       for name, value in (best.params if best else {}).items()
+       if np.isscalar(value) and np.isfinite(value)
+   }
+   print(best.class_label, useful)
+
 The default enabled set includes simple positive/negative perturbations,
 central perturbations, fold variants, cusp variants, Chang-Refsdal,
 second-PSPL-like, smooth-misfit, shear, and systematics atoms. Disable

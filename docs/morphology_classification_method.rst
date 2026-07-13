@@ -126,6 +126,114 @@ The ``enable_*`` settings in ``PlanetClassConfig`` can disable any family. The
 routing tests save computation; they are not a claim that excluded atoms are
 physically impossible.
 
+Template atlas and parameter semantics
+--------------------------------------
+
+``AtomFitResult.params`` is intentionally template-specific. Parameters fall
+into three different categories:
+
+* **fitted coordinates** are nonlinear or profiled-linear parameters of the
+  local residual model;
+* **derived constraints** follow algebraically from those fitted coordinates
+  and the refined PSPL ``tE``;
+* **approximate physical seeds** use a local lensing scaling and are starting
+  points, not measurements from a global binary-lens fit.
+
+The parameter name reflects this distinction. For example,
+``rho_over_sinalpha`` is the fold constraint
+:math:`t_*/t_E`, while ``characteristic_scale_over_tE`` is only a normalized
+phenomenological width. Likewise, ``q_base`` and ``q_wide_repeating`` are
+approximate seed centers; ``q_curv`` is a local curvature coefficient and is
+never a binary mass ratio.
+
+The currently implemented templates and their principal outputs are:
+
+.. list-table:: Residual-template atlas
+   :header-rows: 1
+   :widths: 22 25 53
+
+   * - Class label
+     - Local morphology
+     - Principal reported constraints and seeds
+   * - ``major_image_bump``
+     - Positive Lorentzian-like image perturbation
+     - ``t_peak``, ``width``, ``u_anom``, ``q_base``, ``s_wide``,
+       ``s_counterpart``, ``alpha_seed``
+   * - ``major_image_pspl_bump``
+     - Positive PSPL-shaped perturbation
+     - ``tE_pert``, ``u0_pert`` and the same image-position seed geometry
+   * - ``minor_image_dip``
+     - Negative Lorentzian-like image perturbation
+     - ``t_peak``, ``width``, ``u_anom``, ``q_base``, ``s_close``,
+       ``s_counterpart``, ``alpha_seed``
+   * - ``minor_image_box_trough``
+     - Soft-edged negative trough
+     - ``t_start``, ``t_end``, ``edge_width`` and minor-image seed geometry
+   * - ``fold_caustic``
+     - Straight uniform-source fold
+     - ``tc``, ``t_limb``, ``tstar``, ``entry_exit_sign``,
+       ``rho_over_sinalpha``
+   * - ``limb_darkened_fold_caustic``
+     - Straight fold with linear limb darkening
+     - Straight-fold quantities plus effective ``Gamma``
+   * - ``curved_fold_caustic``
+     - Quadratic local fold distance
+     - Limb contacts ``t_entry/t_exit``, center crossings ``tc1/tc2``,
+       local ``tstar_entry/exit`` and local ``rho_over_sinalpha_entry/exit``
+   * - ``grazing_fold_caustic``
+     - Limb-only or shallow quadratic fold encounter
+     - ``t_stationary``, ``z_stationary``; ``t_closest/z_closest`` for a
+       convex trajectory; all real limb and center roots and their local
+       ``tstar`` and ``rho_over_sinalpha``
+   * - ``two_fold_caustic``
+     - Unresolved pair of fold contributions
+     - ``tc1/tc2``, common ``tstar_1/2``, fold-strength ratio, and
+       ``contact_separation_over_2tstar``
+   * - ``full_caustic_crossing``
+     - Entry, interior, and exit across a broad segment
+     - ``t_entry/t_exit``, separate ``tstar_entry/exit``, separate source-size
+       constraints, inside duration, and entry/exit asymmetry
+   * - ``rim_trough_caustic``
+     - Phenomenological bump--dip--bump profile
+     - Rim/trough times, rim separation and asymmetry, and
+       ``characteristic_scale_over_tE``; no direct ``rho`` claim
+   * - ``cusp_caustic``
+     - Softened one-dimensional cusp tail
+     - ``ta``, ``b``, tail power ``p``, ``effective_core_duration``, and
+       ``cusp_scale_over_tE``
+   * - ``canonical_cusp``
+     - Point-source canonical cusp map
+     - Canonical coordinates ``eta1_0/eta2_0``, ``omega1/omega2``, closest
+       time, cusp impact, and discriminant; canonical scales are local
+   * - ``finite_source_cusp``
+     - Unit-disc convolution of the canonical cusp map
+     - Canonical-cusp geometry plus ``tstar_cusp_local`` and
+       ``rho_over_sinalpha_cusp_local`` in the lookup normalization
+   * - ``chang_refsdal``
+     - Local image perturbation lookup
+     - Image branch, local planet coordinates, ``s_local``, ``alpha_local``,
+       ``q_local``, ``rho_over_sqrt_q``, ``rho_local``, and ``gamma_local``
+   * - ``central_caustic`` / ``central_double_cusp``
+     - Symmetric or double-cusp central morphology
+     - Central times and widths plus the constrained combination
+       ``q_over_s_minus_inv_s_sq``; seeds scan ``s`` and ``alpha``
+   * - ``second_pspl_like``
+     - A second PSPL-shaped residual bump
+     - 1L2S ``q_flux`` and wide-repeating 2L1S alternatives
+       ``q_wide_repeating``, ``s_plus/minus``, ``alpha_plus/minus``
+   * - ``shear_quadrupole``
+     - Broad even/odd smooth basis
+     - Dimensionless ``gamma`` proxy, ``shear_basis_angle``, and approximate
+       wide/close grids; this is not a measured Chang--Refsdal shear
+   * - ``pspl_misfit`` / ``systematics_candidate``
+     - Baseline derivatives or sparse artifacts
+     - Diagnostic parameters only; no aggressive planet seed
+
+Every profiled atom also reports its fitted ``amplitude``. Multi-column atoms
+may additionally report ``amplitude_1``, ``amplitude_2``, and later columns.
+These are residual-flux coefficients. They are not mass ratios or caustic
+strengths independent of source flux and the local coordinate normalization.
+
 Finite-source fold and cusp atoms
 ---------------------------------
 
@@ -167,6 +275,31 @@ Thus a fold fit constrains :math:`t_*/t_E = \rho/|\sin\alpha|`, not
 retain the local entry/exit timing and relative-strength information, but they
 still do not determine a global caustic topology.
 
+For a straight fold the first limb contact is
+:math:`t_{\rm limb}=t_c-s_{\rm ent}t_*`. For curved and grazing folds, the
+code solves :math:`z(t)=-1` for limb contacts and :math:`z(t)=0` for
+source-center crossings. At each real root it computes
+
+.. math::
+
+   t_{*,\mathrm{local}} = \left|\frac{dz}{dt}\right|^{-1},
+   \qquad
+   \left(\frac{\rho}{|\sin\alpha|}\right)_{\mathrm{local}}
+   = \frac{t_{*,\mathrm{local}}}{t_E}.
+
+The grazing atom uses
+
+.. math::
+
+   z(t)=z_0+\frac{t-t_a}{w}
+   +q_{\rm curv}\left(\frac{t-t_a}{w}\right)^2.
+
+It reports every real root. A missing ``t_contact_*`` therefore means the
+fitted quadratic has no real :math:`z=-1` contact, not that the calculation
+was skipped. For positive curvature its vertex is a closest approach and is
+also reported as ``t_closest`` and ``z_closest``; for negative curvature it is
+only a stationary maximum.
+
 Cusp atoms use either a softened cusp-tail scaling or a canonical local cusp
 map. The tail family has the form
 
@@ -180,6 +313,15 @@ The two exponents represent the common axial and transverse local cusp
 scalings. These are local asymptotic descriptions, so finite-source cusp and
 canonical-cusp fits are diagnostic inputs to a global model, not replacements
 for it.
+
+The canonical implementation currently uses a one-direction trajectory in
+canonical coordinates, :math:`\eta_1=\eta_{1,0}+(t-t_a)/w` and
+:math:`\eta_2=\eta_{2,0}`. Consequently ``trajectory_angle_cusp`` is zero in
+that coordinate convention and is not the binary-axis angle ``alpha``. The
+point-source canonical map has an arbitrary local scale. Only the
+finite-source lookup, whose convolution disc has unit source radius, exposes
+``tstar_cusp_local`` and ``rho_over_sinalpha_cusp_local``; these remain local
+normalization estimates until a global lens map fixes the canonical scaling.
 
 Non-caustic atoms and image-based seeds
 ---------------------------------------
@@ -262,10 +404,13 @@ followed by :math:`s=\sqrt{\Delta x^2+\Delta y^2}` and
 :math:`\alpha=\operatorname{atan2}(\Delta y,\Delta x)`. The two signs are a
 trajectory-side degeneracy.
 
-A broad quadrupole-like residual can instead constrain a local shear. Wide
-seeds use :math:`q\simeq\gamma s^2`; close seeds use
-:math:`q\simeq\gamma/s^2` on a small configured separation grid. This is a
-local relation only and is intentionally emitted as a diagnostic seed family.
+A broad quadrupole-like residual is fitted with generic even and odd smooth
+basis functions. Their coefficients are divided by ``Fs`` to form the
+dimensionless ``gamma`` proxy. It is not an exact lens-equation derivative or
+a measured Chang--Refsdal shear. Approximate wide seeds use
+:math:`q\simeq\gamma s^2`; close seeds use
+:math:`q\simeq\gamma/s^2` on a small separation grid. All such seeds carry a
+diagnostic warning.
 
 Local atom fitting and ranking
 ------------------------------
