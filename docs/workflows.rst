@@ -136,13 +136,13 @@ inspect locally identifiable constraints:
        ),
    )
    signal = extractor.run(time, flux, ferr, x0=x0, refit=False)
-   morphology = signal.classify_anomaly()
+   anomaly = signal.classify_anomaly()
 
-   print(morphology.summary_text())
-   constraints = morphology.physical_constraint_dicts()
+   print(anomaly.summary_text())
+   components = anomaly.component_summary_dicts()
 
 This stage is deliberately more selective and more expensive than the initial
-scan. It returns candidate intervals, a refined baseline, broad shape labels,
-local residual-atom fits, and identifiable local physical combinations.
-Read :doc:`planet_classification` before interpreting a morphology label as a
+scan. It returns candidate intervals, a refined baseline, per-component shape
+labels, and the heuristic anomaly geometry and scale estimates.
+Read :doc:`planet_classification` before interpreting a shape label as a
 physical conclusion.

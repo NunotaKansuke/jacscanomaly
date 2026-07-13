@@ -2,17 +2,14 @@ Planet Signal Classification
 ============================
 
 The planetary-signal workflow separates a local residual signal from a
-refined single-lens baseline, describes its shape, and measures the local
-physical combinations that the residual actually constrains. It does not
-invent a full 2L1S/1L2S parameter point when the local data leave a
-degeneracy unresolved.
-
-The output deliberately separates three levels of inference:
-
-* ``morphology`` atoms describe a residual shape but report no lens parameter;
-* ``physical_constraint`` and ``physical_local`` atoms report only quantities
-  identifiable in a fold asymptotic model or in the normalized local
-  Chang--Refsdal model.
+refined single-lens baseline, measures its shape, and derives the quantities
+that the local data determine well: the anomaly position on the PSPL
+magnification pattern (:math:`\tau_{\rm anom}`, :math:`u_{\rm anom}`,
+:math:`\alpha`, :math:`s^\dagger_\pm`) and the anomaly timescale relative to
+:math:`t_E`, with an assumption-tagged mass-ratio estimate where a published
+relation applies.  It does not fit a 2L1S/1L2S model and does not resolve
+the inner/outer or :math:`u_0`-mirror degeneracies; see
+:doc:`morphology_classification_method` for the formalism and references.
 
 Refine and classify a signal
 ----------------------------
@@ -21,7 +18,7 @@ Use :class:`jacscanomaly.PlanetSignalExtractor` to iteratively refit the
 baseline while excluding localized residual signals. It reuses the supplied
 finder's baseline fitter and template-grid configuration. The returned
 :class:`jacscanomaly.PlanetSignalResult` exposes both a simple shape
-classification and the residual-atom classifier:
+classification and the heuristic anomaly estimator:
 
 .. code-block:: python
 
@@ -46,8 +43,8 @@ classification and the residual-atom classifier:
 
 ``signal.classify()`` describes each connected extracted component with broad
 shape labels such as peaks, dips, caustic crossings, and complex signals.
-``signal.classify_anomaly()`` fits a set of local residual atoms to those
-components and ranks local morphology and physical fits.
+``signal.classify_anomaly()`` measures each component with a small template
+set and derives the anomaly geometry and scales.
 
 Peak and duration estimates
 ---------------------------
@@ -139,160 +136,108 @@ The result retains the complete refinement history:
 ``signal_mask`` identifies points excluded from that baseline fit; and
 ``candidates`` contains the contiguous extracted intervals.
 
+The anomaly estimate
+--------------------
+
+``classify_anomaly()`` returns a
+:class:`jacscanomaly.PlanetAnomalyFitResult` with one
+:class:`jacscanomaly.ComponentAnomalyResult` per extracted component.  Each
+component carries three levels of information:
+
+``shape_fits`` / ``best_fit`` / ``shape``
+   The fitted shape templates (``bump``, ``dip``, ``fold``,
+   ``caustic_crossing``, ``null``) ranked by BIC, and the resulting label.
+   A component whose best fit is the null polynomial is labeled
+   ``no_coherent_shape``; a winning template below ``min_delta_chi2`` is
+   ``low_significance``; both suppress the derived quantities.
+
+``geometry``
+   The deterministic anomaly geometry: ``tau_anom``, ``u_anom``, ``alpha``,
+   ``sin_alpha``, both ``s_dagger`` branches with the preferred branch
+   (major image for bumps, minor image for dips), and the ``regime`` flag
+   (``planetary`` or ``central_or_resonant``).  First-order errors are
+   propagated from the fitted ``t_anom`` uncertainty.
+
+``scales``
+   ``dt`` and ``dt_over_tE`` with the shape-specific duration definition
+   (bump FWHM, full dip duration, entry-to-exit interval), the mass-ratio
+   estimate ``q`` with its ``q_method`` tag where defined, and
+   ``tstar*_over_tE`` for fold-type shapes.  ``notes`` spells out the
+   assumption behind every derived number.
+
+.. code-block:: python
+
+   anomaly = signal.classify_anomaly()
+   best = anomaly.best_component
+   if best is not None:
+       print(best.shape)
+       print(best.geometry.u_anom, best.geometry.s_dagger_plus)
+       print(best.scales.q, best.scales.q_method)
+
 Inspecting results
 ------------------
 
-The classification result has compact dictionary and table helpers suitable
-for notebooks and survey tables:
+The result has compact dictionary and table helpers suitable for notebooks
+and survey tables:
 
 .. code-block:: python
 
    event_row = anomaly.summary_dict()
-   segment_rows = anomaly.segment_summary_dicts()
-   atom_rows = anomaly.atom_summary_dicts()
-   local_rows = anomaly.local_physical_summary_dicts()
-   constraint_rows = anomaly.physical_constraint_dicts()
-   relation_rows = anomaly.physical_relation_dicts()
+   component_rows = anomaly.component_summary_dicts()
+   shape_rows = anomaly.shape_fit_dicts()
 
    display(anomaly.summary_table())
-   display(anomaly.atom_table())
-   display(anomaly.physical_constraint_table())
-
-``best_label`` and ``class_probabilities`` compare whole-component atom morphologies
-using BIC weights. Physical rows contain either directly fitted local
-coordinates or explicitly named identifiable combinations.
-
-The optional plots provide a quick visual check of the fitted local structure:
-
-.. code-block:: python
+   display(anomaly.shape_fit_table())
 
    signal.plot_signal()
    anomaly.plot_summary(signal_result=signal)
+
+``summary_table()`` has one row per component with its best shape fit,
+geometry, and scales.  ``shape_fit_table()`` has one row per fitted template
+(including the null), with ``chi2``, ``delta_chi2``, ``bic``, the fitted
+parameters, and ``*_err`` uncertainty columns when the local covariance
+estimate is available.
 
 Configuration
 -------------
 
 :class:`jacscanomaly.PlanetSignalConfig` controls baseline refinement and
-signal extraction. The default ``baseline_mode="beam_interval"`` selects a
-small set of connected masked intervals; ``"mask"`` and ``"robust"`` are
-available when their behavior is more appropriate for the event. The most
-important controls are ``seed_min_dchi2``, ``max_iter``, and
-``max_mask_fraction``.
+signal extraction; the most important controls are ``seed_min_dchi2``,
+``max_iter``, and ``max_mask_fraction``.
 
-:class:`jacscanomaly.PlanetClassConfig` controls which morphology atoms are
-considered. All standard atoms are enabled by default. Set an
-``enable_*`` option to ``False`` to restrict a targeted analysis, and adjust
-``min_delta_chi2_physical`` to control the minimum significance for publishing
-a local physical constraint. The deprecated ``min_delta_chi2_for_seed`` name
-is accepted as a compatibility alias. The configuration
-also exposes numerical controls for the finite-source
-fold and Chang-Refsdal lookup calculations.
+:class:`jacscanomaly.PlanetClassConfig` controls the anomaly estimator:
 
-Residual atoms and local constraints
-------------------------------------
+``min_delta_chi2``
+   Minimum improvement over the null polynomial for a shape to be considered
+   significant.
 
-The atom fits are local alternatives evaluated independently on each extracted
-component. They cover positive and negative image perturbations, central
-caustic structures, fold and cusp crossings, Chang-Refsdal perturbations,
-second-source-like bumps, smooth PSPL misfits, and a systematics diagnostic.
-The atom name and local parameters appear in ``atom_table()``; use
-``delta_chi2``, ``bic``, ``score``, and warnings together rather than treating
-one label as definitive.
+``mixed_sign_power_fraction``
+   Fraction of the total residual power required in each sign before the
+   bump or dip template is tried.
 
-The atom stage first fits each extracted component only to classify its broad
-morphology and locate candidate edges or compact extrema. It then cuts separate
-windows around those locators, includes neighboring baseline points, and refits
-the relevant physical asymptotic model in each window. Only this second-stage
-fit contributes rows to ``physical_constraint_dicts()``. For example:
+``min_points_fold`` / ``min_points_crossing``
+   Minimum component sizes for the fold and caustic-crossing templates.
 
-.. code-block:: python
+``central_u_anom_max``
+   ``u_anom`` threshold below which the geometry is flagged
+   ``central_or_resonant`` and no ``q`` estimate is reported.
 
-   from jacscanomaly import PlanetClassConfig
-
-   anomaly = signal.classify_anomaly(
-       PlanetClassConfig(
-           estimate_param_errors=True,
-           min_delta_chi2_physical=20.0,
-       )
-   )
-   for segment in anomaly.segment_results:
-       for atom in segment.atom_fits:
-           print(atom.atom_name, atom.params, atom.param_errors, atom.bic)
-       for local in segment.local_physical_fits:
-           print(local.locator_kind, local.atom_fit.physical_params)
-
-``AtomFitResult.params`` is intentionally atom-specific. Bump-like atoms may
-report a peak time and width; physical fold atoms report contact or crossing
-times and the identifiable projected source scale. The central atom reports
-``C_chord*q/(s-s^-1)^2 = Delta_t/(4*tE)`` without fixing the unknown chord
-factor. The normalized Chang--Refsdal atom reports fitted ``x_planet``,
-``y_planet``, ``sqrt_q``, and ``rho/sqrt(q)`` together with the deterministic
-transforms ``s=hypot(x_planet,y_planet)``, ``q=sqrt_q**2``, ``alpha``, and
-``rho``. ``param_errors`` is populated only when the local
-covariance estimate is well conditioned. Check ``success``, ``warnings``, and
-``validity_penalty`` before using any estimate.
-
-The complete template atlas, model equations, exact parameter names, and the
-distinction between direct constraints and morphology parameters are in
-:doc:`morphology_classification_method`. In particular, do not read
-``q_curv`` as a mass ratio, a generic ``width/tE`` as ``rho``, or a
-``shear_quadrupole`` proxy as a measured Chang--Refsdal shear.
-
-To inspect only usable physical local estimates and identifiable constraints:
-
-.. code-block:: python
-
-   print(anomaly.physical_constraint_table())
-   print(anomaly.best_physical_fit)
-
-``physical_constraint_table()`` excludes unsuccessful, boundary, weak, and
-strongly noncompetitive fits within each local window by default. Pass
-``include_invalid=True`` to ``physical_constraint_dicts()`` for an audit table.
-The cutoff relative to the best atom in the same window is controlled by
-``physical_window_max_delta_bic``. ``physical_relation_table()`` combines
-entry and exit measurements only through explicit shared-source relations; it
-does not fit a flexible whole-crossing profile and reinterpret its scales as
-``tstar``.
-
-The default enabled set includes simple positive/negative perturbations,
-central perturbations, fold variants, cusp variants, Chang-Refsdal,
-second-PSPL-like, smooth-misfit, shear, and systematics atoms. Disable
-unneeded families with the corresponding ``enable_*`` fields in
-``PlanetClassConfig`` to make a targeted fit faster and easier to inspect.
-
-Interpreting fit tables
------------------------
-
-``anomaly.summary_table()`` has one row per extracted component and its best
-atom. ``anomaly.atom_table()`` has one row per retained atom fit. The most
-useful columns are:
-
-``atom_name`` / ``class_label``
-   Local model identity and a human-readable morphology label.
-
-``chi2`` / ``delta_chi2`` / ``bic``
-   Local fit quality. Larger ``delta_chi2`` is an improvement over the local
-   baseline; lower BIC is preferred among the fitted local alternatives.
-
-``score`` / ``validity_penalty`` / ``warnings``
-   Triage diagnostics. A fit can be statistically competitive but receive a
-   validity warning for cadence-limited width or a boundary solution.
-
-``*_err``
-   Finite-difference local covariance uncertainty for the matching parameter,
-   when the estimate is available.
-
-``estimation_role`` / ``physical_valid``
-   Whether the atom is morphology, an identifiable constraint, or a
-   normalized local physical fit, and whether its physical
-   result passed strength and boundary checks.
+``estimate_param_errors``
+   Enables the finite-difference covariance estimate for template
+   parameters.
 
 Interpretation
 --------------
 
-Residual atoms include positive and negative image perturbations, central
-caustic structures, fold and cusp crossings, Chang-Refsdal perturbations,
-second-source-like bumps, and systematics diagnostics. They are deliberately
-local descriptions of the residual light curve. Use their ranking to choose
-and initialize global physical models, then evaluate those models on the full
-light curve with the appropriate likelihood and priors.
+The derived quantities are heuristic seeds, not posteriors:
+
+* ``s_dagger`` is the geometric mean of the degenerate inner/outer
+  solutions, and ``alpha`` is defined up to the ``u0``-mirror reflection.
+* ``q`` estimates are typically accurate to a factor of ~2 relative to full
+  modeling; their errors propagate only the local measurement uncertainty.
+* A bump measured here can also be a second source (1L2S); distinguishing
+  the two requires information beyond the local shape.
+
+Use the output to decide whether an event warrants detailed modeling and to
+initialize that modeling, then evaluate full models on the complete light
+curve with the appropriate likelihood and priors.

@@ -254,24 +254,25 @@ class PlanetSignalResult:
 
     def classify_anomaly(self, config=None):
         """
-        Fit residual-template atoms and generate physical-model seed candidates.
+        Measure each anomaly component with the heuristic estimator.
 
         This is a convenience wrapper around
-        :class:`jacscanomaly.PlanetAnomalyClassifier`.  The returned local
-        morphology classification is intended for seed generation and triage,
-        not as a final binary-lens posterior.
+        :class:`jacscanomaly.PlanetAnomalyClassifier`.  Each component's
+        local shape is measured with a small template set, and the
+        deterministic geometry ``(tau_anom, u_anom, alpha, s_dagger)`` and
+        assumption-tagged scale estimates (``dt/tE``, ``q``, ``tstar/tE``)
+        are derived from it.
 
         Parameters
         ----------
         config : PlanetClassConfig, optional
-            Atom-selection, optimization, uncertainty, and seed-generation
-            settings. Defaults to :class:`PlanetClassConfig`.
+            Template routing, optimization, and uncertainty settings.
+            Defaults to :class:`PlanetClassConfig`.
 
         Returns
         -------
         PlanetAnomalyFitResult
-            Per-component atom fits, local parameter estimates, uncertainties
-            when available, and deduplicated downstream model seeds.
+            Per-component shape fits, geometry, and scale estimates.
         """
         from .planet_class import PlanetAnomalyClassifier, PlanetClassConfig
 

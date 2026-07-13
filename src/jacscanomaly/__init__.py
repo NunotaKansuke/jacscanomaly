@@ -43,14 +43,15 @@ from .planet_signal import (
     PlanetSignalResult,
 )
 from .planet_class import (
-    AtomFitResult,
-    LocalPhysicalFitResult,
+    AnomalyGeometry,
+    AnomalyScales,
+    AnomalyShapeFit,
+    ComponentAnomalyResult,
     PlanetAnomalyClassifier,
     PlanetAnomalyFitResult,
     PlanetClassConfig,
     PSPLParams,
     SegmentData,
-    SegmentModelResult,
 )
 
 __all__ = [
@@ -89,14 +90,15 @@ __all__ = [
     "PlanetSignalIteration",
     "PlanetSignalPeak",
     "PlanetSignalResult",
-    "AtomFitResult",
-    "LocalPhysicalFitResult",
+    "AnomalyGeometry",
+    "AnomalyScales",
+    "AnomalyShapeFit",
+    "ComponentAnomalyResult",
     "PlanetAnomalyClassifier",
     "PlanetAnomalyFitResult",
     "PlanetClassConfig",
     "PSPLParams",
     "SegmentData",
-    "SegmentModelResult",
 ]
 
 __version__ = "0.3.2"

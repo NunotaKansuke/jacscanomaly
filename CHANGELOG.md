@@ -8,30 +8,29 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ## [Unreleased]
 
-### Added
-- Documented the complete residual-template atlas, including each atom's
-  fitted coordinates, analytically derived timing and finite-source
-  constraints and interpretation limits.
-- Added explicit morphology, identifiable-constraint, and normalized
-  local-physical roles to anomaly atom results.
-- Added a fixed-flux-normalization Chang--Refsdal fit with local ``s``, ``q``,
-  ``alpha``, finite-source bounds, retained modes, and physical validity gates.
-- Added explicit local-feature windows for fold edges and compact image
-  perturbations, with auditable local-fit rows and shared-source entry/exit
-  relations.
-
 ### Changed
-- Removed assumed ``q``, ``s``, and ``alpha`` seed grids derived from generic
-  bump widths, signs, smooth shear proxies, and second-PSPL reinterpretations.
-  Central fits now retain ``C_chord`` in
-  ``C_chord*q/(s-s^-1)^2`` instead of fixing a projected chord. Fold outputs identify ``rho/abs(sin(psi))`` and
-  distinguish the local fold angle from binary-axis ``alpha``.
-- Chang--Refsdal fits retain native ``x_planet``, ``y_planet``, ``sqrt_q``,
-  and ``rho/sqrt(q)`` while exposing only deterministic transforms such as
-  ``q=sqrt_q**2`` and ``s=hypot(x_planet,y_planet)``.
-- Whole-component atoms now drive morphology and feature routing only;
-  published fold and Chang--Refsdal constraints come from independent local
-  refits that include neighboring baseline data.
+- Rewrote `planet_class` as a heuristic anomaly estimator based on the
+  standard literature formalism (Gould & Loeb 1992; Gaudi & Gould 1997;
+  Han 2006; Hwang et al. 2022; Ryu et al. 2022). Each anomaly component is
+  measured with a small template set (`bump`, `dip`, `fold`,
+  `caustic_crossing`, `null`), and the deterministic geometry
+  (`tau_anom`, `u_anom`, `alpha`, `s_dagger_plus/minus` with the
+  bump→major-image / dip→minor-image branch), the duration ratio `dt/tE`,
+  and assumption-tagged mass-ratio estimates (`dip_han2006`,
+  `bump_planet_einstein_crossing`) are derived from the fitted anomaly time
+  and duration. Fold-type shapes report `tstar/tE = rho/|sin(psi)|` per
+  crossing. Anomalies with small `u_anom` are flagged
+  `central_or_resonant` and receive no `q` estimate.
+
+### Removed
+- The residual-atom template atlas (about 20 atoms including rim-trough,
+  shear-quadrupole, curved/grazing/two-fold, canonical and finite-source
+  cusp variants), the local-window physical refit machinery, the
+  Chang--Refsdal lookup fit, warning/validity score penalties, BIC-weighted
+  class probabilities, and the `physical_constraint`/`physical_relation`
+  output tables. `AtomFitResult`, `LocalPhysicalFitResult`, and
+  `SegmentModelResult` are replaced by `AnomalyShapeFit`, `AnomalyGeometry`,
+  `AnomalyScales`, and `ComponentAnomalyResult`.
 
 ---
 

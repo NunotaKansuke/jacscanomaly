@@ -1,4 +1,10 @@
-from .classifier import PlanetAnomalyClassifier
+from .estimator import PlanetAnomalyClassifier
+from .geometry import (
+    AnomalyGeometry,
+    anomaly_geometry,
+    q_from_bump,
+    q_from_dip,
+)
 from .pspl import (
     angle_of,
     pspl_flux,
@@ -19,29 +25,28 @@ from .fold_kernel import (
     fold_gn_integral,
     fold_limb_darkened,
 )
-from .atoms.chang_refsdal import (
-    chang_refsdal_flux_residual,
-    cr_relative_magnification,
-    warm_chang_refsdal_lookup_cache,
-)
 from .types import (
-    AtomFitResult,
-    LocalPhysicalFitResult,
+    AnomalyScales,
+    AnomalyShapeFit,
+    ComponentAnomalyResult,
     PlanetAnomalyFitResult,
     PlanetClassConfig,
     PSPLParams,
     SegmentData,
-    SegmentModelResult,
 )
 
 __all__ = [
     "PlanetAnomalyClassifier",
     "PlanetClassConfig",
     "PlanetAnomalyFitResult",
-    "SegmentModelResult",
+    "ComponentAnomalyResult",
+    "AnomalyShapeFit",
+    "AnomalyScales",
+    "AnomalyGeometry",
+    "anomaly_geometry",
+    "q_from_bump",
+    "q_from_dip",
     "SegmentData",
-    "AtomFitResult",
-    "LocalPhysicalFitResult",
     "PSPLParams",
     "pspl_params_from_result",
     "pspl_flux",
@@ -59,7 +64,4 @@ __all__ = [
     "fold_g0_integral",
     "fold_gn_integral",
     "fold_limb_darkened",
-    "cr_relative_magnification",
-    "chang_refsdal_flux_residual",
-    "warm_chang_refsdal_lookup_cache",
 ]

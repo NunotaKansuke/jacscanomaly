@@ -66,7 +66,7 @@ The extractor returns both ``initial_fit`` and ``refined_fit``. Use
 fit weighting, and ``iterations`` to audit accepted refinement steps. See
 :doc:`planet_classification` for the three baseline modes and their controls.
 
-Planet residual-atom fitting API
+Heuristic anomaly estimation API
 --------------------------------
 
 .. autoclass:: jacscanomaly.PlanetAnomalyClassifier
@@ -82,12 +82,22 @@ Planet residual-atom fitting API
 
 .. automethod:: jacscanomaly.PlanetAnomalyFitResult.summary_dict
 
-.. automethod:: jacscanomaly.PlanetAnomalyFitResult.atom_table
+.. automethod:: jacscanomaly.PlanetAnomalyFitResult.summary_table
 
-.. automethod:: jacscanomaly.PlanetAnomalyFitResult.physical_constraint_table
+.. automethod:: jacscanomaly.PlanetAnomalyFitResult.shape_fit_table
 
-``atom_table()`` has one row per retained local atom fit, including the fitted
-parameters, ``*_err`` uncertainty columns when estimated, ``chi2``,
-``delta_chi2``, BIC, score, validity penalty, and warnings.
-``physical_constraint_table()`` contains only locally identifiable quantities
-and explicitly retained parameter combinations.
+.. autoclass:: jacscanomaly.ComponentAnomalyResult
+   :no-index:
+
+.. autoclass:: jacscanomaly.AnomalyGeometry
+   :no-index:
+
+.. autoclass:: jacscanomaly.AnomalyScales
+   :no-index:
+
+``summary_table()`` has one row per component with the best shape fit, the
+deterministic anomaly geometry (``tau_anom``, ``u_anom``, ``alpha``,
+``s_dagger_plus/minus``), and the timescale-derived estimates.
+``shape_fit_table()`` has one row per fitted shape template, including the
+fitted parameters, ``*_err`` uncertainty columns when estimated, ``chi2``,
+``delta_chi2``, and BIC.

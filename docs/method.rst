@@ -29,8 +29,8 @@ The following pages document the later stages in detail:
 * :doc:`template_free_method` explains the residual-only zero-crossing search.
 * :doc:`signal_extraction_method` explains iterative baseline refinement and
   signal masking.
-* :doc:`morphology_classification_method` explains shape classification,
-  residual atoms, BIC weights, and local physical constraints.
+* :doc:`morphology_classification_method` explains the shape templates and
+  the heuristic anomaly geometry and mass-ratio estimates.
 
 Detection statistic
 -------------------
@@ -170,8 +170,8 @@ What the standard scan does not do
 
 The standard scan does not choose a 2L1S or 1L2S model, fit caustic geometry,
 or estimate a planet mass ratio. It reports local residual candidates.
-:doc:`planet_classification` adds local morphology fits and only the physical
-quantities or combinations constrained by those local fits.
+:doc:`planet_classification` adds local shape measurements and the
+deterministic heuristic geometry and scale estimates derived from them.
 
 Method details
 --------------
