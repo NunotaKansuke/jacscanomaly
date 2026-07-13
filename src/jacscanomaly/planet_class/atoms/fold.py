@@ -10,6 +10,7 @@ from ..types import AtomFitResult, SegmentData
 class FoldCausticAtom(ResidualAtom):
     atom_name = "straight_fold_caustic"
     class_label = "fold_caustic"
+    estimation_role = "physical_constraint"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -66,6 +67,7 @@ class FoldCausticAtom(ResidualAtom):
 class CurvedFoldCausticAtom(ResidualAtom):
     atom_name = "curved_fold_caustic"
     class_label = "curved_fold_caustic"
+    estimation_role = "physical_constraint"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -183,6 +185,7 @@ class CurvedFoldCausticAtom(ResidualAtom):
 class GrazingFoldCausticAtom(ResidualAtom):
     atom_name = "grazing_fold_caustic"
     class_label = "grazing_fold_caustic"
+    estimation_role = "physical_constraint"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -266,6 +269,7 @@ class GrazingFoldCausticAtom(ResidualAtom):
 class LimbDarkenedFoldCausticAtom(ResidualAtom):
     atom_name = "limb_darkened_fold_caustic"
     class_label = "limb_darkened_fold_caustic"
+    estimation_role = "physical_constraint"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -448,6 +452,7 @@ class RimTroughCausticAtom(ResidualAtom):
 class TwoFoldCausticAtom(ResidualAtom):
     atom_name = "two_fold_caustic"
     class_label = "two_fold_caustic"
+    estimation_role = "physical_constraint"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -520,6 +525,7 @@ class TwoFoldCausticAtom(ResidualAtom):
 class FullCausticCrossingAtom(ResidualAtom):
     atom_name = "full_caustic_crossing"
     class_label = "full_caustic_crossing"
+    estimation_role = "morphology"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -638,8 +644,8 @@ class FullCausticCrossingAtom(ResidualAtom):
         gap = float(np.exp(theta[1]))
         t_exit = t_entry + gap
         center = 0.5 * (t_entry + t_exit)
-        tstar_entry = float(np.exp(theta[2]))
-        tstar_exit = float(np.exp(theta[3]))
+        entry_edge_scale = float(np.exp(theta[2]))
+        exit_edge_scale = float(np.exp(theta[3]))
         return {
             "t_entry": t_entry,
             "t_exit": t_exit,
@@ -647,15 +653,14 @@ class FullCausticCrossingAtom(ResidualAtom):
             "tc2": t_exit,
             "t_center": center,
             "caustic_inside_duration": gap,
-            "tstar_entry": tstar_entry,
-            "tstar_exit": tstar_exit,
-            "tstar": 0.5 * (tstar_entry + tstar_exit),
-            "rho_over_sinalpha_entry": tstar_entry / max(segment.pspl.tE, 1e-12),
-            "rho_over_sinalpha_exit": tstar_exit / max(segment.pspl.tE, 1e-12),
-            "rho_over_sinalpha": 0.5 * (tstar_entry + tstar_exit) / max(segment.pspl.tE, 1e-12),
+            "entry_edge_scale": entry_edge_scale,
+            "exit_edge_scale": exit_edge_scale,
+            "mean_edge_scale": 0.5 * (entry_edge_scale + exit_edge_scale),
+            "entry_edge_scale_over_tE": entry_edge_scale / max(segment.pspl.tE, 1e-12),
+            "exit_edge_scale_over_tE": exit_edge_scale / max(segment.pspl.tE, 1e-12),
             "entry_exit_sign_1": float(signs[0]),
             "entry_exit_sign_2": float(signs[1]),
-            "entry_exit_asymmetry": float((tstar_exit - tstar_entry) / max(tstar_exit + tstar_entry, 1e-12)),
+            "entry_exit_asymmetry": float((exit_edge_scale - entry_edge_scale) / max(exit_edge_scale + entry_edge_scale, 1e-12)),
             "tail_softening": 0.35,
         }
 

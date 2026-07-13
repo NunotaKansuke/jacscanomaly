@@ -2,9 +2,17 @@ Planet Signal Classification
 ============================
 
 The planetary-signal workflow separates a local residual signal from a
-refined single-lens baseline, describes its shape, and produces starting
-points for downstream physical fits. It is a triage and seed-generation
-tool: an atom label or seed is not a final 2L1S/1L2S model comparison.
+refined single-lens baseline, describes its shape, and measures the local
+physical combinations that the residual actually constrains. It does not
+invent a full 2L1S/1L2S parameter point when the local data leave a
+degeneracy unresolved.
+
+The output deliberately separates three levels of inference:
+
+* ``morphology`` atoms describe a residual shape but report no lens parameter;
+* ``physical_constraint`` and ``physical_local`` atoms report only quantities
+  identifiable in a fold asymptotic model or in the normalized local
+  Chang--Refsdal model.
 
 Refine and classify a signal
 ----------------------------
@@ -39,7 +47,7 @@ classification and the residual-atom classifier:
 ``signal.classify()`` describes each connected extracted component with broad
 shape labels such as peaks, dips, caustic crossings, and complex signals.
 ``signal.classify_anomaly()`` fits a set of local residual atoms to those
-components and ranks candidate physical-model seeds.
+components and ranks local morphology and physical fits.
 
 Peak and duration estimates
 ---------------------------
@@ -142,19 +150,19 @@ for notebooks and survey tables:
    event_row = anomaly.summary_dict()
    segment_rows = anomaly.segment_summary_dicts()
    atom_rows = anomaly.atom_summary_dicts()
-   seed_rows = anomaly.seed_summary_dicts(top_n=20)
+   local_rows = anomaly.local_physical_summary_dicts()
+   constraint_rows = anomaly.physical_constraint_dicts()
+   relation_rows = anomaly.physical_relation_dicts()
 
    display(anomaly.summary_table())
    display(anomaly.atom_table())
-   display(anomaly.seed_table(top_n=20))
+   display(anomaly.physical_constraint_table())
 
-``best_label`` and ``class_probabilities`` compare local atom morphologies
-using BIC weights. ``event_seeds`` contains deduplicated downstream starting
-points. Each seed records its proposed ``model_type``, ``class_label``, score,
-source atom, degeneracy tag, and numerical parameters.
+``best_label`` and ``class_probabilities`` compare whole-component atom morphologies
+using BIC weights. Physical rows contain either directly fitted local
+coordinates or explicitly named identifiable combinations.
 
-The optional plots provide a quick visual check before sending seeds to a
-global physical-model fitter:
+The optional plots provide a quick visual check of the fitted local structure:
 
 .. code-block:: python
 
@@ -174,12 +182,14 @@ important controls are ``seed_min_dchi2``, ``max_iter``, and
 :class:`jacscanomaly.PlanetClassConfig` controls which morphology atoms are
 considered. All standard atoms are enabled by default. Set an
 ``enable_*`` option to ``False`` to restrict a targeted analysis, and adjust
-``min_delta_chi2_for_seed`` to control which local fits produce physical-model
-seeds. The configuration also exposes numerical controls for the finite-source
+``min_delta_chi2_physical`` to control the minimum significance for publishing
+a local physical constraint. The deprecated ``min_delta_chi2_for_seed`` name
+is accepted as a compatibility alias. The configuration
+also exposes numerical controls for the finite-source
 fold and Chang-Refsdal lookup calculations.
 
-Residual atoms and seeds
-------------------------
+Residual atoms and local constraints
+------------------------------------
 
 The atom fits are local alternatives evaluated independently on each extracted
 component. They cover positive and negative image perturbations, central
@@ -189,16 +199,11 @@ The atom name and local parameters appear in ``atom_table()``; use
 ``delta_chi2``, ``bic``, ``score``, and warnings together rather than treating
 one label as definitive.
 
-Only successful, sufficiently strong atom fits generate ``SeedCandidate``
-objects. A seed has ``model_type`` (for example ``"2L1S"`` or ``"1L2S"``),
-``params``, a source atom, and an optional close/wide degeneracy tag. It is an
-initialization proposal for a later global fit, not a posterior sample or a
-final classification.
-
-The atom stage performs the more detailed local parameter estimation. It uses
-the refined residual in each extracted component, adds a low-order local
-baseline where appropriate, fits all enabled morphology atoms, and sorts the
-successful fits by BIC. For example:
+The atom stage first fits each extracted component only to classify its broad
+morphology and locate candidate edges or compact extrema. It then cuts separate
+windows around those locators, includes neighboring baseline points, and refits
+the relevant physical asymptotic model in each window. Only this second-stage
+fit contributes rows to ``physical_constraint_dicts()``. For example:
 
 .. code-block:: python
 
@@ -207,40 +212,47 @@ successful fits by BIC. For example:
    anomaly = signal.classify_anomaly(
        PlanetClassConfig(
            estimate_param_errors=True,
-           min_delta_chi2_for_seed=20.0,
+           min_delta_chi2_physical=20.0,
        )
    )
    for segment in anomaly.segment_results:
        for atom in segment.atom_fits:
            print(atom.atom_name, atom.params, atom.param_errors, atom.bic)
+       for local in segment.local_physical_fits:
+           print(local.locator_kind, local.atom_fit.physical_params)
 
 ``AtomFitResult.params`` is intentionally atom-specific. Bump-like atoms may
-report a peak time and width; fold/cusp atoms report contact or crossing times
-and finite-source scales; central and Chang-Refsdal atoms report their local
-geometry parameters. ``param_errors`` is populated only when the local
+report a peak time and width; physical fold atoms report contact or crossing
+times and the identifiable projected source scale. The central atom reports
+``C_chord*q/(s-s^-1)^2 = Delta_t/(4*tE)`` without fixing the unknown chord
+factor. The normalized Chang--Refsdal atom reports fitted ``x_planet``,
+``y_planet``, ``sqrt_q``, and ``rho/sqrt(q)`` together with the deterministic
+transforms ``s=hypot(x_planet,y_planet)``, ``q=sqrt_q**2``, ``alpha``, and
+``rho``. ``param_errors`` is populated only when the local
 covariance estimate is well conditioned. Check ``success``, ``warnings``, and
 ``validity_penalty`` before using any estimate.
 
 The complete template atlas, model equations, exact parameter names, and the
-distinction between direct constraints and approximate physical seeds are in
+distinction between direct constraints and morphology parameters are in
 :doc:`morphology_classification_method`. In particular, do not read
 ``q_curv`` as a mass ratio, a generic ``width/tE`` as ``rho``, or a
 ``shear_quadrupole`` proxy as a measured Chang--Refsdal shear.
 
-To inspect only finite, physically useful quantities without assuming that
-all templates share the same parameter set:
+To inspect only usable physical local estimates and identifiable constraints:
 
 .. code-block:: python
 
-   import numpy as np
+   print(anomaly.physical_constraint_table())
+   print(anomaly.best_physical_fit)
 
-   best = anomaly.best_atom
-   useful = {
-       name: value
-       for name, value in (best.params if best else {}).items()
-       if np.isscalar(value) and np.isfinite(value)
-   }
-   print(best.class_label, useful)
+``physical_constraint_table()`` excludes unsuccessful, boundary, weak, and
+strongly noncompetitive fits within each local window by default. Pass
+``include_invalid=True`` to ``physical_constraint_dicts()`` for an audit table.
+The cutoff relative to the best atom in the same window is controlled by
+``physical_window_max_delta_bic``. ``physical_relation_table()`` combines
+entry and exit measurements only through explicit shared-source relations; it
+does not fit a flexible whole-crossing profile and reinterpret its scales as
+``tstar``.
 
 The default enabled set includes simple positive/negative perturbations,
 central perturbations, fold variants, cusp variants, Chang-Refsdal,
@@ -270,9 +282,10 @@ useful columns are:
    Finite-difference local covariance uncertainty for the matching parameter,
    when the estimate is available.
 
-``anomaly.seed_table()`` has one row per deduplicated physical-model seed. Its
-``params`` are flattened into columns, so it can be exported directly to a
-global-model fitting queue.
+``estimation_role`` / ``physical_valid``
+   Whether the atom is morphology, an identifiable constraint, or a
+   normalized local physical fit, and whether its physical
+   result passed strength and boundary checks.
 
 Interpretation
 --------------

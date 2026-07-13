@@ -152,7 +152,7 @@ class SystematicsArtifactAtom(ResidualAtom):
         bic = float(chi2 + n_params * np.log(max(n_data, 1)))
         spike_times = [float(t[i]) for i in selected]
         spike_z = [float(z[i]) for i in selected]
-        warnings = ["diagnostic artifact atom; no planet seed generated"]
+        warnings = ["diagnostic artifact atom; no planet parameters inferred"]
         if float(features.get("fwhm", 0.0)) <= 1.5 * cadence:
             warnings.append("feature width is close to cadence")
         if len(selected) <= 2:

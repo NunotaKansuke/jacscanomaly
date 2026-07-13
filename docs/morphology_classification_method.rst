@@ -1,11 +1,56 @@
-Morphology Classification and Seed Generation
-==============================================
+Morphology Classification and Local Physical Constraints
+=========================================================
 
 The classification stage has two layers. First,
 ``PlanetSignalClassifier`` summarizes the shape of hard-masked residual
 components. Second, ``PlanetAnomalyClassifier`` fits a collection of local
-residual atoms and converts strong fits into physical-model starting points.
-Neither layer is a global 2L1S/1L2S posterior calculation.
+residual atoms and reports only locally identifiable physical quantities.
+Neither layer is a global 2L1S/1L2S posterior calculation, and the classifier
+does not expand a morphology fit into assumed ``q``, ``s``, or ``alpha`` grids.
+
+Within the atom layer, morphology ranking and physical inference are separate.
+A flexible atom may win the BIC classification without producing any physical
+parameter. Conversely, a physical local atom is exposed as an estimate only
+when it is successful, away from fit boundaries, sufficiently strong, and
+within ``physical_window_max_delta_bic`` of the best atom fitted to the same
+local window.
+
+Local-feature decomposition
+---------------------------
+
+Whole-component atoms are used for morphology ranking and locator generation,
+not as the source of published physical constraints. The classifier extracts
+candidate fold entry/exit times from crossing morphologies, contact times from
+fold-family routes, and compact positive or negative extrema from the component
+catalog. Derivative extrema provide fallback edge locators for complex broad
+signals.
+
+Each locator defines an independent time window containing both signal and
+neighboring baseline points. A straight fold, and only when routed an
+appropriate curved, limb-darkened, or grazing fold, is then fitted in that
+window. Compact isolated extrema can instead receive the normalized
+Chang--Refsdal fit. The output records ``window_id``, ``locator_kind``,
+``locator_time``, and the actual window bounds, so every physical estimate is
+traceable to the data that constrain it.
+
+For two independently valid entry and exit folds,
+
+.. math::
+
+   R_i = \frac{t_{*,i}}{t_E} = \frac{\rho}{|\sin\psi_i|}
+
+is reported for each edge. Assuming the same source radius permits only the
+additional relation
+
+.. math::
+
+   \frac{|\sin\psi_{\rm entry}|}{|\sin\psi_{\rm exit}|}
+   = \frac{R_{\rm exit}}{R_{\rm entry}}.
+
+This relation and the independently measured center-crossing duration are
+returned by ``physical_relation_dicts()``. Neither measurement yields
+``rho`` without an external fold angle, and neither is taken from the six-basis
+``full_caustic_crossing`` morphology model.
 
 PSPL reference frame and residual dictionary
 --------------------------------------------
@@ -136,15 +181,15 @@ into three different categories:
   local residual model;
 * **derived constraints** follow algebraically from those fitted coordinates
   and the refined PSPL ``tE``;
-* **approximate physical seeds** use a local lensing scaling and are starting
-  points, not measurements from a global binary-lens fit.
+* **deterministic reparameterizations** preserve all information in fitted
+  physical coordinates, for example ``q=sqrt_q**2``.
 
 The parameter name reflects this distinction. For example,
-``rho_over_sinalpha`` is the fold constraint
-:math:`t_*/t_E`, while ``characteristic_scale_over_tE`` is only a normalized
-phenomenological width. Likewise, ``q_base`` and ``q_wide_repeating`` are
-approximate seed centers; ``q_curv`` is a local curvature coefficient and is
-never a binary mass ratio.
+``rho_over_abs_sin_psi`` is the fold constraint
+:math:`t_*/t_E`; :math:`\psi` is the angle between the trajectory and the
+local fold tangent, not the global binary-axis angle :math:`\alpha`.
+``characteristic_scale_over_tE`` is only a normalized phenomenological width.
+``q_curv`` is a local curvature coefficient and is never a binary mass ratio.
 
 The currently implemented templates and their principal outputs are:
 
@@ -154,45 +199,45 @@ The currently implemented templates and their principal outputs are:
 
    * - Class label
      - Local morphology
-     - Principal reported constraints and seeds
+     - Principal reported quantities
    * - ``major_image_bump``
      - Positive Lorentzian-like image perturbation
-     - ``t_peak``, ``width``, ``u_anom``, ``q_base``, ``s_wide``,
-       ``s_counterpart``, ``alpha_seed``
+     - ``t_peak``, ``width``
    * - ``major_image_pspl_bump``
      - Positive PSPL-shaped perturbation
-     - ``tE_pert``, ``u0_pert`` and the same image-position seed geometry
+     - ``t_peak``, ``tE_pert``, ``u0_pert``
    * - ``minor_image_dip``
      - Negative Lorentzian-like image perturbation
-     - ``t_peak``, ``width``, ``u_anom``, ``q_base``, ``s_close``,
-       ``s_counterpart``, ``alpha_seed``
+     - ``t_peak``, ``width``
    * - ``minor_image_box_trough``
      - Soft-edged negative trough
-     - ``t_start``, ``t_end``, ``edge_width`` and minor-image seed geometry
+     - ``t_start``, ``t_end``, ``width``, ``edge_width``
    * - ``fold_caustic``
      - Straight uniform-source fold
      - ``tc``, ``t_limb``, ``tstar``, ``entry_exit_sign``,
-       ``rho_over_sinalpha``
+       ``rho_over_abs_sin_psi``
    * - ``limb_darkened_fold_caustic``
      - Straight fold with linear limb darkening
      - Straight-fold quantities plus effective ``Gamma``
    * - ``curved_fold_caustic``
      - Quadratic local fold distance
      - Limb contacts ``t_entry/t_exit``, center crossings ``tc1/tc2``,
-       local ``tstar_entry/exit`` and local ``rho_over_sinalpha_entry/exit``
+       local ``tstar_entry/exit`` and local
+       ``rho_over_abs_sin_psi_entry/exit``
    * - ``grazing_fold_caustic``
      - Limb-only or shallow quadratic fold encounter
      - ``t_stationary``, ``z_stationary``; ``t_closest/z_closest`` for a
        convex trajectory; all real limb and center roots and their local
-       ``tstar`` and ``rho_over_sinalpha``
+       ``tstar`` and ``rho_over_abs_sin_psi``
    * - ``two_fold_caustic``
      - Unresolved pair of fold contributions
      - ``tc1/tc2``, common ``tstar_1/2``, fold-strength ratio, and
        ``contact_separation_over_2tstar``
    * - ``full_caustic_crossing``
      - Entry, interior, and exit across a broad segment
-     - ``t_entry/t_exit``, separate ``tstar_entry/exit``, separate source-size
-       constraints, inside duration, and entry/exit asymmetry
+     - Morphology only: ``t_entry/t_exit``, ``entry_edge_scale``,
+       ``exit_edge_scale``, inside duration, and asymmetry. Its six freely
+       weighted bases do not identify :math:`t_*` or :math:`\rho`.
    * - ``rim_trough_caustic``
      - Phenomenological bump--dip--bump profile
      - Rim/trough times, rim separation and asymmetry, and
@@ -211,23 +256,23 @@ The currently implemented templates and their principal outputs are:
        ``rho_over_sinalpha_cusp_local`` in the lookup normalization
    * - ``chang_refsdal``
      - Local image perturbation lookup
-     - Image branch, local planet coordinates, ``s_local``, ``alpha_local``,
-       ``q_local``, ``rho_over_sqrt_q``, ``rho_local``, and ``gamma_local``
+     - Fixed-normalization flux fit: image branch, planet coordinates, ``s``,
+       ``alpha``, ``q``, ``gamma``, and a grid estimate or bound on
+       ``rho_over_sqrt_q`` and ``rho``
    * - ``central_caustic`` / ``central_double_cusp``
      - Symmetric or double-cusp central morphology
-     - Central times and widths plus the constrained combination
-       ``q_over_s_minus_inv_s_sq``; seeds scan ``s`` and ``alpha``
+     - Central times and the identifiable combination
+       ``C_chord*q/(s-1/s)^2 = Delta_t/(4*tE)``; ``C_chord`` remains unknown
    * - ``second_pspl_like``
      - A second PSPL-shaped residual bump
-     - 1L2S ``q_flux`` and wide-repeating 2L1S alternatives
-       ``q_wide_repeating``, ``s_plus/minus``, ``alpha_plus/minus``
+     - ``t0_2``, ``tE_2``, ``u0_2``, flux ratio, and ``tE_2/tE``
    * - ``shear_quadrupole``
      - Broad even/odd smooth basis
-     - Dimensionless ``gamma`` proxy, ``shear_basis_angle``, and approximate
-       wide/close grids; this is not a measured Chang--Refsdal shear
+     - Dimensionless ``gamma`` proxy and ``shear_basis_angle``; this is not a
+       measured Chang--Refsdal shear and is not converted to ``q`` or ``s``
    * - ``pspl_misfit`` / ``systematics_candidate``
      - Baseline derivatives or sparse artifacts
-     - Diagnostic parameters only; no aggressive planet seed
+     - Diagnostic parameters only; no planet parameters inferred
 
 Every profiled atom also reports its fitted ``amplitude``. Multi-column atoms
 may additionally report ``amplitude_1``, ``amplitude_2``, and later columns.
@@ -323,8 +368,8 @@ finite-source lookup, whose convolution disc has unit source radius, exposes
 ``tstar_cusp_local`` and ``rho_over_sinalpha_cusp_local``; these remain local
 normalization estimates until a global lens map fixes the canonical scaling.
 
-Non-caustic atoms and image-based seeds
----------------------------------------
+Non-caustic morphology atoms
+----------------------------
 
 The positive-bump atom uses a PSPL-like local profile,
 
@@ -333,33 +378,47 @@ The positive-bump atom uses a PSPL-like local profile,
    K_+(t) = A_0\left(\sqrt{b_p^2+
    \left(\frac{t-t_a}{t_p}\right)^2}\right)-1.
 
-At the fitted peak time, its wide major-image seed is centered on
+Its fitted peak time and width describe the residual morphology. Assigning the
+feature to a particular unperturbed image and converting its width into a
+planet Einstein radius introduces topology and crossing-scale assumptions.
+The classifier therefore does not report ``q``, ``s``, or ``alpha`` from this
+atom. The same rule applies to the negative-dip and box-trough atoms.
+
+Normalized local Chang--Refsdal fit
+-----------------------------------
+
+For an isolated perturbation of one PSPL image, the physical-local atom uses
 
 .. math::
 
-   s_0 = r_+[u(t_a)],
-   \qquad \alpha_0 = \arg\boldsymbol u(t_a).
+   \Delta F(t) = F_s A_j(t)
+   \left[R_{\rm CR}\left(
+   \frac{\boldsymbol x_j(t)-\boldsymbol s}{\sqrt q};\gamma,
+   \frac{\rho}{\sqrt q}\right)-1\right],
+   \qquad \gamma=s^{-2}.
 
-The code uses the duration scaling
+The radial/tangential host Jacobian is
+:math:`\operatorname{diag}(1+\gamma,1-\gamma)`. Unlike morphology atoms, this
+model has no free residual-amplitude coefficient: ``Fs``, the unperturbed
+image magnification, and the Chang--Refsdal map set the absolute flux scale.
+Consequently a successful isolated perturbation can constrain local ``s``,
+``q``, and ``alpha`` rather than merely generating their grid.
 
-.. math::
-
-   q_{\rm base} = \left(\frac{w}{t_E}\right)^2
-
-and expands it by ``q_width_factors`` before clipping to ``q_floor`` and
-``q_ceil``. It also emits the close counterpart
-:math:`s\rightarrow1/s,\ \alpha\rightarrow\alpha+\pi`.
-
-For a negative dip, the analogous minor-image seed is
-
-.. math::
-
-   s_0 = r_-[u(t_d)],
-   \qquad \alpha_0 = \arg[-\boldsymbol u(t_d)],
-
-with the same width-to-q scaling and a wide counterpart. The negative-dip and
-box-trough atoms are phenomenological shape fits; the image formulas provide a
-physics-informed seed center rather than a measured planet separation.
+Finite-source maps are evaluated on the configured
+``cr_lookup_source_radius_grid``. An optimum at zero is reported as an upper
+limit, an optimum at the largest radius as a lower limit, and an interior
+optimum with neighboring-grid midpoint bounds. It is never converted into the
+point estimate ``rho=0``. Multiple branch/radius modes are retained in
+``fit_diagnostics['physical_modes']``. Boundary solutions and local CR fits
+that are strongly disfavored by BIC remain auditable atom fits but are not
+published as physical estimates.
+The default ``cr_physical_q_max`` also rejects fitted mass ratios above 0.03,
+where neglected higher-order host-lens terms make the planetary local
+expansion unreliable.
+For the same reason, CR routing is limited to single-peak, dip, weak, or
+compact complex/caustic components whose FWHM is at most
+``cr_max_fwhm_tE_fraction`` times :math:`t_E`. Broad and whole-event residuals
+remain available to morphology atoms but are outside this local expansion.
 
 Central, second-source, and shear relations
 -------------------------------------------
@@ -371,16 +430,19 @@ width has the familiar local scaling
 
    \Delta\xi_c \simeq \frac{4q}{(s-s^{-1})^2}.
 
-The central atom's fitted duration :math:`\Delta t` therefore defines the seed
-relation
+The central atom's fitted duration :math:`\Delta t` constrains the projected
+combination
 
 .. math::
 
-   q(s) \simeq \frac{\Delta t}{4t_E}(s-s^{-1})^2.
+   \frac{\Delta t}{4t_E}
+   = C_{\rm chord}\frac{q}{(s-s^{-1})^2}.
 
-The classifier evaluates this over ``s_central_grid`` and an angle grid rather
-than choosing one separation. Near :math:`s=1`, the approximation becomes
-fragile, so the generated seed carries a resonant-regime warning.
+Here :math:`C_{\rm chord}` contains the unknown trajectory projection, chord,
+and cusp-proximity factors. The classifier retains this factor in the reported
+parameter name and does not set it to one. Consequently it reports neither a
+unique :math:`q` nor a unique :math:`s` from this atom. Near :math:`s=1`, the
+planetary central-caustic approximation itself also becomes unreliable.
 
 The second-PSPL atom is
 
@@ -389,28 +451,16 @@ The second-PSPL atom is
    K_{\rm 2PSPL}(t)=A_0\left(\sqrt{u_{0,2}^2+
    \left(\frac{t-t_{0,2}}{t_{E,2}}\right)^2}\right)-1.
 
-It produces a direct 1L2S seed. It also produces wide repeating 2L1S seeds
-using
-
-.. math::
-
-   q \simeq \left(\frac{t_{E,2}}{t_E}\right)^2,
-   \qquad
-   (\Delta x,\Delta y) \simeq
-   \left(\frac{t_{0,2}-t_0}{t_E},
-   u_0 \pm u_{0,2}\sqrt q\right),
-
-followed by :math:`s=\sqrt{\Delta x^2+\Delta y^2}` and
-:math:`\alpha=\operatorname{atan2}(\Delta y,\Delta x)`. The two signs are a
-trajectory-side degeneracy.
+It reports only the fitted second-PSPL coordinates ``t0_2``, ``tE_2``,
+``u0_2``, the flux ratio, and the deterministic ratio ``tE_2/tE``. Interpreting
+that timescale ratio as a lens mass ratio or a repeating-lens geometry requires
+an additional model assumption and is therefore not performed.
 
 A broad quadrupole-like residual is fitted with generic even and odd smooth
 basis functions. Their coefficients are divided by ``Fs`` to form the
 dimensionless ``gamma`` proxy. It is not an exact lens-equation derivative or
-a measured Chang--Refsdal shear. Approximate wide seeds use
-:math:`q\simeq\gamma s^2`; close seeds use
-:math:`q\simeq\gamma/s^2` on a small separation grid. All such seeds carry a
-diagnostic warning.
+a measured Chang--Refsdal shear, so it is not converted to :math:`q` or
+:math:`s`.
 
 Local atom fitting and ranking
 ------------------------------
@@ -433,22 +483,13 @@ At event level, each component's class probabilities are weighted by its local
 residual power before normalization. These values are relative support among
 the fitted local alternatives, not calibrated posterior probabilities.
 
-From local fits to physical seeds
----------------------------------
+Publishing local physical information
+-------------------------------------
 
-Only successful atoms with ``delta_chi2`` at least
-``min_delta_chi2_for_seed`` emit seeds. The conversion intentionally preserves
-degeneracies:
-
-* major-image bumps produce wide and close counterparts using the PSPL image
-  position, a width-derived mass-ratio grid, and trajectory angle;
-* minor-image dips produce close and wide counterparts;
-* central perturbations scan configured separation and angle grids;
-* fold and cusp fits emit local caustic timing and scale parameters;
-* Chang-Refsdal fits emit local shear/image coordinates;
-* second-PSPL-like fits emit a 1L2S seed and wide repeating 2L1S alternatives.
-
-Seeds are deduplicated by model type, class, degeneracy tag, and rounded finite
-parameters, then ranked by local score. They are intended to initialize a
-subsequent full-light-curve physical fit. Treat warnings, cadence limitations,
-and boundary solutions as reasons to broaden or reject a seed grid.
+Only successful, sufficiently significant, non-boundary local physical fits
+are published. Fold fits report crossing times and
+``rho_over_abs_sin_psi``. Central fits report the chord-factor combination
+above. Valid normalized Chang--Refsdal fits report their native local
+coordinates and deterministic reparameterizations; grid-edge finite-source
+solutions are reported as bounds. Morphology-only bumps, dips, smooth shear
+proxies, and second-PSPL alternatives are not converted into lens parameters.

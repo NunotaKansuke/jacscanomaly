@@ -4,7 +4,6 @@ from .pspl import (
     pspl_flux,
     pspl_magnification_from_u,
     pspl_params_from_result,
-    q_grid_from_width,
     r_major,
     r_minor,
     u_abs,
@@ -20,17 +19,20 @@ from .fold_kernel import (
     fold_gn_integral,
     fold_limb_darkened,
 )
-from .atoms.chang_refsdal import cr_relative_magnification, warm_chang_refsdal_lookup_cache
+from .atoms.chang_refsdal import (
+    chang_refsdal_flux_residual,
+    cr_relative_magnification,
+    warm_chang_refsdal_lookup_cache,
+)
 from .types import (
     AtomFitResult,
+    LocalPhysicalFitResult,
     PlanetAnomalyFitResult,
     PlanetClassConfig,
     PSPLParams,
-    SeedCandidate,
     SegmentData,
     SegmentModelResult,
 )
-from .seeds import central_caustic_seeds
 
 __all__ = [
     "PlanetAnomalyClassifier",
@@ -39,7 +41,7 @@ __all__ = [
     "SegmentModelResult",
     "SegmentData",
     "AtomFitResult",
-    "SeedCandidate",
+    "LocalPhysicalFitResult",
     "PSPLParams",
     "pspl_params_from_result",
     "pspl_flux",
@@ -49,8 +51,6 @@ __all__ = [
     "r_major",
     "r_minor",
     "angle_of",
-    "q_grid_from_width",
-    "central_caustic_seeds",
     "FoldKernelLookup",
     "LimbDarkenedFoldKernelLookup",
     "default_fold_kernel_lookup",
@@ -60,5 +60,6 @@ __all__ = [
     "fold_gn_integral",
     "fold_limb_darkened",
     "cr_relative_magnification",
+    "chang_refsdal_flux_residual",
     "warm_chang_refsdal_lookup_cache",
 ]

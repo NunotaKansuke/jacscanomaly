@@ -84,10 +84,10 @@ Planet residual-atom fitting API
 
 .. automethod:: jacscanomaly.PlanetAnomalyFitResult.atom_table
 
-.. automethod:: jacscanomaly.PlanetAnomalyFitResult.seed_table
+.. automethod:: jacscanomaly.PlanetAnomalyFitResult.physical_constraint_table
 
 ``atom_table()`` has one row per retained local atom fit, including the fitted
 parameters, ``*_err`` uncertainty columns when estimated, ``chi2``,
-``delta_chi2``, BIC, score, validity penalty, and warnings. ``seed_table()``
-contains downstream model initializations. These are local estimates and must
-be validated by a global fit.
+``delta_chi2``, BIC, score, validity penalty, and warnings.
+``physical_constraint_table()`` contains only locally identifiable quantities
+and explicitly retained parameter combinations.

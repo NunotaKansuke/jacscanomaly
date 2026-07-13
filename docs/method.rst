@@ -30,7 +30,7 @@ The following pages document the later stages in detail:
 * :doc:`signal_extraction_method` explains iterative baseline refinement and
   signal masking.
 * :doc:`morphology_classification_method` explains shape classification,
-  residual atoms, BIC weights, and seed generation.
+  residual atoms, BIC weights, and local physical constraints.
 
 Detection statistic
 -------------------
@@ -80,7 +80,7 @@ window:
 
 It is useful for locating and ranking a residual feature; it is not itself a
 physical planet parameter. Use the planet-signal workflow to refine a baseline
-and generate physical-model seeds after detection.
+and measure local physical constraints after detection.
 
 Candidate score
 ---------------
@@ -170,9 +170,8 @@ What the standard scan does not do
 
 The standard scan does not choose a 2L1S or 1L2S model, fit caustic geometry,
 or estimate a planet mass ratio. It reports local residual candidates.
-:doc:`planet_classification` adds local morphology fits and physical-model
-seeds, but final model comparison must still be performed on the full light
-curve.
+:doc:`planet_classification` adds local morphology fits and only the physical
+quantities or combinations constrained by those local fits.
 
 Method details
 --------------

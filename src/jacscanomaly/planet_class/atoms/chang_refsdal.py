@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import lru_cache
 
 import numpy as np
 
 from .base import ResidualAtom
-from ..pspl import u_abs, u_vec
+from ..pspl import pspl_magnification_from_u, u_abs, u_vec
 from ..types import AtomFitResult, SegmentData
 
 
@@ -24,6 +25,7 @@ def pspl_image_position(time: np.ndarray, pspl, *, branch: str) -> tuple[np.ndar
 class ChangRefsdalPerturbationAtom(ResidualAtom):
     atom_name = "chang_refsdal_lookup_perturbation"
     class_label = "chang_refsdal"
+    estimation_role = "physical_local"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -33,6 +35,7 @@ class ChangRefsdalPerturbationAtom(ResidualAtom):
         width_t = max(float(features.get("fwhm", 0.0)), float(features.get("cadence", 0.0)), 1e-6)
         sqrt_q0 = max(width_t / max(segment.pspl.tE, 1e-12), 2e-3)
         best: AtomFitResult | None = None
+        candidates: list[AtomFitResult] = []
         sqrt_q_factors = tuple(float(v) for v in self.config.cr_lookup_sqrt_q_factors)
         if not sqrt_q_factors:
             sqrt_q_factors = (1.0,)
@@ -42,10 +45,26 @@ class ChangRefsdalPerturbationAtom(ResidualAtom):
         for branch in ("major", "minor"):
             x, y = pspl_image_position(t, segment.pspl, branch=branch)
             x_peak, y_peak = pspl_image_position(np.asarray([t_peak]), segment.pspl, branch=branch)
-            guesses = [
-                np.asarray([float(x_peak[0]), float(y_peak[0]), np.log(max(factor * sqrt_q0, 1e-4))], dtype=float)
-                for factor in sqrt_q_factors
-            ]
+            candidate_times = {
+                float(np.clip(value, t[0], t[-1]))
+                for value in (
+                    t_peak,
+                    float(features.get("t_positive_peak", t_peak)),
+                    float(features.get("t_negative_peak", t_peak)),
+                    t_peak - 0.5 * width_t,
+                    t_peak + 0.5 * width_t,
+                )
+            }
+            guesses = []
+            for candidate_time in sorted(candidate_times):
+                x0, y0 = pspl_image_position(np.asarray([candidate_time]), segment.pspl, branch=branch)
+                guesses.extend(
+                    np.asarray(
+                        [float(x0[0]), float(y0[0]), np.log(max(factor * sqrt_q0, np.sqrt(self.config.q_floor)))],
+                        dtype=float,
+                    )
+                    for factor in sqrt_q_factors
+                )
             span = max(float(np.max(np.hypot(x - x_peak[0], y - y_peak[0]))), sqrt_q0, 0.1)
             for source_radius_hat in source_radius_grid:
                 fit = self._fit_profiled(
@@ -55,7 +74,10 @@ class ChangRefsdalPerturbationAtom(ResidualAtom):
                     bounds=[
                         (float(x_peak[0]) - 2.0 * span, float(x_peak[0]) + 2.0 * span),
                         (float(y_peak[0]) - 2.0 * span, float(y_peak[0]) + 2.0 * span),
-                        (np.log(1e-4), np.log(max(5.0 * span, 1e-3))),
+                        (
+                            0.5 * np.log(max(float(self.config.q_floor), 1e-12)),
+                            0.5 * np.log(max(float(self.config.q_ceil), float(self.config.q_floor) * 1.0001)),
+                        ),
                     ],
                     shape_from_theta=lambda theta, time, br=branch, rho_hat=source_radius_hat: self._shape(
                         theta,
@@ -64,30 +86,128 @@ class ChangRefsdalPerturbationAtom(ResidualAtom):
                         branch=br,
                         source_radius_hat=rho_hat,
                     ),
-                    params_from_theta=lambda theta, br=branch, rho_hat=source_radius_hat: {
-                        "image_branch": 1.0 if br == "major" else -1.0,
-                        "x_planet": float(theta[0]),
-                        "y_planet": float(theta[1]),
-                        "s_local": float(np.hypot(theta[0], theta[1])),
-                        "alpha_local": float(np.arctan2(theta[1], theta[0])),
-                        "sqrt_q_local": float(np.exp(theta[2])),
-                        "q_local": float(np.exp(2.0 * theta[2])),
-                        "image_width": float(np.exp(theta[2])),
-                        "source_radius_hat": float(max(rho_hat, 0.0)),
-                        "rho_over_sqrt_q": float(max(rho_hat, 0.0)),
-                        "rho_local": float(max(rho_hat, 0.0) * np.exp(theta[2])),
-                        "gamma_local": float(self._local_shear(theta[0], theta[1])),
-                        "lookup_grid": float(self.config.cr_lookup_grid_size),
-                        "lookup_gamma_step": float(self.config.cr_lookup_gamma_step),
-                    },
+                    params_from_theta=lambda theta, br=branch, rho_hat=source_radius_hat: self._params(
+                        theta, segment, branch=br, source_radius_hat=rho_hat
+                    ),
                     expected_amplitude_sign=None,
-                    extra_warnings=("Chang-Refsdal finite-source lookup; local q and rho are approximate",),
+                    extra_warnings=("physical local Chang-Refsdal approximation; validity requires an isolated planetary perturbation",),
+                    fixed_physical_model=True,
                 )
+                candidates.append(fit)
                 if best is None or fit.bic < best.bic:
                     best = fit
         if best is None:
             raise RuntimeError("Chang-Refsdal fit did not produce any candidate.")
-        return best
+        physical = {
+            key: float(best.params[key])
+            for key in (
+                "image_branch", "x_planet", "y_planet", "sqrt_q",
+                "s", "q", "alpha", "rho", "rho_over_sqrt_q", "gamma",
+            )
+            if key in best.params and np.isfinite(best.params[key])
+        }
+        rho_values = sorted(set(source_radius_grid))
+        rho_hat = float(best.params.get("rho_over_sqrt_q", 0.0))
+        sqrt_q = float(best.params.get("sqrt_q", np.nan))
+        rho_index = min(range(len(rho_values)), key=lambda i: abs(rho_values[i] - rho_hat))
+        finite_source_relation: str
+        if rho_index == 0 and rho_values[rho_index] == 0.0:
+            upper_hat = 0.5 * rho_values[1] if len(rho_values) > 1 else 0.0
+            physical.pop("rho_over_sqrt_q", None)
+            physical.pop("rho", None)
+            if upper_hat > 0.0:
+                physical["rho_over_sqrt_q_upper"] = upper_hat
+                physical["rho_upper"] = upper_hat * sqrt_q
+                finite_source_relation = "finite source is unresolved on the lookup grid; reported rho quantities are upper limits"
+            else:
+                finite_source_relation = "only a point-source lookup was evaluated; rho is unconstrained"
+        elif rho_index == len(rho_values) - 1:
+            lower_hat = 0.5 * (rho_values[rho_index - 1] + rho_hat) if rho_index else rho_hat
+            physical.pop("rho_over_sqrt_q", None)
+            physical.pop("rho", None)
+            physical["rho_over_sqrt_q_lower"] = lower_hat
+            physical["rho_lower"] = lower_hat * sqrt_q
+            finite_source_relation = "finite-source optimum is at the largest lookup radius; reported rho quantities are lower limits"
+        else:
+            low_hat = 0.5 * (rho_values[rho_index - 1] + rho_hat)
+            high_hat = 0.5 * (rho_hat + rho_values[rho_index + 1])
+            physical["rho_over_sqrt_q_low"] = low_hat
+            physical["rho_over_sqrt_q_high"] = high_hat
+            physical["rho_low"] = low_hat * sqrt_q
+            physical["rho_high"] = high_hat * sqrt_q
+            finite_source_relation = "rho/sqrt(q) is grid-resolved; neighboring lookup midpoints give its resolution interval"
+        finite_candidates = sorted((fit for fit in candidates if np.isfinite(fit.bic)), key=lambda fit: fit.bic)
+        modes = []
+        for fit in finite_candidates[:8]:
+            mode = {
+                key: float(fit.params[key])
+                for key in (
+                    "image_branch", "x_planet", "y_planet", "sqrt_q",
+                    "s", "q", "alpha", "rho", "rho_over_sqrt_q", "gamma",
+                )
+                if key in fit.params and np.isfinite(fit.params[key])
+            }
+            mode["bic"] = float(fit.bic)
+            mode["delta_bic"] = float(fit.bic - best.bic)
+            modes.append(mode)
+        diagnostics = dict(best.fit_diagnostics or {})
+        diagnostics["physical_modes"] = modes
+        invalid_reasons = [
+            reason for reason in best.physical_invalid_reasons
+            if reason != "no identifiable physical quantity"
+        ]
+        if not best.success:
+            invalid_reasons.append("fit was not successful")
+        if best.delta_chi2 < self.config.physical_delta_chi2_threshold:
+            invalid_reasons.append("insufficient delta_chi2")
+        if "optimizer parameter is near bound" in best.warnings:
+            invalid_reasons.append("physical solution is on a fit boundary")
+        if float(best.params.get("q", np.inf)) > float(self.config.cr_physical_q_max):
+            invalid_reasons.append("q is too large for the configured planetary Chang-Refsdal approximation")
+        invalid_reasons = list(dict.fromkeys(invalid_reasons))
+        return replace(
+            best,
+            estimation_role="physical_local",
+            physical_params=physical,
+            constraint_relations=(
+                "x_planet and y_planet are native Chang-Refsdal fit coordinates in the PSPL lens frame",
+                "q=sqrt_q^2 and s, alpha are deterministic coordinate transforms, not grid assumptions",
+                finite_source_relation,
+            ),
+            fit_diagnostics=diagnostics,
+            physical_valid=not invalid_reasons,
+            physical_invalid_reasons=tuple(invalid_reasons),
+        )
+
+    def _params(
+        self,
+        theta: np.ndarray,
+        segment: SegmentData,
+        *,
+        branch: str,
+        source_radius_hat: float,
+    ) -> dict[str, float]:
+        x_planet, y_planet = float(theta[0]), float(theta[1])
+        sqrt_q = float(np.exp(theta[2]))
+        s = float(np.hypot(x_planet, y_planet))
+        binary_axis_angle = float(np.arctan2(y_planet, x_planet))
+        alpha = float(np.arctan2(np.sin(-binary_axis_angle), np.cos(-binary_axis_angle)))
+        rho_hat = float(max(source_radius_hat, 0.0))
+        return {
+            "image_branch": 1.0 if branch == "major" else -1.0,
+            "x_planet": x_planet,
+            "y_planet": y_planet,
+            "s": s,
+            "alpha": alpha,
+            "binary_axis_angle": binary_axis_angle,
+            "q": sqrt_q * sqrt_q,
+            "sqrt_q": sqrt_q,
+            "rho_over_sqrt_q": rho_hat,
+            "rho": rho_hat * sqrt_q,
+            "gamma": float(self._local_shear(x_planet, y_planet)),
+            "lookup_grid": float(self.config.cr_lookup_grid_size),
+            "lookup_gamma_step": float(self.config.cr_lookup_gamma_step),
+        }
 
     def _shape(
         self,
@@ -98,28 +218,59 @@ class ChangRefsdalPerturbationAtom(ResidualAtom):
         branch: str,
         source_radius_hat: float,
     ) -> np.ndarray:
-        x, y = pspl_image_position(time, segment.pspl, branch=branch)
-        sqrt_q = max(float(np.exp(theta[2])), 1e-8)
-        gamma = ChangRefsdalPerturbationAtom._local_shear(theta[0], theta[1])
-        xi = (x - theta[0]) / sqrt_q
-        eta = (y - theta[1]) / sqrt_q
-        return (
-            cr_relative_magnification(
-                xi,
-                eta,
-                gamma,
-                source_radius_hat=source_radius_hat,
-                grid_size=int(self.config.cr_lookup_grid_size),
-                extent=float(self.config.cr_lookup_extent),
-                gamma_step=float(self.config.cr_lookup_gamma_step),
-            )
-            - 1.0
+        return chang_refsdal_flux_residual(
+            time,
+            segment.pspl,
+            x_planet=float(theta[0]),
+            y_planet=float(theta[1]),
+            q=float(np.exp(2.0 * theta[2])),
+            rho_over_sqrt_q=float(source_radius_hat),
+            branch=branch,
+            grid_size=int(self.config.cr_lookup_grid_size),
+            extent=float(self.config.cr_lookup_extent),
+            gamma_step=float(self.config.cr_lookup_gamma_step),
         )
 
     @staticmethod
     def _local_shear(x: float, y: float) -> float:
         r = max(float(np.hypot(x, y)), 1e-6)
         return 1.0 / (r * r)
+
+
+def chang_refsdal_flux_residual(
+    time: np.ndarray,
+    pspl,
+    *,
+    x_planet: float,
+    y_planet: float,
+    q: float,
+    rho_over_sqrt_q: float = 0.0,
+    branch: str,
+    grid_size: int = 192,
+    extent: float = 4.5,
+    gamma_step: float = 0.025,
+) -> np.ndarray:
+    """Physical local flux perturbation of one PSPL image in the CR limit."""
+    x, y = pspl_image_position(np.asarray(time, dtype=float), pspl, branch=branch)
+    sqrt_q = np.sqrt(max(float(q), 1e-16))
+    radius = max(float(np.hypot(x_planet, y_planet)), 1e-12)
+    erx, ery = float(x_planet) / radius, float(y_planet) / radius
+    etx, ety = -ery, erx
+    dx, dy = x - float(x_planet), y - float(y_planet)
+    xi = (dx * erx + dy * ery) / sqrt_q
+    eta = (dx * etx + dy * ety) / sqrt_q
+    relative = cr_relative_magnification(
+        xi,
+        eta,
+        1.0 / (radius * radius),
+        source_radius_hat=float(rho_over_sqrt_q),
+        grid_size=int(grid_size),
+        extent=float(extent),
+        gamma_step=float(gamma_step),
+    )
+    total = pspl_magnification_from_u(u_abs(time, pspl))
+    image_magnification = 0.5 * (total + 1.0) if branch == "major" else 0.5 * (total - 1.0)
+    return float(pspl.Fs) * image_magnification * (relative - 1.0)
 
 
 _CR_GRID_SIZE = 192
@@ -143,7 +294,7 @@ def cr_relative_magnification(
 
     The map is normalized by its outer source-plane density, so values tend to
     one away from the local caustic.  This is intentionally a local morphology
-    lookup for seed generation, not a replacement for a full binary-lens fit.
+    lookup for local constraint measurement, not a full binary-lens fit.
     """
     x = np.asarray(xi, dtype=float)
     y = np.asarray(eta, dtype=float)
@@ -172,7 +323,7 @@ def warm_chang_refsdal_lookup_cache(
 
 
 def _gamma_key(gamma: float, gamma_step: float = _CR_GAMMA_STEP) -> float:
-    value = float(np.clip(abs(float(gamma)), 0.0, 0.95))
+    value = float(np.clip(abs(float(gamma)), 0.0, 4.0))
     step = max(float(gamma_step), 1e-6)
     return round(value / step) * step
 
@@ -195,10 +346,10 @@ def _cr_map(gamma: float, source_radius_hat: float, grid_size: int, extent: floa
     finite = r2 > 1e-8
 
     # Chang-Refsdal equation in local coordinates:
-    # y = x - x/|x|^2 - Gamma * (x, -y).  The sign convention only rotates the
-    # shear axes; the lookup is used as a morphology family.
-    sx = xx - np.where(finite, xx / r2, 0.0) - gamma * xx
-    sy = yy - np.where(finite, yy / r2, 0.0) + gamma * yy
+    # In radial/tangential coordinates around the planet, expansion of the
+    # host deflection gives diag(1+gamma, 1-gamma).
+    sx = xx - np.where(finite, xx / r2, 0.0) + gamma * xx
+    sy = yy - np.where(finite, yy / r2, 0.0) - gamma * yy
     good = finite & np.isfinite(sx) & np.isfinite(sy)
     hist, _, _ = np.histogram2d(
         sy[good].ravel(),

@@ -44,11 +44,11 @@ from .planet_signal import (
 )
 from .planet_class import (
     AtomFitResult,
+    LocalPhysicalFitResult,
     PlanetAnomalyClassifier,
     PlanetAnomalyFitResult,
     PlanetClassConfig,
     PSPLParams,
-    SeedCandidate,
     SegmentData,
     SegmentModelResult,
 )
@@ -90,11 +90,11 @@ __all__ = [
     "PlanetSignalPeak",
     "PlanetSignalResult",
     "AtomFitResult",
+    "LocalPhysicalFitResult",
     "PlanetAnomalyClassifier",
     "PlanetAnomalyFitResult",
     "PlanetClassConfig",
     "PSPLParams",
-    "SeedCandidate",
     "SegmentData",
     "SegmentModelResult",
 ]

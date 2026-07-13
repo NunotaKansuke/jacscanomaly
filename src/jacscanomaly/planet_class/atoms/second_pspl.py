@@ -12,6 +12,7 @@ from ..types import AtomFitResult, SegmentData
 class SecondPSPLAtom(ResidualAtom):
     atom_name = "second_pspl_like_residual"
     class_label = "second_pspl_like"
+    estimation_role = "morphology"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -52,27 +53,15 @@ class SecondPSPLAtom(ResidualAtom):
             expected_amplitude_sign=1.0,
         )
         params = dict(fit.params)
-        t0_2 = float(params["t0_2"])
         tE_2 = float(params["tE_2"])
-        u0_2 = float(params["u0_2"])
         ratio = tE_2 / max(float(segment.pspl.tE), 1e-12)
-        q_wide = ratio * ratio
-        dx = (t0_2 - float(segment.pspl.t0)) / max(float(segment.pspl.tE), 1e-12)
-        dy_offset = u0_2 * np.sqrt(max(q_wide, 0.0))
         params.update(
             {
                 "Fs_2_over_Fs_1": float(params.get("amplitude", np.nan)) / max(abs(float(segment.pspl.Fs)), 1e-12),
                 "q_flux": float(params.get("amplitude", np.nan)) / max(abs(float(segment.pspl.Fs)), 1e-12),
                 "tE_ratio": ratio,
-                "q_wide_repeating": q_wide,
-                "separation_x": dx,
             }
         )
-        for suffix, sign in (("plus", 1.0), ("minus", -1.0)):
-            dy = float(segment.pspl.u0) + sign * dy_offset
-            params[f"separation_y_{suffix}"] = dy
-            params[f"s_{suffix}"] = float(np.hypot(dx, dy))
-            params[f"alpha_{suffix}"] = float(np.arctan2(dy, dx))
         errors = dict(fit.param_errors or {})
         if "amplitude" in errors:
             errors["Fs_2_over_Fs_1"] = errors["amplitude"] / max(abs(float(segment.pspl.Fs)), 1e-12)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from .base import ResidualAtom
@@ -9,6 +11,7 @@ from ..types import AtomFitResult, SegmentData
 class CentralPerturbationAtom(ResidualAtom):
     atom_name = "central_symmetric_perturbation"
     class_label = "central_caustic"
+    estimation_role = "morphology"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -29,7 +32,7 @@ class CentralPerturbationAtom(ResidualAtom):
             np.asarray([float(features.get("t_peak", center0)), np.log(width)], dtype=float),
         ]
 
-        return self._fit_profiled(
+        fit = self._fit_profiled(
             segment=segment,
             features=features,
             theta0_list=guesses,
@@ -40,12 +43,13 @@ class CentralPerturbationAtom(ResidualAtom):
                 "width": float(np.exp(theta[1])),
                 "duration": float(max(2.0 * np.exp(theta[1]), features.get("duration", 0.0))),
                 "offset_from_t0": float(theta[0] - t0),
-                "central_caustic_width_proxy": float(max(2.0 * np.exp(theta[1]), features.get("duration", 0.0)) / max(segment.pspl.tE, 1e-12)),
-                "q_over_s_minus_inv_s_sq": float(max(2.0 * np.exp(theta[1]), features.get("duration", 0.0)) / (4.0 * max(segment.pspl.tE, 1e-12))),
+                "central_projected_width_over_tE": float(2.0 * np.exp(theta[1]) / max(segment.pspl.tE, 1e-12)),
+                "chord_factor_times_q_over_s_minus_inv_s_sq": float(np.exp(theta[1]) / (2.0 * max(segment.pspl.tE, 1e-12))),
             },
             expected_amplitude_sign=None,
             extra_warnings=self._warnings(segment, features),
         )
+        return _as_projected_central_constraint(fit)
 
     def _warnings(self, segment: SegmentData, features: dict[str, float]) -> tuple[str, ...]:
         window = float(self.config.central_window_factor) * max(
@@ -62,6 +66,7 @@ class CentralPerturbationAtom(ResidualAtom):
 class CentralDoubleCuspAtom(ResidualAtom):
     atom_name = "central_double_cusp"
     class_label = "central_double_cusp"
+    estimation_role = "morphology"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -100,7 +105,7 @@ class CentralDoubleCuspAtom(ResidualAtom):
             middle = lorentz(time, center, mid_width)
             return left + right_ratio * right - trough_ratio * middle
 
-        return self._fit_profiled(
+        fit = self._fit_profiled(
             segment=segment,
             features=features,
             theta0_list=guesses,
@@ -125,12 +130,13 @@ class CentralDoubleCuspAtom(ResidualAtom):
                 "trough_ratio": float(np.exp(theta[5])),
                 "duration": float(max(np.exp(theta[1]), 2.0 * np.exp(theta[3]))),
                 "offset_from_t0": float(theta[0] - t0),
-                "central_caustic_width_proxy": float(max(np.exp(theta[1]), 2.0 * np.exp(theta[3])) / max(segment.pspl.tE, 1e-12)),
-                "q_over_s_minus_inv_s_sq": float(max(np.exp(theta[1]), 2.0 * np.exp(theta[3])) / (4.0 * max(segment.pspl.tE, 1e-12))),
+                "central_projected_width_over_tE": float(max(np.exp(theta[1]), 2.0 * np.exp(theta[3])) / max(segment.pspl.tE, 1e-12)),
+                "chord_factor_times_q_over_s_minus_inv_s_sq": float(max(np.exp(theta[1]), 2.0 * np.exp(theta[3])) / (4.0 * max(segment.pspl.tE, 1e-12))),
             },
             expected_amplitude_sign=1.0,
             extra_warnings=self._warnings(segment, features),
         )
+        return _as_projected_central_constraint(fit)
 
     def _warnings(self, segment: SegmentData, features: dict[str, float]) -> tuple[str, ...]:
         window = float(self.config.central_window_factor) * max(
@@ -142,3 +148,33 @@ class CentralDoubleCuspAtom(ResidualAtom):
         if distance > window:
             return ("feature is outside the configured central window",)
         return ()
+
+
+def _as_projected_central_constraint(fit: AtomFitResult) -> AtomFitResult:
+    keys = (
+        "t_center",
+        "t_cusp_1",
+        "t_cusp_2",
+        "central_projected_width_over_tE",
+        "chord_factor_times_q_over_s_minus_inv_s_sq",
+    )
+    physical = {
+        key: float(fit.params[key])
+        for key in keys
+        if key in fit.params and np.isfinite(fit.params[key])
+    }
+    invalid = []
+    if not fit.success:
+        invalid.append("fit was not successful")
+    if "optimizer parameter is near bound" in fit.warnings:
+        invalid.append("physical solution is on a fit boundary")
+    return replace(
+        fit,
+        estimation_role="physical_constraint",
+        physical_params=physical,
+        constraint_relations=(
+            "Delta_t/(4 tE) = C_chord q/(s-s^-1)^2; the unknown chord factor is retained and not set to one",
+        ),
+        physical_valid=not invalid,
+        physical_invalid_reasons=tuple(invalid),
+    )

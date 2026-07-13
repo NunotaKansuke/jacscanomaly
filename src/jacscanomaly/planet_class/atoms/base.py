@@ -20,6 +20,7 @@ class ResidualAtom:
 
     atom_name: str = "base"
     class_label: str = "diagnostic"
+    estimation_role: str = "morphology"
 
     def __init__(self, config: PlanetClassConfig):
         self.config = config
@@ -49,6 +50,7 @@ class ResidualAtom:
         params_from_theta,
         expected_amplitude_sign: Optional[float] = None,
         extra_warnings: tuple[str, ...] = (),
+        fixed_physical_model: bool = False,
     ) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
         y = np.asarray(segment.residual, dtype=float)
@@ -63,11 +65,21 @@ class ResidualAtom:
             shape = np.asarray(shape_from_theta(theta, t), dtype=float)
             if shape.ndim == 1:
                 shape = shape[:, None]
+            if fixed_physical_model:
+                if shape.shape[1] != 1:
+                    raise ValueError("A fixed physical model must have exactly one column.")
+                return poly
             return np.column_stack((poly, shape))
 
         def evaluate(theta: np.ndarray) -> tuple[float, np.ndarray, bool, np.ndarray]:
             design = design_for(theta)
-            coeff, _model, chi2, ok = weighted_linear_fit(design, y, ferr)
+            if fixed_physical_model:
+                physical = np.asarray(shape_from_theta(theta, t), dtype=float).reshape(-1)
+                coeff, nuisance, _chi2, ok = weighted_linear_fit(design, y - physical, ferr)
+                model = physical + nuisance
+                chi2 = float(np.sum(((y - model) / ferr) ** 2)) if ok else float("inf")
+            else:
+                coeff, _model, chi2, ok = weighted_linear_fit(design, y, ferr)
             return float(chi2), coeff, bool(ok), design
 
         def objective(theta: np.ndarray) -> float:
@@ -109,7 +121,7 @@ class ResidualAtom:
         chi2, theta, coeff, success, design = best
         params = dict(params_from_theta(theta))
         n_poly = poly.shape[1]
-        atom_coeff = coeff[n_poly:] if coeff.size > n_poly else np.asarray([], dtype=float)
+        atom_coeff = coeff[n_poly:] if not fixed_physical_model and coeff.size > n_poly else np.asarray([], dtype=float)
         if atom_coeff.size:
             params["amplitude"] = float(atom_coeff[0])
             for i, value in enumerate(atom_coeff, start=1):
@@ -145,6 +157,7 @@ class ResidualAtom:
                 theta=theta,
                 coeff=coeff,
                 shape_from_theta=shape_from_theta,
+                fixed_physical_model=fixed_physical_model,
             )
         )
         validity_penalty, validity_warnings = self._validity_penalty(
@@ -156,6 +169,92 @@ class ResidualAtom:
         )
         warnings.extend(validity_warnings)
         score = float(delta_chi2 - n_params * np.log(max(n_data, 1)) - validity_penalty)
+        physical_keys = {
+            "tc", "t_limb", "t_entry", "t_exit", "tc1", "tc2",
+            "tstar", "tstar_1", "tstar_2", "tstar_entry", "tstar_exit",
+            "rho_over_sinalpha", "rho_over_sinalpha_1", "rho_over_sinalpha_2",
+            "rho_over_sinalpha_entry", "rho_over_sinalpha_exit",
+            "rho_over_sinalpha_contact_1", "rho_over_sinalpha_contact_2",
+            "Gamma", "caustic_inside_duration", "contact_duration",
+            "t_closest", "z_closest", "t_stationary", "z_stationary", "z0",
+            "entry_exit_sign", "entry_exit_sign_1", "entry_exit_sign_2",
+            "fold_ratio", "contact_separation_over_2tstar",
+        }
+        physical_prefixes = (
+            "t_contact_", "t_center_crossing_", "tstar_contact_",
+            "tstar_center_crossing_", "rho_over_sinalpha_contact_",
+            "rho_over_sinalpha_center_crossing_",
+        )
+        physical_params = (
+            {
+                key: float(value)
+                for key, value in params.items()
+                if (key in physical_keys or key.startswith(physical_prefixes))
+                and np.isscalar(value) and np.isfinite(float(value))
+            }
+            if self.estimation_role == "physical_constraint"
+            else {}
+        )
+        if self.estimation_role == "physical_constraint" and physical_params:
+            lo_time, hi_time = float(np.min(t)), float(np.max(t))
+
+            def drop_root(root_key: str, *dependent_keys: str) -> None:
+                value = physical_params.get(root_key)
+                if value is None or lo_time <= value <= hi_time:
+                    return
+                physical_params.pop(root_key, None)
+                for dependent_key in dependent_keys:
+                    physical_params.pop(dependent_key, None)
+
+            drop_root("t_entry", "tstar_entry", "rho_over_sinalpha_entry")
+            drop_root("t_exit", "tstar_exit", "rho_over_sinalpha_exit")
+            if "t_entry" not in physical_params or "t_exit" not in physical_params:
+                physical_params.pop("caustic_inside_duration", None)
+            drop_root("tc1", "tstar_1", "rho_over_sinalpha_1")
+            drop_root("tc2", "tstar_2", "rho_over_sinalpha_2")
+            for index in (1, 2):
+                drop_root(
+                    f"t_contact_{index}",
+                    f"tstar_contact_{index}",
+                    f"rho_over_sinalpha_contact_{index}",
+                )
+                drop_root(
+                    f"t_center_crossing_{index}",
+                    f"tstar_center_crossing_{index}",
+                    f"rho_over_sinalpha_center_crossing_{index}",
+                )
+            if "t_contact_1" not in physical_params or "t_contact_2" not in physical_params:
+                physical_params.pop("contact_duration", None)
+            drop_root("t_stationary", "z_stationary")
+            drop_root("t_closest", "z_closest")
+        if self.estimation_role == "physical_constraint":
+            for key, value in tuple(physical_params.items()):
+                if key.startswith("rho_over_sinalpha"):
+                    suffix = key[len("rho_over_sinalpha") :]
+                    canonical = f"rho_over_abs_sin_psi{suffix}"
+                    params[canonical] = value
+                    physical_params[canonical] = value
+                    if param_errors and key in param_errors:
+                        param_errors[canonical] = param_errors[key]
+        constraint_relations: tuple[str, ...] = ()
+        if any(key.startswith("rho_over_abs_sin_psi") for key in physical_params):
+            constraint_relations += (
+                "fold data constrain rho/abs(sin(psi)), where psi is the local trajectory-fold angle; this is not the binary-axis alpha",
+            )
+        invalid_reasons: list[str] = []
+        if self.estimation_role in {"physical_local", "physical_constraint"}:
+            if not success:
+                invalid_reasons.append("fit was not successful")
+            if delta_chi2 < self.config.physical_delta_chi2_threshold:
+                invalid_reasons.append("insufficient delta_chi2")
+            if not physical_params:
+                invalid_reasons.append("no identifiable physical quantity")
+            if "optimizer parameter is near bound" in warnings:
+                invalid_reasons.append("physical solution is on a fit boundary")
+        physical_valid = bool(
+            self.estimation_role in {"physical_local", "physical_constraint"}
+            and not invalid_reasons
+        )
         return AtomFitResult(
             atom_name=self.atom_name,
             class_label=self.class_label,
@@ -173,6 +272,11 @@ class ResidualAtom:
             warnings=tuple(warnings),
             validity_penalty=float(validity_penalty),
             fit_diagnostics=diagnostics,
+            estimation_role=self.estimation_role,
+            physical_params=physical_params,
+            constraint_relations=constraint_relations,
+            physical_valid=physical_valid,
+            physical_invalid_reasons=tuple(invalid_reasons),
         )
 
     def _display_model_diagnostics(
@@ -183,6 +287,7 @@ class ResidualAtom:
         theta: np.ndarray,
         coeff: np.ndarray,
         shape_from_theta,
+        fixed_physical_model: bool = False,
     ) -> dict[str, object]:
         t = np.asarray(segment.time, dtype=float)
         if t.size == 0 or coeff.size == 0:
@@ -194,12 +299,16 @@ class ResidualAtom:
         shape = np.asarray(shape_from_theta(theta, td), dtype=float)
         if shape.ndim == 1:
             shape = shape[:, None]
-        design = np.column_stack((poly, shape))
+        design = poly if fixed_physical_model else np.column_stack((poly, shape))
         if design.shape[1] != coeff.size:
             return {}
-        model = design @ coeff
-        atom_coeff = coeff[poly.shape[1] :] if coeff.size > poly.shape[1] else np.asarray([], dtype=float)
-        atom_model = shape @ atom_coeff if atom_coeff.size else np.zeros_like(td)
+        if fixed_physical_model:
+            atom_model = shape[:, 0]
+            model = design @ coeff + atom_model
+        else:
+            model = design @ coeff
+            atom_coeff = coeff[poly.shape[1] :] if coeff.size > poly.shape[1] else np.asarray([], dtype=float)
+            atom_model = shape @ atom_coeff if atom_coeff.size else np.zeros_like(td)
         if not (np.all(np.isfinite(td)) and np.all(np.isfinite(model)) and np.all(np.isfinite(atom_model))):
             return {}
         return {

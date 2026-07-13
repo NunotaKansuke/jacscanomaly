@@ -11,7 +11,27 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 ### Added
 - Documented the complete residual-template atlas, including each atom's
   fitted coordinates, analytically derived timing and finite-source
-  constraints, approximate physical seeds, and interpretation limits.
+  constraints and interpretation limits.
+- Added explicit morphology, identifiable-constraint, and normalized
+  local-physical roles to anomaly atom results.
+- Added a fixed-flux-normalization Chang--Refsdal fit with local ``s``, ``q``,
+  ``alpha``, finite-source bounds, retained modes, and physical validity gates.
+- Added explicit local-feature windows for fold edges and compact image
+  perturbations, with auditable local-fit rows and shared-source entry/exit
+  relations.
+
+### Changed
+- Removed assumed ``q``, ``s``, and ``alpha`` seed grids derived from generic
+  bump widths, signs, smooth shear proxies, and second-PSPL reinterpretations.
+  Central fits now retain ``C_chord`` in
+  ``C_chord*q/(s-s^-1)^2`` instead of fixing a projected chord. Fold outputs identify ``rho/abs(sin(psi))`` and
+  distinguish the local fold angle from binary-axis ``alpha``.
+- Chang--Refsdal fits retain native ``x_planet``, ``y_planet``, ``sqrt_q``,
+  and ``rho/sqrt(q)`` while exposing only deterministic transforms such as
+  ``q=sqrt_q**2`` and ``s=hypot(x_planet,y_planet)``.
+- Whole-component atoms now drive morphology and feature routing only;
+  published fold and Chang--Refsdal constraints come from independent local
+  refits that include neighboring baseline data.
 
 ---
 

@@ -3,13 +3,13 @@ from __future__ import annotations
 import numpy as np
 
 from .base import ResidualAtom
-from ..pspl import planetary_image_diagnostics
 from ..types import AtomFitResult, SegmentData
 
 
 class PositiveBumpAtom(ResidualAtom):
     atom_name = "lorentzian_positive_bump"
     class_label = "major_image_bump"
+    estimation_role = "morphology"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -37,7 +37,6 @@ class PositiveBumpAtom(ResidualAtom):
                 "t_peak": float(theta[0]),
                 "width": float(np.exp(theta[1])),
                 "nu": 1.0,
-                **planetary_image_diagnostics(theta[0], np.exp(theta[1]), segment.pspl, branch="major"),
             },
             expected_amplitude_sign=1.0,
         )
@@ -46,6 +45,7 @@ class PositiveBumpAtom(ResidualAtom):
 class PSPLPositiveBumpAtom(ResidualAtom):
     atom_name = "pspl_positive_bump"
     class_label = "major_image_pspl_bump"
+    estimation_role = "morphology"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -87,7 +87,6 @@ class PSPLPositiveBumpAtom(ResidualAtom):
                 "width": float(np.exp(theta[1])),
                 "tE_pert": float(np.exp(theta[1])),
                 "u0_pert": float(np.exp(theta[2])),
-                **planetary_image_diagnostics(theta[0], np.exp(theta[1]), segment.pspl, branch="major"),
             },
             expected_amplitude_sign=1.0,
         )
@@ -96,6 +95,7 @@ class PSPLPositiveBumpAtom(ResidualAtom):
 class NegativeDipAtom(ResidualAtom):
     atom_name = "lorentzian_negative_dip"
     class_label = "minor_image_dip"
+    estimation_role = "morphology"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -123,7 +123,6 @@ class NegativeDipAtom(ResidualAtom):
                 "t_peak": float(theta[0]),
                 "width": float(np.exp(theta[1])),
                 "nu": 1.0,
-                **planetary_image_diagnostics(theta[0], np.exp(theta[1]), segment.pspl, branch="minor"),
             },
             expected_amplitude_sign=1.0,
         )
@@ -132,6 +131,7 @@ class NegativeDipAtom(ResidualAtom):
 class MinorImageBoxTroughAtom(ResidualAtom):
     atom_name = "softened_box_negative_trough"
     class_label = "minor_image_box_trough"
+    estimation_role = "morphology"
 
     def fit(self, segment: SegmentData, features: dict[str, float]) -> AtomFitResult:
         t = np.asarray(segment.time, dtype=float)
@@ -180,7 +180,6 @@ class MinorImageBoxTroughAtom(ResidualAtom):
                 "t_end": float(theta[0] + np.exp(theta[1])),
                 "width": float(2.0 * np.exp(theta[1])),
                 "edge_width": float(np.exp(theta[2])),
-                **planetary_image_diagnostics(theta[0], 2.0 * np.exp(theta[1]), segment.pspl, branch="minor"),
             },
             expected_amplitude_sign=1.0,
         )

@@ -1,11 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import numpy as np
 
 from ..planet_signal import PlanetSignalComponentClassification
+
+
+_DIAGNOSTIC_CLASS_LABELS = {"second_pspl_like", "systematics_candidate", "pspl_misfit"}
+
+
+def _planetary_reference_bic(atom_fits: Tuple["AtomFitResult", ...]) -> float:
+    values = [
+        atom.bic
+        for atom in atom_fits
+        if atom.class_label not in _DIAGNOSTIC_CLASS_LABELS and np.isfinite(atom.bic)
+    ]
+    return min(values) if values else float("inf")
 
 
 @dataclass(frozen=True)
@@ -20,25 +32,14 @@ class PlanetClassConfig:
     short_duration_points: int = 8
     wide_duration_tE_fraction: float = 0.2
     min_points_per_segment: int = 5
-    min_delta_chi2_for_seed: float = 20.0
+    min_delta_chi2_physical: float = 20.0
+    # Deprecated compatibility alias. When set, it overrides the new name.
+    min_delta_chi2_for_seed: Optional[float] = None
+    physical_max_delta_bic: float = 50.0
+    physical_window_max_delta_bic: float = 10.0
     keep_top_atom_fits: int = 14
-    keep_top_seeds_per_segment: int = 120
     q_floor: float = 1e-7
     q_ceil: float = 1.0
-    q_width_factors: Tuple[float, ...] = (0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
-    s_central_grid: Tuple[float, ...] = (
-        0.55,
-        0.65,
-        0.75,
-        0.85,
-        0.92,
-        1.08,
-        1.18,
-        1.35,
-        1.6,
-        2.0,
-    )
-    alpha_grid_size_central: int = 8
     cusp_tail_powers: Tuple[float, ...] = (1.0, 2.0 / 3.0)
     central_window_factor: float = 3.0
     optimizer_maxiter: int = 300
@@ -55,7 +56,12 @@ class PlanetClassConfig:
     cr_lookup_extent: float = 4.5
     cr_lookup_gamma_step: float = 0.025
     cr_lookup_source_radius_grid: Tuple[float, ...] = (0.0, 0.03, 0.1, 0.3, 1.0)
-    cr_lookup_sqrt_q_factors: Tuple[float, ...] = (0.5, 1.0, 2.0)
+    cr_lookup_sqrt_q_factors: Tuple[float, ...] = (0.1, 0.3, 0.6, 1.0, 2.0, 4.0)
+    cr_physical_q_max: float = 0.03
+    cr_max_fwhm_tE_fraction: float = 0.2
+    local_physical_min_points: int = 8
+    local_physical_max_windows: int = 8
+    local_physical_baseline_cadences: float = 8.0
     enable_positive_bump: bool = True
     enable_pspl_positive_bump: bool = True
     enable_negative_dip: bool = True
@@ -79,11 +85,17 @@ class PlanetClassConfig:
     enable_systematics_diagnostic: bool = True
     enable_pspl_misfit: bool = True
 
+    @property
+    def physical_delta_chi2_threshold(self) -> float:
+        if self.min_delta_chi2_for_seed is not None:
+            return float(self.min_delta_chi2_for_seed)
+        return float(self.min_delta_chi2_physical)
+
 
 @dataclass(frozen=True)
 class PSPLParams:
     """
-    Baseline point-lens parameters in the trajectory frame used by seed rules.
+    Baseline point-lens parameters in the fitted trajectory frame.
     """
 
     t0: float
@@ -131,6 +143,11 @@ class AtomFitResult:
     warnings: Tuple[str, ...]
     validity_penalty: float = 0.0
     fit_diagnostics: Optional[dict[str, object]] = None
+    estimation_role: str = "morphology"
+    physical_params: dict[str, float] = field(default_factory=dict)
+    constraint_relations: Tuple[str, ...] = ()
+    physical_valid: bool = False
+    physical_invalid_reasons: Tuple[str, ...] = ()
 
     def summary_dict(self, *, prefix: str = "") -> dict[str, object]:
         row: dict[str, object] = {
@@ -144,47 +161,54 @@ class AtomFitResult:
             f"{prefix}validity_penalty": float(self.validity_penalty),
             f"{prefix}success": bool(self.success),
             f"{prefix}warnings": "; ".join(self.warnings),
+            f"{prefix}estimation_role": self.estimation_role,
+            f"{prefix}constraint_relations": "; ".join(self.constraint_relations),
+            f"{prefix}physical_valid": bool(self.physical_valid),
+            f"{prefix}physical_invalid_reasons": "; ".join(self.physical_invalid_reasons),
         }
         for key, value in self.params.items():
             row[f"{prefix}{key}"] = float(value) if np.isscalar(value) else value
         if self.param_errors:
             for key, value in self.param_errors.items():
                 row[f"{prefix}{key}_err"] = float(value)
+        for key, value in self.physical_params.items():
+            row[f"{prefix}physical_{key}"] = float(value)
         return row
 
 
 @dataclass(frozen=True)
-class SeedCandidate:
-    """
-    Initial-value candidate for a downstream physical model.
-    """
+class LocalPhysicalFitResult:
+    """One physical atom fitted in a localized substructure window."""
 
-    model_type: str
-    class_label: str
-    params: dict[str, float]
-    score: float
-    source_atom: str
-    degeneracy_tag: Optional[str]
-    warnings: Tuple[str, ...]
+    window_id: str
+    locator_kind: str
+    locator_time: float
+    t_start: float
+    t_end: float
+    atom_fit: AtomFitResult
 
-    def summary_dict(self, *, prefix: str = "") -> dict[str, object]:
+    def summary_dict(self, *, segment_index: int = 0, rank: int = 0) -> dict[str, object]:
         row: dict[str, object] = {
-            f"{prefix}model_type": self.model_type,
-            f"{prefix}class_label": self.class_label,
-            f"{prefix}score": float(self.score),
-            f"{prefix}source_atom": self.source_atom,
-            f"{prefix}degeneracy_tag": self.degeneracy_tag,
-            f"{prefix}warnings": "; ".join(self.warnings),
+            "segment_index": int(segment_index),
+            "window_id": self.window_id,
+            "window_rank": int(rank),
+            "locator_kind": self.locator_kind,
+            "locator_time": float(self.locator_time),
+            "window_t_start": float(self.t_start),
+            "window_t_end": float(self.t_end),
         }
-        for key, value in self.params.items():
-            row[f"{prefix}{key}"] = float(value) if np.isscalar(value) else value
+        row.update(self.atom_fit.summary_dict())
+        if self.atom_fit.fit_diagnostics:
+            for key, value in self.atom_fit.fit_diagnostics.items():
+                if key.startswith("display_") or key == "physical_modes":
+                    row[key] = value
         return row
 
 
 @dataclass(frozen=True)
 class SegmentModelResult:
     """
-    Ranked atom fits and derived seeds for one anomaly component.
+    Ranked atom fits and local physical fits for one anomaly component.
     """
 
     component: PlanetSignalComponentClassification
@@ -192,8 +216,8 @@ class SegmentModelResult:
     atom_fits: Tuple[AtomFitResult, ...]
     best_fit: Optional[AtomFitResult]
     class_probabilities: dict[str, float]
-    seeds: Tuple[SeedCandidate, ...]
     warnings: Tuple[str, ...]
+    local_physical_fits: Tuple[LocalPhysicalFitResult, ...] = ()
 
     def summary_dict(self, *, segment_index: int = 0) -> dict[str, object]:
         row: dict[str, object] = {
@@ -205,7 +229,7 @@ class SegmentModelResult:
             "positive_chi2": float(self.component.positive_chi2),
             "negative_chi2": float(self.component.negative_chi2),
             "n_atom_fits": len(self.atom_fits),
-            "n_seeds": len(self.seeds),
+            "n_local_physical_fits": len(self.local_physical_fits),
             "warnings": "; ".join(self.warnings),
         }
         for key in ("t_peak", "fwhm", "duration", "snr", "edge_sharpness", "u_at_peak"):
@@ -226,17 +250,41 @@ class PlanetAnomalyFitResult:
 
     pspl: PSPLParams
     segment_results: Tuple[SegmentModelResult, ...]
-    event_seeds: Tuple[SeedCandidate, ...]
     best_label: str
     best_atom: Optional[AtomFitResult]
     class_probabilities: dict[str, float]
     warnings: Tuple[str, ...]
+    physical_max_delta_bic: float = 50.0
+    physical_window_max_delta_bic: float = 10.0
+
+    @property
+    def best_physical_fit(self) -> Optional[AtomFitResult]:
+        candidates = []
+        for segment in self.segment_results:
+            by_window: dict[str, list[AtomFitResult]] = {}
+            for local in segment.local_physical_fits:
+                by_window.setdefault(local.window_id, []).append(local.atom_fit)
+            for fits in by_window.values():
+                finite = [
+                    atom.bic
+                    for atom in fits
+                    if atom.physical_valid and np.isfinite(atom.bic)
+                ]
+                best_bic = min(finite) if finite else float("inf")
+                candidates.extend(
+                    atom
+                    for atom in fits
+                    if atom.physical_valid
+                    and atom.estimation_role in {"physical_local", "physical_constraint"}
+                    and np.isfinite(atom.bic)
+                    and atom.bic - best_bic <= float(self.physical_window_max_delta_bic)
+                )
+        return min(candidates, key=lambda atom: atom.bic) if candidates else None
 
     def summary_dict(self) -> dict[str, object]:
         row: dict[str, object] = {
             "best_label": self.best_label,
             "n_segments": len(self.segment_results),
-            "n_event_seeds": len(self.event_seeds),
             "warnings": "; ".join(self.warnings),
             "pspl_t0": float(self.pspl.t0),
             "pspl_tE": float(self.pspl.tE),
@@ -264,25 +312,137 @@ class PlanetAnomalyFitResult:
                 row.update(atom.summary_dict())
                 if atom.fit_diagnostics:
                     for key, value in atom.fit_diagnostics.items():
-                        if key.startswith("display_"):
+                        if key.startswith("display_") or key == "physical_modes":
                             row[key] = value
                 rows.append(row)
         return tuple(rows)
 
-    def seed_summary_dicts(self, *, top_n: Optional[int] = None) -> tuple[dict[str, object], ...]:
-        seeds = self.event_seeds if top_n is None else self.event_seeds[: int(top_n)]
-        rows = []
-        for rank, seed in enumerate(seeds):
-            row = {"rank": rank}
-            row.update(seed.summary_dict())
+    def local_physical_summary_dicts(self) -> tuple[dict[str, object], ...]:
+        rows: list[dict[str, object]] = []
+        for segment_index, segment in enumerate(self.segment_results):
+            ranks: dict[str, int] = {}
+            for local in segment.local_physical_fits:
+                rank = ranks.get(local.window_id, 0)
+                rows.append(local.summary_dict(segment_index=segment_index, rank=rank))
+                ranks[local.window_id] = rank + 1
+        return tuple(rows)
+
+    def physical_constraint_dicts(
+        self,
+        *,
+        include_invalid: bool = False,
+        max_delta_bic: Optional[float] = None,
+    ) -> tuple[dict[str, object], ...]:
+        rows: list[dict[str, object]] = []
+        for segment_index, segment in enumerate(self.segment_results):
+            by_window: dict[str, list[LocalPhysicalFitResult]] = {}
+            for local in segment.local_physical_fits:
+                by_window.setdefault(local.window_id, []).append(local)
+            for window_id, local_fits in by_window.items():
+                finite = [
+                    local.atom_fit.bic
+                    for local in local_fits
+                    if local.atom_fit.physical_valid and np.isfinite(local.atom_fit.bic)
+                ]
+                best_bic = min(finite) if finite else float("inf")
+                for local in local_fits:
+                    atom = local.atom_fit
+                    if atom.estimation_role not in {"physical_local", "physical_constraint"}:
+                        continue
+                    delta_bic = float(atom.bic - best_bic)
+                    threshold = self.physical_window_max_delta_bic if max_delta_bic is None else float(max_delta_bic)
+                    competitive = np.isfinite(delta_bic) and delta_bic <= threshold
+                    if not include_invalid and (not atom.physical_valid or not competitive):
+                        continue
+                    row: dict[str, object] = {
+                        "segment_index": segment_index,
+                        "window_id": window_id,
+                        "locator_kind": local.locator_kind,
+                        "locator_time": float(local.locator_time),
+                        "window_t_start": float(local.t_start),
+                        "window_t_end": float(local.t_end),
+                        "atom_name": atom.atom_name,
+                        "class_label": atom.class_label,
+                        "estimation_role": atom.estimation_role,
+                        "bic": float(atom.bic),
+                        "success": bool(atom.success),
+                        "physical_valid": bool(atom.physical_valid),
+                        "delta_bic_from_best": delta_bic,
+                        "competitive": bool(competitive),
+                        "constraint_relations": "; ".join(atom.constraint_relations),
+                        "physical_invalid_reasons": "; ".join(atom.physical_invalid_reasons),
+                        "warnings": "; ".join(atom.warnings),
+                    }
+                    row.update({key: float(value) for key, value in atom.physical_params.items()})
+                    if atom.param_errors:
+                        row.update(
+                            {
+                                f"{key}_err": float(atom.param_errors[key])
+                                for key in atom.physical_params
+                                if key in atom.param_errors and np.isfinite(atom.param_errors[key])
+                            }
+                        )
+                    rows.append(row)
+        return tuple(rows)
+
+    def physical_relation_dicts(self) -> tuple[dict[str, object], ...]:
+        """Combine independently fitted local edges without inventing a global caustic model."""
+        constraints = self.physical_constraint_dicts()
+        rows: list[dict[str, object]] = []
+        for segment_index in range(len(self.segment_results)):
+            segment_rows = [row for row in constraints if row["segment_index"] == segment_index]
+            selected: dict[str, dict[str, object]] = {}
+            for kind in ("entry_edge", "exit_edge"):
+                candidates = [
+                    row for row in segment_rows
+                    if row["locator_kind"] == kind and "rho_over_abs_sin_psi" in row
+                ]
+                if candidates:
+                    selected[kind] = min(candidates, key=lambda row: float(row["bic"]))
+            if len(selected) != 2:
+                continue
+            entry = selected["entry_edge"]
+            exit_ = selected["exit_edge"]
+            r_entry = float(entry["rho_over_abs_sin_psi"])
+            r_exit = float(exit_["rho_over_abs_sin_psi"])
+            t_entry = float(entry.get("tc", entry["locator_time"]))
+            t_exit = float(exit_.get("tc", exit_["locator_time"]))
+            if not (r_entry > 0.0 and r_exit > 0.0 and t_exit > t_entry):
+                continue
+            row: dict[str, object] = {
+                "segment_index": segment_index,
+                "relation": "shared_source_radius_two_fold",
+                "entry_window_id": entry["window_id"],
+                "exit_window_id": exit_["window_id"],
+                "t_entry": t_entry,
+                "t_exit": t_exit,
+                "caustic_center_crossing_duration": t_exit - t_entry,
+                "rho_over_abs_sin_psi_entry": r_entry,
+                "rho_over_abs_sin_psi_exit": r_exit,
+                "abs_sin_psi_entry_over_exit": r_exit / r_entry,
+                "constraint_relation": (
+                    "assuming one source radius, R_i=tstar_i/tE=rho/abs(sin(psi_i)); "
+                    "therefore abs(sin(psi_entry))/abs(sin(psi_exit))=R_exit/R_entry"
+                ),
+            }
+            entry_err = float(entry.get("rho_over_abs_sin_psi_err", np.nan))
+            exit_err = float(exit_.get("rho_over_abs_sin_psi_err", np.nan))
+            if np.isfinite(entry_err) and np.isfinite(exit_err):
+                ratio = float(row["abs_sin_psi_entry_over_exit"])
+                row["abs_sin_psi_entry_over_exit_err"] = ratio * np.sqrt(
+                    (entry_err / r_entry) ** 2 + (exit_err / r_exit) ** 2
+                )
+            t_entry_err = float(entry.get("tc_err", np.nan))
+            t_exit_err = float(exit_.get("tc_err", np.nan))
+            if np.isfinite(t_entry_err) and np.isfinite(t_exit_err):
+                row["caustic_center_crossing_duration_err"] = np.hypot(t_entry_err, t_exit_err)
             rows.append(row)
         return tuple(rows)
 
-    def summary_text(self, *, max_seeds: int = 5) -> str:
+    def summary_text(self) -> str:
         lines = [
             f"best_label: {self.best_label}",
             f"segments: {len(self.segment_results)}",
-            f"event_seeds: {len(self.event_seeds)}",
         ]
         if self.best_atom is not None:
             lines.extend(
@@ -292,17 +452,12 @@ class PlanetAnomalyFitResult:
                     f"best_delta_chi2: {self.best_atom.delta_chi2:.3f}",
                 ]
             )
+        if self.best_physical_fit is not None:
+            physical = ", ".join(f"{k}={v:.6g}" for k, v in self.best_physical_fit.physical_params.items())
+            lines.append(f"best_physical_local: {self.best_physical_fit.atom_name} ({physical})")
         if self.class_probabilities:
             probs = ", ".join(f"{k}={v:.3f}" for k, v in sorted(self.class_probabilities.items()))
             lines.append(f"class_probabilities: {probs}")
-        if self.event_seeds:
-            lines.append("top_seeds:")
-            for seed in self.event_seeds[: int(max_seeds)]:
-                tag = seed.degeneracy_tag or "none"
-                lines.append(
-                    f"  - {seed.model_type}/{seed.class_label} "
-                    f"score={seed.score:.3f} source={seed.source_atom} tag={tag}"
-                )
         if self.warnings:
             lines.append("warnings: " + "; ".join(self.warnings))
         return "\n".join(lines)
@@ -321,16 +476,23 @@ class PlanetAnomalyFitResult:
             return self.atom_summary_dicts()
         return pd.DataFrame(self.atom_summary_dicts())
 
-    def seed_table(self, *, top_n: Optional[int] = None):
+    def physical_constraint_table(self):
         try:
             import pandas as pd
         except ImportError:  # pragma: no cover - optional dependency
-            return self.seed_summary_dicts(top_n=top_n)
-        return pd.DataFrame(self.seed_summary_dicts(top_n=top_n))
+            return self.physical_constraint_dicts()
+        return pd.DataFrame(self.physical_constraint_dicts())
 
-    def plot_summary(self, *, signal_result=None, show: bool = True, max_seeds: int = 5):
+    def physical_relation_table(self):
+        try:
+            import pandas as pd
+        except ImportError:  # pragma: no cover - optional dependency
+            return self.physical_relation_dicts()
+        return pd.DataFrame(self.physical_relation_dicts())
+
+    def plot_summary(self, *, signal_result=None, show: bool = True):
         """
-        Plot segment spans, best atom labels, and top seed labels.
+        Plot segment spans and best atom labels.
 
         If ``signal_result`` is provided, the residual light curve is shown in
         residual/error units.  Otherwise the method returns a compact text-only
@@ -365,28 +527,12 @@ class PlanetAnomalyFitResult:
             ax.text(
                 0.02,
                 ypos,
-                f"seg {i}: {label}, score={score:.1f}, seeds={len(segment.seeds)}",
+                f"seg {i}: {label}, score={score:.1f}",
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
                 fontsize=9,
                 color="black",
-            )
-
-        if self.event_seeds:
-            seed_text = "\n".join(
-                f"{rank + 1}. {seed.model_type}/{seed.class_label} ({seed.degeneracy_tag or 'none'})"
-                for rank, seed in enumerate(self.event_seeds[: int(max_seeds)])
-            )
-            ax.text(
-                0.98,
-                0.96,
-                seed_text,
-                transform=ax.transAxes,
-                ha="right",
-                va="top",
-                fontsize=8,
-                bbox={"facecolor": "white", "edgecolor": "0.8", "alpha": 0.85, "pad": 4},
             )
 
         ax.set_title(f"Planet anomaly classification: {self.best_label}")
