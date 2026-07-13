@@ -51,6 +51,19 @@ BRANCH_MAJOR = "major_image"
 BRANCH_MINOR = "minor_image"
 BRANCH_UNKNOWN = "unknown"
 
+# Empirical median-bias calibrations and residual scatters of the two q
+# estimators, measured against truth on the Roman OMPLDG_croin simulation
+# sample (2026-07, 1000 anomalous events; dip n=136, bump n=414).  The
+# calibration multiplies the raw published relation so that the median of
+# q_est/q_true is 1 on that sample; the scatter is the centered (84-16)/2
+# half-width of log10(q_est/q_true) and should set the width of any seed
+# range built from the estimate.  Pass ``calibration=1.0`` to recover the
+# uncalibrated literature relations.
+DIP_Q_CALIBRATION = 2.2
+DIP_Q_LOG10_SCATTER = 0.30
+BUMP_Q_CALIBRATION = 2.5
+BUMP_Q_LOG10_SCATTER = 1.5
+
 
 @dataclass(frozen=True)
 class AnomalyGeometry:
@@ -194,14 +207,19 @@ def q_from_dip(
     tE: float,
     geometry: AnomalyGeometry,
     dt_dip_err: float = float("nan"),
+    calibration: float = DIP_Q_CALIBRATION,
 ) -> tuple[float, float]:
     """
     Mass ratio for a minor-image dip (Han 2006; Hwang et al. 2022).
 
-    ``q = (dt_dip / 4 tE)^2 * (s_dagger_minus / u_anom) * sin^2(alpha)``,
-    where ``dt_dip`` is the full dip duration.  Returns ``(q, q_err)``;
-    ``q_err`` propagates ``dt_dip_err`` and the geometry's ``t_anom_err``
-    to first order (the estimate itself is good to a factor of ~2).
+    ``q = calibration * (dt_dip / 4 tE)^2 * (s_dagger_minus / u_anom)
+    * sin^2(alpha)``, where ``dt_dip`` is the full dip duration measured by
+    the smoothed-box template.  ``calibration`` (default
+    ``DIP_Q_CALIBRATION``) removes the median bias of that duration
+    definition measured on the Roman OMPLDG simulation; the residual scatter
+    is ``DIP_Q_LOG10_SCATTER`` dex.  Returns ``(q, q_err)``; ``q_err``
+    propagates ``dt_dip_err`` and the geometry's ``t_anom_err`` to first
+    order and does not include the systematic scatter.
     """
     tE = float(tE)
     dt_dip = float(dt_dip)
@@ -209,7 +227,7 @@ def q_from_dip(
     if not (np.isfinite(dt_dip) and dt_dip > 0.0 and u > 0.0):
         return float("nan"), float("nan")
     base = (dt_dip / (4.0 * tE)) ** 2
-    q = base * (geometry.s_dagger_minus / u) * geometry.sin_alpha**2
+    q = float(calibration) * base * (geometry.s_dagger_minus / u) * geometry.sin_alpha**2
 
     # d ln q / d dt_dip = 2 / dt_dip; d ln q via u_anom uses
     # dq/du = q * (d ln s_minus/du - 1/u) with d ln s_minus/du = -1/root,
@@ -226,22 +244,28 @@ def q_from_dip(
 
 
 def q_from_bump(
-    t_p: float,
+    fwhm: float,
     *,
     tE: float,
-    t_p_err: float = float("nan"),
+    fwhm_err: float = float("nan"),
+    calibration: float = BUMP_Q_CALIBRATION,
 ) -> tuple[float, float]:
     """
     Order-of-magnitude mass ratio for a major-image bump (Gould & Loeb 1992).
 
     The perturbed region is taken to be the planet's Einstein ring, whose
-    crossing time is ``sqrt(q) * tE``, so ``q = (t_p / tE)^2`` with ``t_p``
-    the fitted bump width parameter.
+    crossing diameter is ``2 sqrt(q) tE``, so
+    ``q = calibration * (fwhm / 2 tE)^2`` with ``fwhm`` the fitted bump
+    FWHM.  ``calibration`` (default ``BUMP_Q_CALIBRATION``) removes the
+    median bias measured on the Roman OMPLDG simulation, but the residual
+    scatter there is ``BUMP_Q_LOG10_SCATTER`` (~1.7 dex): bump durations do
+    not determine ``q`` to better than orders of magnitude, so treat this as
+    a search-ordering hint, not a constraint.
     """
     tE = float(tE)
-    t_p = float(t_p)
-    if not (np.isfinite(t_p) and t_p > 0.0 and tE > 0.0):
+    fwhm = float(fwhm)
+    if not (np.isfinite(fwhm) and fwhm > 0.0 and tE > 0.0):
         return float("nan"), float("nan")
-    q = (t_p / tE) ** 2
-    q_err = 2.0 * q * (t_p_err / t_p) if np.isfinite(t_p_err) else float("nan")
+    q = float(calibration) * (fwhm / (2.0 * tE)) ** 2
+    q_err = 2.0 * q * (fwhm_err / fwhm) if np.isfinite(fwhm_err) else float("nan")
     return float(q), float(q_err)

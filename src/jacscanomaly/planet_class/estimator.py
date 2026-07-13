@@ -22,6 +22,7 @@ from .types import (
     AnomalyScales,
     AnomalyShapeFit,
     ComponentAnomalyResult,
+    GridSeed,
     PlanetAnomalyFitResult,
     PlanetClassConfig,
     PSPLParams,
@@ -132,9 +133,11 @@ class PlanetAnomalyClassifier:
         shape = self._shape_label(best)
         geometry = None
         scales = None
+        grid_seed = None
         if shape not in {SHAPE_NO_COHERENT, SHAPE_LOW_SIGNIFICANCE}:
             geometry = self._geometry(best, segment.pspl)
             scales = self._scales(best, geometry, segment.pspl)
+            grid_seed = self._grid_seed(geometry, scales)
         return ComponentAnomalyResult(
             component=segment.component,
             features=features,
@@ -143,6 +146,7 @@ class PlanetAnomalyClassifier:
             shape=shape,
             geometry=geometry,
             scales=scales,
+            grid_seed=grid_seed,
             warnings=tuple(warnings),
         )
 
@@ -212,14 +216,11 @@ class PlanetAnomalyClassifier:
             if central:
                 q = q_err = float("nan")
             else:
-                q, q_err = q_from_bump(
-                    float(best.params.get("t_p", np.nan)),
-                    tE=tE,
-                    t_p_err=float(errors.get("t_p", np.nan)),
-                )
+                q, q_err = q_from_bump(dt, tE=tE, fwhm_err=dt_err)
                 notes.append(
-                    "q assumes the bump width t_p is the planet Einstein-ring "
-                    "crossing time (Gould & Loeb 1992 order-of-magnitude)"
+                    "q assumes the bump FWHM is the planet Einstein-ring "
+                    "crossing diameter (Gould & Loeb 1992; sim-calibrated, "
+                    "order-of-magnitude only)"
                 )
             return AnomalyScales(
                 dt=dt,
@@ -281,3 +282,44 @@ class PlanetAnomalyClassifier:
             )
 
         return None
+
+    def _grid_seed(
+        self,
+        geometry: Optional[AnomalyGeometry],
+        scales: Optional[AnomalyScales],
+    ) -> Optional[GridSeed]:
+        if geometry is None:
+            return None
+        config = self.config
+        if geometry.preferred_branch == BRANCH_MINOR:
+            s_candidates = (geometry.s_dagger_minus, geometry.s_dagger_plus)
+        else:
+            # Major image first also when the branch is unknown: bumps and
+            # crossings are more often major-image perturbations.
+            s_candidates = (geometry.s_dagger_plus, geometry.s_dagger_minus)
+        alpha = float(geometry.alpha)
+        two_pi = 2.0 * np.pi
+        alpha_candidates = tuple(
+            sorted({(a % two_pi) for a in (alpha, -alpha, np.pi - alpha, np.pi + alpha)})
+        )
+        q_center = float("nan")
+        q_width = float("nan")
+        q_quality = "none"
+        if scales is not None and np.isfinite(scales.q):
+            q_center = float(scales.q)
+            if scales.q_method == "dip_han2006":
+                q_width = float(config.seed_q_width_factor_dip)
+                q_quality = "calibrated"
+            else:
+                q_width = float(config.seed_q_width_factor_bump)
+                q_quality = "order_of_magnitude"
+        return GridSeed(
+            s_candidates=s_candidates,
+            s_width_factor=float(config.seed_s_width_factor),
+            alpha_candidates=alpha_candidates,
+            alpha_tolerance=float(np.deg2rad(config.seed_alpha_tolerance_deg)),
+            q_center=q_center,
+            q_width_factor=q_width,
+            q_quality=q_quality,
+        )
+

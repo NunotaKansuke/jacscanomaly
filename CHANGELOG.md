@@ -8,6 +8,20 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ## [Unreleased]
 
+### Added
+- `GridSeed` on each significant anomaly component: an explicit 2L1S
+  grid-search region (both `s_dagger` branches, the four mirror-degenerate
+  `alpha` candidates, and a quality-tagged `q` range) with a
+  `contains(s=, q=, alpha=)` test. Default widths are the ~84%-coverage
+  values measured on the Roman OMPLDG simulation (configurable via the
+  `seed_*` fields of `PlanetClassConfig`).
+- Simulation-derived median-bias calibrations for the `q` estimators
+  (`DIP_Q_CALIBRATION` = 2.2, residual scatter ~0.30 dex;
+  `BUMP_Q_CALIBRATION` = 2.5, scatter ~1.5 dex). The bump relation now uses
+  the fitted FWHM as the planet Einstein-ring crossing diameter,
+  `q = C (FWHM/2tE)^2`. Pass `calibration=1.0` for the raw literature
+  relations.
+
 ### Changed
 - Rewrote `planet_class` as a heuristic anomaly estimator based on the
   standard literature formalism (Gould & Loeb 1992; Gaudi & Gould 1997;

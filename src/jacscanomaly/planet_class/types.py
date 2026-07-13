@@ -27,6 +27,13 @@ class PlanetClassConfig:
     estimate_param_errors: bool = True
     covariance_step: float = 1e-4
     covariance_max_condition: float = 1e12
+    # Grid-seed region widths, set to the ~84%-coverage values measured on
+    # the Roman OMPLDG simulation sample (2026-07).  The remaining misses are
+    # dominated by shape/component misidentification, not by these widths.
+    seed_s_width_factor: float = 1.7
+    seed_alpha_tolerance_deg: float = 20.0
+    seed_q_width_factor_dip: float = 10.0
+    seed_q_width_factor_bump: float = 100.0
 
 
 @dataclass(frozen=True)
@@ -142,6 +149,82 @@ class AnomalyScales:
 
 
 @dataclass(frozen=True)
+class GridSeed:
+    """
+    Seed region for a downstream 2L1S grid search.
+
+    ``s_candidates`` are the ``s_dagger`` branches (preferred branch first);
+    the true separation is expected within ``s_width_factor`` of one of them
+    (each branch stands for its degenerate inner/outer pair).
+    ``alpha_candidates`` are the four mirror-degenerate trajectory angles in
+    ``[0, 2*pi)``.  ``q_center``/``q_width_factor`` bound the mass ratio when
+    an estimate exists; ``q_quality`` is ``"calibrated"`` (dip relation,
+    scatter ~0.35 dex), ``"order_of_magnitude"`` (bump relation, scatter
+    ~1.7 dex — use for search ordering rather than a hard cut), or
+    ``"none"``.  Region widths are configured in
+    :class:`PlanetClassConfig` from measured simulation coverage.
+    """
+
+    s_candidates: Tuple[float, ...]
+    s_width_factor: float
+    alpha_candidates: Tuple[float, ...]
+    alpha_tolerance: float
+    q_center: float = float("nan")
+    q_width_factor: float = float("nan")
+    q_quality: str = "none"
+
+    def contains(
+        self,
+        *,
+        s: Optional[float] = None,
+        q: Optional[float] = None,
+        alpha: Optional[float] = None,
+    ) -> bool:
+        """
+        Check whether a parameter point falls inside the seed region.
+
+        Only the supplied coordinates are tested; ``q`` is ignored when
+        ``q_quality`` is ``"none"``.  ``alpha`` may use any of the four
+        mirror-degenerate conventions.
+        """
+        if s is not None:
+            s = float(s)
+            if s <= 0.0 or not any(
+                abs(np.log(s / candidate)) <= np.log(self.s_width_factor)
+                for candidate in self.s_candidates
+            ):
+                return False
+        if alpha is not None:
+            alpha = float(alpha)
+            deltas = [
+                abs((alpha - candidate + np.pi) % (2.0 * np.pi) - np.pi)
+                for candidate in self.alpha_candidates
+            ]
+            if min(deltas) > self.alpha_tolerance:
+                return False
+        if q is not None and self.q_quality != "none" and np.isfinite(self.q_center):
+            q = float(q)
+            if q <= 0.0 or abs(np.log10(q / self.q_center)) > np.log10(self.q_width_factor):
+                return False
+        return True
+
+    def summary_dict(self, *, prefix: str = "seed_") -> dict[str, object]:
+        row: dict[str, object] = {
+            f"{prefix}s_candidates": ",".join(f"{s:.6g}" for s in self.s_candidates),
+            f"{prefix}s_width_factor": float(self.s_width_factor),
+            f"{prefix}alpha_candidates": ",".join(
+                f"{a:.6g}" for a in self.alpha_candidates
+            ),
+            f"{prefix}alpha_tolerance": float(self.alpha_tolerance),
+            f"{prefix}q_quality": self.q_quality,
+        }
+        if np.isfinite(self.q_center):
+            row[f"{prefix}q_center"] = float(self.q_center)
+            row[f"{prefix}q_width_factor"] = float(self.q_width_factor)
+        return row
+
+
+@dataclass(frozen=True)
 class ComponentAnomalyResult:
     """
     Shape, geometry, and scale estimates for one anomaly component.
@@ -154,6 +237,7 @@ class ComponentAnomalyResult:
     shape: str
     geometry: Optional[AnomalyGeometry]
     scales: Optional[AnomalyScales]
+    grid_seed: Optional["GridSeed"] = None
     warnings: Tuple[str, ...] = ()
 
     @property
@@ -180,6 +264,8 @@ class ComponentAnomalyResult:
             row.update(self.geometry.summary_dict())
         if self.scales is not None:
             row.update(self.scales.summary_dict())
+        if self.grid_seed is not None:
+            row.update(self.grid_seed.summary_dict())
         return row
 
     def shape_fit_dicts(self, *, segment_index: int = 0) -> tuple[dict[str, object], ...]:

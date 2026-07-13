@@ -95,6 +95,9 @@ Heuristic anomaly estimation API
 .. autoclass:: jacscanomaly.AnomalyScales
    :no-index:
 
+.. autoclass:: jacscanomaly.GridSeed
+   :no-index:
+
 ``summary_table()`` has one row per component with the best shape fit, the
 deterministic anomaly geometry (``tau_anom``, ``u_anom``, ``alpha``,
 ``s_dagger_plus/minus``), and the timescale-derived estimates.

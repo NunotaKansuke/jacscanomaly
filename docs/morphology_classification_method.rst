@@ -140,7 +140,7 @@ attached only where a published relation applies, and each carries a
 
   .. math::
 
-     q = \left(\frac{\Delta t_{\rm dip}}{4 t_E}\right)^2
+     q = C_{\rm dip}\left(\frac{\Delta t_{\rm dip}}{4 t_E}\right)^2
      \frac{s^\dagger_-}{u_{\rm anom}}\,\sin^2\alpha .
 
   This equals the frequently quoted
@@ -149,8 +149,19 @@ attached only where a published relation applies, and each carries a
 
 * **Bumps** (``bump_planet_einstein_crossing``; Gould & Loeb 1992): the
   perturbed region is taken to be the planet's Einstein ring, whose crossing
-  time is :math:`\sqrt{q}\,t_E`, so :math:`q \simeq (t_p/t_E)^2`.  This is an
+  diameter is :math:`2\sqrt{q}\,t_E`, so
+  :math:`q \simeq C_{\rm bump}\,({\rm FWHM}/2t_E)^2`.  This is an
   order-of-magnitude estimate.
+
+The constants :math:`C_{\rm dip}` (``DIP_Q_CALIBRATION`` = 2.2) and
+:math:`C_{\rm bump}` (``BUMP_Q_CALIBRATION`` = 2.5) remove the median bias
+of these duration definitions, measured against truth on the Roman
+OMPLDG_croin simulation sample (2026-07, 1000 anomalous events).  The
+residual scatters on that sample are ~0.30 dex (dip) and ~1.5 dex (bump):
+the dip estimate is a genuine factor-few constraint, while the bump estimate
+orders the search but should not be used as a hard cut.  Pass
+``calibration=1.0`` to the ``q_from_*`` functions to recover the raw
+literature relations.
 
 * **Fold and caustic crossings**: a fold fit constrains
 
@@ -163,9 +174,26 @@ attached only where a published relation applies, and each carries a
   ``dt_cc/tE``.  The mass ratio is **not** computed from a crossing: the
   local data do not determine it without a caustic model.
 
-Both heuristic ``q`` estimators are typically accurate to a factor of ~2
-compared with full modeling (Hwang et al. 2022); their reported uncertainties
-propagate only the measurement errors, not this systematic limit.
+The reported ``q_err`` propagates only the measurement errors, not the
+systematic scatters above.
+
+Grid-search seeds
+-----------------
+
+Each significant component also carries a :class:`GridSeed` summarizing the
+above as an explicit search region for a downstream 2L1S grid: both
+``s_dagger`` branches with a multiplicative width, the four
+mirror-degenerate ``alpha`` values with a tolerance, and the ``q`` range
+with a quality tag (``calibrated`` for dips, ``order_of_magnitude`` for
+bumps, ``none`` when no estimate exists).  The default widths in
+:class:`PlanetClassConfig` are set to the ~84%-coverage values measured on
+the same simulation sample; the remaining misses are dominated by
+shape/component misidentification rather than by the widths, so widening
+the region has poor returns — rank grid points by proximity to the seed
+instead of cutting hard when completeness matters.  Measured on that
+sample, the true parameters fall inside the full seed region for ~77% of
+dip-led events and ~59% of bump-led events, at a median hard-cut volume
+reduction of x3 overall (x10 for dip events with a calibrated ``q`` range).
 
 What the estimator does not do
 ------------------------------

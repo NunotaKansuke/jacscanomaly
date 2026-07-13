@@ -20,9 +20,12 @@ from jacscanomaly.planet_class import (
 from jacscanomaly.planet_class.geometry import (
     BRANCH_MAJOR,
     BRANCH_MINOR,
+    BUMP_Q_CALIBRATION,
+    DIP_Q_CALIBRATION,
     REGIME_CENTRAL_RESONANT,
     REGIME_PLANETARY,
 )
+from jacscanomaly.planet_class.types import GridSeed
 from jacscanomaly.planet_class.templates import pspl_bump_fwhm
 from jacscanomaly.singlelens_fit import SingleLensFitResult
 from jacscanomaly.singlelens_model import A_pspl_func
@@ -162,7 +165,7 @@ def test_anomaly_geometry_propagates_t_anom_error():
 def test_q_from_dip_matches_reference_forms():
     g = anomaly_geometry(11.5, t0=PSPL_T0, tE=PSPL_TE, u0=PSPL_U0)
     dt_dip = 0.3
-    q, _ = q_from_dip(dt_dip, tE=PSPL_TE, geometry=g)
+    q, _ = q_from_dip(dt_dip, tE=PSPL_TE, geometry=g, calibration=1.0)
     expected = (
         (dt_dip / (4.0 * PSPL_TE)) ** 2 * (g.s_dagger_minus / g.u_anom) * g.sin_alpha**2
     )
@@ -174,12 +177,17 @@ def test_q_from_dip_matches_reference_forms():
         * abs(np.sin(g.alpha)) ** 3
     )
     assert np.isclose(q, published)
+    # The default applies the simulation-derived median calibration.
+    q_cal, _ = q_from_dip(dt_dip, tE=PSPL_TE, geometry=g)
+    assert np.isclose(q_cal, DIP_Q_CALIBRATION * expected)
 
 
-def test_q_from_bump_is_planet_einstein_timescale_squared():
-    q, q_err = q_from_bump(0.3, tE=PSPL_TE, t_p_err=0.03)
+def test_q_from_bump_is_planet_einstein_crossing():
+    q, q_err = q_from_bump(0.6, tE=PSPL_TE, fwhm_err=0.06, calibration=1.0)
     assert np.isclose(q, 0.01)
     assert np.isclose(q_err, 2.0 * 0.01 * 0.1)
+    q_cal, _ = q_from_bump(0.6, tE=PSPL_TE)
+    assert np.isclose(q_cal, BUMP_Q_CALIBRATION * 0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +242,17 @@ def test_classifier_measures_injected_bump_and_derives_major_image_geometry():
     scales = best.scales
     assert scales is not None
     assert scales.q_method == "bump_planet_einstein_crossing"
-    assert np.isclose(scales.q, (t_p / PSPL_TE) ** 2, rtol=0.6)
+    q_expected = BUMP_Q_CALIBRATION * (pspl_bump_fwhm(t_p, u_p) / (2.0 * PSPL_TE)) ** 2
+    assert np.isclose(scales.q, q_expected, rtol=0.6)
     assert np.isclose(scales.dt_over_tE, pspl_bump_fwhm(t_p, u_p) / PSPL_TE, rtol=0.3)
+
+    seed = best.grid_seed
+    assert seed is not None
+    assert seed.s_candidates[0] == g.s_dagger_plus
+    assert seed.q_quality == "order_of_magnitude"
+    assert seed.contains(s=g.s_dagger_plus * 1.2, q=scales.q * 3.0, alpha=g.alpha)
+    assert seed.contains(alpha=-g.alpha) and seed.contains(alpha=np.pi - g.alpha)
+    assert not seed.contains(s=g.s_dagger_plus * 3.0)
 
 
 def test_classifier_measures_injected_dip_and_estimates_q():
@@ -264,6 +281,13 @@ def test_classifier_measures_injected_dip_and_estimates_q():
     assert scales.q_method == "dip_han2006"
     q_expected, _ = q_from_dip(dt_dip, tE=PSPL_TE, geometry=g)
     assert np.isclose(scales.q, q_expected, rtol=0.7)
+
+    seed = best.grid_seed
+    assert seed is not None
+    assert seed.s_candidates[0] == g.s_dagger_minus
+    assert seed.q_quality == "calibrated"
+    assert seed.contains(s=g.s_dagger_minus, q=scales.q, alpha=g.alpha)
+    assert not seed.contains(q=scales.q * 30.0)
 
 
 def test_classifier_measures_injected_caustic_crossing_edges():
@@ -328,6 +352,32 @@ def test_summary_helpers_and_plot_run():
     import matplotlib.pyplot as plt
 
     plt.close(fig)
+
+
+def test_grid_seed_contains_logic():
+    seed = GridSeed(
+        s_candidates=(1.4, 1.0 / 1.4),
+        s_width_factor=1.7,
+        alpha_candidates=(0.5, 2.0 * np.pi - 0.5, np.pi - 0.5, np.pi + 0.5),
+        alpha_tolerance=np.deg2rad(20.0),
+        q_center=1e-4,
+        q_width_factor=10.0,
+        q_quality="calibrated",
+    )
+    # Either s branch, any mirror alpha, q within the decade.
+    assert seed.contains(s=1.4 * 1.5, q=5e-4, alpha=np.pi + 0.4)
+    assert seed.contains(s=1.0 / 1.4)
+    assert not seed.contains(s=3.0)
+    assert not seed.contains(alpha=1.6)
+    assert not seed.contains(q=2e-3)
+    # q is ignored when no estimate exists.
+    empty = GridSeed(
+        s_candidates=(1.4,),
+        s_width_factor=1.7,
+        alpha_candidates=(0.5,),
+        alpha_tolerance=0.1,
+    )
+    assert empty.contains(q=1.0)
 
 
 def test_insufficient_data_component_is_flagged():

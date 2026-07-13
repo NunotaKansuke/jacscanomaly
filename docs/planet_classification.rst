@@ -165,6 +165,15 @@ component carries three levels of information:
    ``tstar*_over_tE`` for fold-type shapes.  ``notes`` spells out the
    assumption behind every derived number.
 
+``grid_seed``
+   A :class:`jacscanomaly.GridSeed` search region for a downstream 2L1S
+   grid: both ``s_dagger`` branches, the four mirror-degenerate ``alpha``
+   candidates, and the ``q`` range with a ``calibrated`` /
+   ``order_of_magnitude`` / ``none`` quality tag.
+   ``seed.contains(s=..., q=..., alpha=...)`` tests a parameter point
+   against the region; widths are configured in
+   :class:`jacscanomaly.PlanetClassConfig` (``seed_*`` fields).
+
 .. code-block:: python
 
    anomaly = signal.classify_anomaly()
