@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple, Optional, Callable, Any
 
 import numpy as np
@@ -15,6 +16,7 @@ from .singlelens_model import (
     A_fspl_logrho_func,
     A_pspl_parallax_func,
     A_fspl_parallax_logrho_func,
+    A_fspl_parallax_logrho_peak_func,
     A_pspl_space_parallax_func,
     A_fspl_space_parallax_logrho_func,
     A_cv_asymexp_logtau_func,
@@ -26,6 +28,11 @@ try:
     from . import _cpp_grid
 except ImportError:  # pragma: no cover - optional compiled backend
     _cpp_grid = None
+
+try:
+    from . import _vbm_cpp
+except ImportError:  # pragma: no cover - optional VBMicrolensing compiled backend
+    _vbm_cpp = None
 
 try:
     from scipy.optimize import least_squares
@@ -524,6 +531,88 @@ class VBMFiniteDiffFSPLFitter:
 
 
 @dataclass
+class CPPVBMFSPLParallaxFitter:
+    """Native C++ LM fitter for finite-source annual-parallax point lenses.
+
+    VBM evaluates the finite-source magnification at every original datum; no
+    binning or peak-only data selection is used. The public parameter contract
+    matches ``FSPLParallaxFitter``: ``(t0, tE, u0, rho, piEN, piEE)``.
+    """
+
+    coordinates: str
+    sun_table_path: Optional[str] = None
+    espl_table_path: Optional[str] = None
+    maxiter: int = 200
+    damping_parameter: float = 1e-4
+    tol: float = 1e-5
+    vbm_tol: float = 1e-4
+    vbm_reltol: float = 1e-4
+    max_piE: float = 5.0
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._last_fit: Optional[SingleLensFitResult] = None
+        if VBMicrolensing is None:
+            raise ImportError("CPPVBMFSPLParallaxFitter requires VBMicrolensing. Install jacscanomaly[vbm].")
+        package_dir = Path(VBMicrolensing.__file__).resolve().parent
+        if self.sun_table_path is None:
+            self.sun_table_path = str(package_dir / "data" / "SunEphemeris.txt")
+        if self.espl_table_path is None:
+            self.espl_table_path = str(package_dir / "data" / "ESPL.tbl")
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, p0: jnp.ndarray) -> SingleLensFitResult:
+        if _vbm_cpp is None:
+            raise RuntimeError(
+                "CPPVBMFSPLParallaxFitter requires jacscanomaly._vbm_cpp. "
+                "Reinstall jacscanomaly in an environment where VBMicrolensing is installed."
+            )
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1e-12)
+        p0_np = np.asarray(p0, dtype=float)
+        if p0_np.shape != (6,):
+            raise ValueError("p0 must be (t0, tE, u0, logrho, piE_1, piE_2).")
+        # Match the established fspl_parallax Finder API: x0[3] is logrho.
+        p0_vbm = p0_np.copy()
+        p0_vbm[3] = np.exp(np.clip(p0_vbm[3], -50.0, 10.0))
+        params, fs, fb, chi2, model_flux, residual = _vbm_cpp.fit_fspl_parallax(
+            time_np, flux_np, ferr_np, p0_vbm,
+            coordinates=str(self.coordinates),
+            sun_table=str(self.sun_table_path),
+            espl_table=str(self.espl_table_path),
+            maxiter=int(self.maxiter),
+            damping_parameter=float(self.damping_parameter),
+            tol=float(self.tol),
+            vbm_tol=float(self.vbm_tol),
+            vbm_reltol=float(self.vbm_reltol),
+            max_piE=float(self.max_piE),
+        )
+        n = int(time_np.size)
+        fit = SingleLensFitResult(
+            time=time_np, flux=flux_np, ferr=ferr_np,
+            params=jnp.asarray(params),
+            param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
+            chi2=jnp.asarray(float(chi2)),
+            chi2_dof=jnp.asarray(float(chi2) / max(n - 6, 1)),
+            fs=jnp.asarray(float(fs)), fb=jnp.asarray(float(fb)),
+            model_flux=jnp.asarray(model_flux), residual=jnp.asarray(residual),
+            raw_params=jnp.asarray(np.r_[np.asarray(params)[:3], np.log(max(float(params[3]), 1e-50)), np.asarray(params)[4:]]),
+        )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
 class PSPLParallaxFitter:
     """
     PSPL + annual parallax fitter.
@@ -598,6 +687,8 @@ class FSPLParallaxFitter:
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
+    peak_window_days: Optional[float] = None
+    fspl_n_fft: int = 1024
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
@@ -606,12 +697,26 @@ class FSPLParallaxFitter:
 
     def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
         """Fit FSPL+parallax to a light curve (uses logrho parameterization)."""
-        _get_fspl_disk()
+        _get_fspl_disk(self.fspl_n_fft)
 
         P = self._P
 
-        def build_A(q, t):
-            return A_fspl_parallax_logrho_func(q, t, P)
+        if self.peak_window_days is None:
+            def build_A(q, t):
+                return A_fspl_parallax_logrho_func(q, t, P)
+        else:
+            if self.peak_window_days <= 0.:
+                raise ValueError("peak_window_days must be positive when provided.")
+            peak_indices = jnp.asarray(
+                np.flatnonzero(np.abs(np.asarray(time) - float(q0[0])) <= self.peak_window_days),
+                dtype=jnp.int32,
+            )
+            if peak_indices.size == 0:
+                raise ValueError("peak_window_days selects no data points.")
+
+            def build_A(q, t):
+                return A_fspl_parallax_logrho_peak_func(
+                    q, t, P, peak_indices, N_fft=self.fspl_n_fft)
 
         def q_to_params(q):
             t0, tE, u0, logrho, piEN, piEE = q

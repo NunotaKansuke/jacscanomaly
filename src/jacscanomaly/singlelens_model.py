@@ -40,6 +40,28 @@ def A_fspl_parallax_logrho_func(q: jnp.ndarray, time: jnp.ndarray, P) -> jnp.nda
     u = u_parallax(time, t0, tE, u0, piEN, piEE, P)
     return A_fspl_from_u(u, rho)
 
+def A_fspl_parallax_logrho_peak_func(
+    q: jnp.ndarray,
+    time: jnp.ndarray,
+    P,
+    peak_indices: jnp.ndarray,
+    *,
+    N_fft: int = 1024,
+) -> jnp.ndarray:
+    """FSPL+parallax magnification with microjax evaluated only near peak.
+
+    The indices are fixed before fitting, so JAX can compile a static slice.
+    Outside that window the finite-source correction is negligible by design
+    and we use the point-source magnification, while retaining every data
+    point in the likelihood and in the fitted flux solution.
+    """
+    t0, tE, u0, logrho, piEN, piEE = q
+    rho = jnp.exp(logrho)
+    u = u_parallax(time, t0, tE, u0, piEN, piEE, P)
+    A = A_pspl_from_u(u)
+    A_peak = A_fspl_from_u(u[peak_indices], rho, N_fft=N_fft)
+    return A.at[peak_indices].set(A_peak)
+
 def A_pspl_space_parallax_func(params: jnp.ndarray, time: jnp.ndarray, P) -> jnp.ndarray:
     t0, tE, u0, piEN, piEE = params
     u = u_space_parallax(time, t0, tE, u0, piEN, piEE, P)

@@ -14,6 +14,7 @@ from .singlelens_fit import (
     SingleLensFitResult,
     PSPLFitter,
     CPPPSPLFitter,
+    CPPVBMFSPLParallaxFitter,
     FSPLFitter,
     VBMFiniteDiffFSPLFitter,
     PSPLParallaxFitter,
@@ -38,6 +39,22 @@ from .extract import ResultExtractor
 from .runner import SeasonGridRunner
 from .models import AnomalyResult, BestCandidate, CandidateQuality
 from .template_free import TemplateFreeScanner, TemplateFreeSearchConfig, TemplateFreeSearchResult
+
+
+def _vbm_coordinate_string(ra_deg: float, dec_deg: float) -> str:
+    """Convert decimal degrees to VBM's ``HH:MM:SS +/-DD:MM:SS`` input."""
+    ra_hours = (float(ra_deg) / 15.0) % 24.0
+    rah = int(ra_hours)
+    ram_float = (ra_hours - rah) * 60.0
+    ram = int(ram_float)
+    ras = (ram_float - ram) * 60.0
+    sign = "+" if float(dec_deg) >= 0.0 else "-"
+    dec_abs = abs(float(dec_deg))
+    ded = int(dec_abs)
+    dem_float = (dec_abs - ded) * 60.0
+    dem = int(dem_float)
+    des = (dem_float - dem) * 60.0
+    return f"{rah:02d}:{ram:02d}:{ras:08.5f} {sign}{ded:02d}:{dem:02d}:{des:07.4f}"
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +279,12 @@ class Finder:
             return
     
         # k == "fspl_parallax"
+        if self.config.single_fit_backend == "vbm_cpp":
+            self.fitter = CPPVBMFSPLParallaxFitter(
+                coordinates=_vbm_coordinate_string(self.config.ra_deg, self.config.dec_deg),
+                max_piE=float(self.config.max_piE),
+            )
+            return
         self.fitter = FSPLParallaxFitter(
             RA=self.config.ra_deg,
             Dec=self.config.dec_deg,

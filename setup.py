@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,31 @@ from setuptools.command.build_ext import build_ext as _build_ext
 
 
 CPP_GRID_SOURCE = Path("src/jacscanomaly/_cpp_grid.cpp")
+VBM_CPP_SOURCE = Path("src/jacscanomaly/_vbm_cpp.cpp")
+
+
+def _find_vbm_sources() -> tuple[Path, Path] | None:
+    """Locate the C++ sources installed by the optional VBMicrolensing package.
+
+    The VBM wrapper remains an optional extension: standard jacscanomaly
+    installs retain the existing C++ PSPL backend, while ``jacscanomaly[vbm]``
+    gains the native FSPL+annual-parallax backend when VBM ships its sources.
+    ``VBMICROLENSING_SOURCE_DIR`` supports non-standard installations.
+    """
+    candidates: list[Path] = []
+    source_dir = os.environ.get("VBMICROLENSING_SOURCE_DIR")
+    if source_dir:
+        candidates.append(Path(source_dir))
+    try:
+        import VBMicrolensing  # type: ignore
+
+        candidates.append(Path(VBMicrolensing.__file__).resolve().parent / "lib")
+    except ImportError:
+        pass
+    for directory in candidates:
+        if (directory / "VBMicrolensingLibrary.cpp").is_file() and (directory / "VBMicrolensingLibrary.h").is_file():
+            return directory / "VBMicrolensingLibrary.cpp", directory
+    return None
 
 
 def _compile_and_link_args() -> tuple[list[str], list[str]]:
@@ -52,8 +78,7 @@ class build_ext(_build_ext):
             ) from exc
 
 
-setup(
-    ext_modules=[
+extensions = [
         Extension(
             "jacscanomaly._cpp_grid",
             [str(CPP_GRID_SOURCE)],
@@ -61,6 +86,22 @@ setup(
             language="c++",
             depends=[str(CPP_GRID_SOURCE)],
         )
-    ],
+]
+
+vbm_sources = _find_vbm_sources()
+if vbm_sources is not None:
+    vbm_library, vbm_include = vbm_sources
+    extensions.append(
+        Extension(
+            "jacscanomaly._vbm_cpp",
+            [str(VBM_CPP_SOURCE), str(vbm_library)],
+            include_dirs=[np.get_include(), str(vbm_include)],
+            language="c++",
+            depends=[str(VBM_CPP_SOURCE), str(vbm_library), str(vbm_include / "VBMicrolensingLibrary.h")],
+        )
+    )
+
+setup(
+    ext_modules=extensions,
     cmdclass={"build_ext": build_ext},
 )

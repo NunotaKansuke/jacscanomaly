@@ -319,12 +319,14 @@ class FinderConfig:
     - ``"jax"`` uses the JAX vectorized/chunked implementation.
     """
 
-    single_fit_backend: Literal["jax", "cpp"] = "cpp"
+    single_fit_backend: Literal["jax", "cpp", "vbm_cpp"] = "cpp"
     """
     Single-lens fit backend.
 
-    ``"cpp"`` is implemented for ``fitter_kind="pspl"``. Other single-lens
-    models continue to use the JAX fitters.
+    ``"cpp"`` is implemented for ``fitter_kind="pspl"``. ``"vbm_cpp"`` is
+    implemented for ``fitter_kind="fspl_parallax"`` and uses the native
+    VBMicrolensing finite-source magnification with the C++ LM solver.
+    Other combinations use the JAX fitters.
     """
 
     grid_chunked: bool = False
