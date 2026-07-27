@@ -13,6 +13,8 @@ def _get_fspl_disk(N_fft: int = 1024):
     keeps the established 1024-point accuracy setting.
     """
     global _mag_fspl
+    if _mag_fspl is None:
+        _mag_fspl = {}
     if N_fft not in _mag_fspl:
         try:
             from microjax.fastlens import fspl_disk

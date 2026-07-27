@@ -86,7 +86,10 @@ bool solve_linear(double a[kNParam][kNParam], double b[kNParam], double x[kNPara
 
 void clamp_q(double q[kNParam], double max_piE) {
     q[1] = std::clamp(q[1], std::log(1e-6), std::log(1e8));
-    q[3] = std::clamp(q[3], -50.0, 10.0);
+    // Keep trial sources inside the well-behaved part of VBM's ESPL lookup
+    // table.  Larger values are not useful for the point-lens FSPL workflow
+    // and make the library emit a diagnostic for every model evaluation.
+    q[3] = std::clamp(q[3], -50.0, std::log(10.0));
     if (std::isfinite(max_piE) && max_piE > 0.0) {
         q[4] = std::clamp(q[4], -max_piE, max_piE);
         q[5] = std::clamp(q[5], -max_piE, max_piE);
@@ -222,6 +225,12 @@ PyObject* fit_fspl_parallax(PyObject*, PyObject* args, PyObject* kwargs) {
                     if (a == b) mat[a][b] += lambda * std::max(jtj[a][a], 1.0);
                 }
                 if (!solve_linear(mat, rhs, step)) { lambda *= 10.0; continue; }
+                // In the PSPL-like regime rho is only weakly identified.  A
+                // finite-difference Jacobian can then propose an unphysical
+                // multi-decade logrho jump even though the other parameters
+                // are well constrained.  Keep this coordinate in a local
+                // trust region; accepted LM iterations can still move rho.
+                step[3] = std::clamp(step[3], -0.25, 0.25);
                 double trial[kNParam];
                 for (int k = 0; k < kNParam; ++k) trial[k] = q[k] + step[k];
                 clamp_q(trial, max_piE);

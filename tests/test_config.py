@@ -25,3 +25,16 @@ def test_config_accepts_candidate_criteria():
     config = FinderConfig(candidate_criteria=criteria)
 
     assert config.candidate_criteria is criteria
+
+
+def test_config_accepts_vbm_cpp_multistart_options():
+    config = FinderConfig(
+        fitter_kind="fspl_parallax",
+        single_fit_backend="vbm_cpp",
+        vbm_cpp_piE_seed_values=(-0.25, 0.0, 0.25),
+        vbm_cpp_logrho_seed_values=(-2.0, -0.5),
+    )
+
+    assert config.single_fit_backend == "vbm_cpp"
+    assert config.vbm_cpp_piE_seed_values == (-0.25, 0.0, 0.25)
+    assert config.vbm_cpp_logrho_seed_values == (-2.0, -0.5)

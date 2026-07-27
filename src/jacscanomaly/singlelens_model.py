@@ -21,6 +21,24 @@ def A_fspl_logrho_func(q: jnp.ndarray, time: jnp.ndarray) -> jnp.ndarray:
     u = u_rectilinear(t0, tE, u0, time)
     return A_fspl_from_u(u, rho)
 
+def A_fspl_logrho_peak_func(
+    q: jnp.ndarray,
+    time: jnp.ndarray,
+    peak_indices: jnp.ndarray,
+    *,
+    N_fft: int = 1024,
+) -> jnp.ndarray:
+    """FSPL magnification near peak and PSPL elsewhere.
+
+    ``peak_indices`` is fixed before JAX tracing, allowing long light curves
+    to retain every likelihood datum without evaluating FFT FSPL at baseline.
+    """
+    t0, tE, u0, logrho = q
+    rho = jnp.exp(logrho)
+    u = u_rectilinear(t0, tE, u0, time)
+    A = A_pspl_from_u(u)
+    return A.at[peak_indices].set(A_fspl_from_u(u[peak_indices], rho, N_fft=N_fft))
+
 def A_pspl_parallax_func(params: jnp.ndarray, time: jnp.ndarray, P) -> jnp.ndarray:
     # params = (t0, tE, u0, piEN, piEE)
     t0, tE, u0, piEN, piEE = params

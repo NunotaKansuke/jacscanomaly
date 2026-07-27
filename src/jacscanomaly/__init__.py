@@ -24,6 +24,14 @@ from .singlelens_fit import (
     BICSingleLensFitter,
     CVFitter,
 )
+from .hmc import (
+    FSPLHMCResult,
+    FSPLParallaxHMCResult,
+    PSPLHMCResult,
+    sample_fspl_hmc,
+    sample_fspl_parallax_hmc,
+    sample_pspl_hmc,
+)
 from .template_free import (
     TemplateFreeCandidate,
     TemplateFreeScanner,
@@ -61,6 +69,12 @@ __all__ = [
     "PSPLSpaceParallaxFitter",
     "FSPLSpaceParallaxFitter",
     "VBMFiniteDiffGullsFSPLSpaceParallaxFitter",
+    "FSPLParallaxHMCResult",
+    "sample_fspl_parallax_hmc",
+    "FSPLHMCResult",
+    "sample_fspl_hmc",
+    "PSPLHMCResult",
+    "sample_pspl_hmc",
     "BICSingleLensFitter",
     "CVFitter",
     "SingleLensFitResult",

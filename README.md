@@ -362,6 +362,35 @@ You can verify the installation with:
 
     from microjax.fastlens import fspl_disk
 
+### FSPL + annual-parallax HMC
+
+After optimizing an ``fspl_parallax`` model, sample its posterior with the
+same microjax magnification and cached parallax projector:
+
+```python
+from jacscanomaly import sample_fspl_parallax_hmc
+
+# ``fit`` is the result returned by Finder(...).fit_single_lens(...).
+posterior = sample_fspl_parallax_hmc(
+    fit,
+    rng_seed=42,
+    num_warmup=1_000,
+    num_samples=2_000,
+    # The default FSPL window follows the optimized rho * tE.
+)
+print(posterior.median("rho"))
+```
+
+This optional feature requires ``numpyro`` (`pip install jacscanomaly[hmc]`).
+The optimized nonlinear parameters and source/blend fluxes are used as NUTS
+initial values. The default uses microjax inside
+``max(10 days, 5 * rho * tE)`` of the optimized peak and PSPL elsewhere (all
+points remain in the likelihood); set ``peak_window_days=None`` for full-curve
+FSPL. Default priors are intentionally broad; set bounds such as
+``tE_bounds``, ``u0_bounds``, ``logrho_bounds``, and ``piE_max`` to the priors
+appropriate for the event.  See ``example/fspl_parallax_hmc.py`` for a full
+workflow.
+
 ## Citation
 
 If you use **jacscanomaly** in academic work, including journal articles,

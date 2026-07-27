@@ -572,7 +572,8 @@ class CPPVBMFSPLParallaxFitter:
         p0_np = np.asarray(p0, dtype=float)
         if p0_np.shape != (6,):
             raise ValueError("p0 must be (t0, tE, u0, logrho, piE_1, piE_2).")
-        # Match the established fspl_parallax Finder API: x0[3] is logrho.
+        # The public Finder contract uses logrho.  The native wrapper accepts
+        # physical rho and converts it to VBM's internal logrho coordinate.
         p0_vbm = p0_np.copy()
         p0_vbm[3] = np.exp(np.clip(p0_vbm[3], -50.0, 10.0))
         params, fs, fb, chi2, model_flux, residual = _vbm_cpp.fit_fspl_parallax(

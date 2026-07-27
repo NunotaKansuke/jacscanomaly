@@ -283,6 +283,9 @@ class Finder:
             self.fitter = CPPVBMFSPLParallaxFitter(
                 coordinates=_vbm_coordinate_string(self.config.ra_deg, self.config.dec_deg),
                 max_piE=float(self.config.max_piE),
+                maxiter=int(self.config.vbm_cpp_maxiter),
+                damping_parameter=float(self.config.vbm_cpp_damping_parameter),
+                tol=float(self.config.vbm_cpp_tol),
             )
             return
         self.fitter = FSPLParallaxFitter(
@@ -570,7 +573,48 @@ class Finder:
         best_chi2 = np.inf
         errors = []
 
-        for x0 in guesses:
+        starts = [np.asarray(x0, dtype=float) for x0 in guesses]
+        if isinstance(self.fitter, CPPVBMFSPLParallaxFitter):
+            # First refine the broad jacscanomaly grid seeds with the robust
+            # PSPL C++ solver. Feeding every coarse (often decade-separated)
+            # tE proposal directly to VBM is both wasteful and numerically
+            # fragile. The best PSPL solution supplies the common trajectory
+            # seed; VBM then explores only the FSPL/parallax directions.
+            pspl_fitter = CPPPSPLFitter(
+                maxiter=int(self.config.vbm_cpp_maxiter),
+                u0_min=float(self.config.pspl_fit_u0_min),
+                min_t0_support_points=int(self.config.pspl_fit_min_t0_support_points),
+                t0_support_tE_coeff=float(self.config.pspl_fit_t0_support_tE_coeff),
+            )
+            pspl_fits = []
+            for x0 in guesses:
+                try:
+                    pspl_fits.append(pspl_fitter.fit(time_j, flux_j, ferr_j, jnp.asarray(x0[:3])))
+                except Exception as exc:
+                    errors.append(exc)
+            if pspl_fits:
+                pspl_seed = np.asarray(min(pspl_fits, key=lambda fit: float(fit.chi2)).params, dtype=float)
+                starts = [np.r_[pspl_seed, float(guesses[0, 3]), 0.0, 0.0]]
+            piE_values = tuple(float(value) for value in self.config.vbm_cpp_piE_seed_values) or (0.0,)
+            logrho_values = tuple(float(value) for value in self.config.vbm_cpp_logrho_seed_values)
+            if not logrho_values:
+                logrho_values = tuple(float(x0[3]) for x0 in starts)
+            max_piE = float(self.config.max_piE)
+            trajectory_seeds = starts
+            starts = []
+            for x0 in trajectory_seeds:
+                for logrho in logrho_values:
+                    for piEN in piE_values:
+                        for piEE in piE_values:
+                            if np.isfinite(max_piE) and max_piE > 0.0 and (
+                                abs(piEN) > max_piE or abs(piEE) > max_piE
+                            ):
+                                continue
+                            start = np.asarray(x0, dtype=float).copy()
+                            start[3:] = (logrho, piEN, piEE)
+                            starts.append(start)
+
+        for x0 in starts:
             try:
                 fit = self.fitter.fit(time_j, flux_j, ferr_j, jnp.asarray(x0, dtype=time_j.dtype))
                 chi2 = float(jax.device_get(fit.chi2))

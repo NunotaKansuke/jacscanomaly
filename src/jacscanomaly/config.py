@@ -348,6 +348,28 @@ class FinderConfig:
     Other combinations use the JAX fitters.
     """
 
+    vbm_cpp_piE_seed_values: tuple[float, ...] = (0.0,)
+    """Per-component piE values used for automatic VBM-C++ multistart fits.
+
+    When ``fitter_kind="fspl_parallax"`` and
+    ``single_fit_backend="vbm_cpp"``, jacscanomaly combines each automatic
+    ``(t0, tE, u0)`` seed with this Cartesian piE grid before C++ LM fitting.
+    The default is a single safe zero-parallax start. Supply, for example,
+    ``(-0.5, 0.0, 0.5)`` to opt into a Cartesian parallax multistart.
+    """
+
+    vbm_cpp_logrho_seed_values: tuple[float, ...] = (-3.0,)
+    """log-rho values combined with automatic VBM-C++ parallax seeds."""
+
+    vbm_cpp_maxiter: int = 200
+    """Maximum C++ LM iterations per VBM automatic-start trial."""
+
+    vbm_cpp_damping_parameter: float = 1.0e-4
+    """Initial LM damping parameter for the native VBM C++ backend."""
+
+    vbm_cpp_tol: float = 1.0e-5
+    """C++ LM convergence tolerance for the native VBM backend."""
+
     grid_chunked: bool = False
     """
     Force chunked execution of the grid scan.
