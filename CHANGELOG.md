@@ -6,7 +6,7 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
-## [Unreleased]
+## [0.4.0] - 2026-07-28
 
 ### Added
 - `PlanetSignalResult.measure_features()` for direct peak/dip counts,

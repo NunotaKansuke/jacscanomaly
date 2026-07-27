@@ -170,6 +170,15 @@ rather than an unconditional percentile cut.
 
 This measures how strongly the best candidate stands out from the rest of the grid.
 
+Since v0.4.0, the score background is local to the candidate's observing
+season and timescale, with robust median/MAD normalization. Quality cuts do not
+change that background, and strong secondary clusters are removed only by
+adaptive one-sided clipping. In checks on four retained Roman light curves,
+the selected candidate and its ``Δχ²`` were unchanged while the score changed
+moderately, indicating that the normalization is less sensitive to unrelated
+seasons and timescales. Existing ``simscan`` efficiency maps using score
+thresholds should be recalibrated with v0.4.0 scores.
+
 ---
 
 ## Candidate Quality Diagnostics

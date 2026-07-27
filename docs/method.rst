@@ -101,6 +101,11 @@ and therefore do not censor this background population. The reported
 name. A one-sided, MAD-based upper clip removes strong secondary candidates
 without discarding a fixed percentile of ordinary background clusters.
 
+This makes the score a local comparison: in validation checks, candidate
+locations and ``dchi2`` values stayed fixed while the score changed only
+through the background normalization. Efficiency thresholds calibrated with
+older score definitions should therefore be regenerated for v0.4.0.
+
 Effective number of points
 --------------------------
 
