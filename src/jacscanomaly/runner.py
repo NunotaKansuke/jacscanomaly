@@ -467,24 +467,11 @@ class SeasonGridRunner:
                     np.asarray(longest_np, dtype=float),
                 ]
             )
+            # Extract the raw cluster population before applying scientific
+            # candidate-quality criteria. The raw population is needed for an
+            # unbiased estimate of the scan background used by the score.
             dchi2_extract = np.asarray(dchi2_np, dtype=float)
             dchi2_extract = np.where(np.isfinite(dchi2_extract), dchi2_extract, -np.inf)
-            criteria = self.config.candidate_criteria
-            if criteria is not None:
-                keep = np.ones_like(dchi2_extract, dtype=bool)
-                if criteria.min_dchi2 is not None:
-                    keep &= dchi2_extract >= float(criteria.min_dchi2)
-                if criteria.min_n_eff is not None:
-                    keep &= np.asarray(neff_np, dtype=float) >= float(criteria.min_n_eff)
-                if criteria.min_n_contrib is not None:
-                    keep &= np.asarray(ncontrib_np, dtype=float) >= int(criteria.min_n_contrib)
-                if criteria.min_n_window is not None:
-                    keep &= np.asarray(nwin_np, dtype=float) >= int(criteria.min_n_window)
-                if criteria.min_longest_run is not None:
-                    keep &= np.asarray(longest_np, dtype=float) >= int(criteria.min_longest_run)
-                if criteria.max_peak_frac is not None:
-                    keep &= np.asarray(peak_np, dtype=float) <= float(criteria.max_peak_frac)
-                dchi2_extract = np.where(keep, dchi2_extract, -np.inf)
 
             # ---- timed block: extract clusters
             t_ext0 = time.perf_counter()

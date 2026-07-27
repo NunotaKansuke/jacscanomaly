@@ -7,11 +7,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-try:
-    from scipy.optimize import minimize
-except ImportError:  # pragma: no cover - scipy is an optional runtime dependency
-    minimize = None
-
 from .finder import Finder
 from .anomaly_models import get_chi2_anom_masked, get_chi2_flat_masked
 from .models import BestCandidate
@@ -138,77 +133,112 @@ class FlatBaselineDiagnostic:
 
 
 @dataclass(frozen=True)
-class PlanetSignalClassificationConfig:
-    """
-    Configuration for shape-based classification of extracted planet signals.
-    """
+class PlanetFeatureConfig:
+    """Controls peak and dip measurement on an extracted residual signal."""
 
     smooth_points: int = 7
-    min_peak_abs_z: float = 5.0
-    peak_relative_height: float = 0.35
-    min_peak_prominence: float = 3.0
-    peak_prominence_frac: float = 0.15
-    min_peak_separation: float = 0.15
+    min_abs_z: float = 5.0
+    min_relative_strength: float = 0.1
+    min_prominence: float = 3.0
+    prominence_fraction: float = 0.15
+    min_separation: float = 0.15
     duration_min_abs_z: float = 3.0
     duration_relative_height: float = 0.5
-    fit_template_timescale: bool = False
-    fit_template_min_points: int = 6
-    fit_template_min_teff: float = 0.01
-    fit_template_max_teff: float = 10.0
-    fit_template_half_width_scale: float = 1.0
-    positive_dominance: float = 1.5
-    negative_dominance: float = 1.5
 
 
 @dataclass(frozen=True)
-class PlanetSignalPeak:
-    """
-    A local extremum inside an extracted signal component.
-    """
+class PlanetFeature:
+    """One measured peak or dip, without a physical-shape interpretation."""
 
+    kind: str
     index: int
     time: float
-    z: float
-    residual: float
+    t_start: float
+    t_end: float
     timescale: float
-    t_start: float
-    t_end: float
-    pspl_magnification: float
-    observed_magnification: float
-    strength_ratio: float
-    fitted_t0: float = np.nan
-    fitted_teff: float = np.nan
-    fitted_chi2: float = np.nan
+    strength: float
+    signed_z: float
+    residual: float
+    fractional_deviation: float
+    magnification_ratio: float
+
+    def summary_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "index": int(self.index),
+            "time": float(self.time),
+            "t_start": float(self.t_start),
+            "t_end": float(self.t_end),
+            "timescale": float(self.timescale),
+            "strength": float(self.strength),
+            "signed_z": float(self.signed_z),
+            "residual": float(self.residual),
+            "fractional_deviation": float(self.fractional_deviation),
+            "magnification_ratio": float(self.magnification_ratio),
+        }
 
 
 @dataclass(frozen=True)
-class PlanetSignalComponentClassification:
-    """
-    Shape classification for one contiguous extracted signal component.
-    """
+class PlanetFeatureResult:
+    """Flat peak/dip measurements for one extracted planet signal."""
 
-    signal_type: str
-    start_index: int
-    end_index: int
-    t_start: float
-    t_end: float
-    n_points: int
-    positive_chi2: float
-    negative_chi2: float
-    signed_chi2_balance: float
-    peaks: Tuple[PlanetSignalPeak, ...]
-    dips: Tuple[PlanetSignalPeak, ...]
+    peaks: Tuple[PlanetFeature, ...]
+    dips: Tuple[PlanetFeature, ...]
 
+    @property
+    def n_peaks(self) -> int:
+        return len(self.peaks)
 
-@dataclass(frozen=True)
-class PlanetSignalClassification:
-    """
-    Shape-classification summary for a :class:`PlanetSignalResult`.
-    """
+    @property
+    def n_dips(self) -> int:
+        return len(self.dips)
 
-    signal_type: str
-    components: Tuple[PlanetSignalComponentClassification, ...]
-    best: Optional[PlanetSignalComponentClassification]
+    @property
+    def features(self) -> Tuple[PlanetFeature, ...]:
+        return tuple(sorted((*self.peaks, *self.dips), key=lambda feature: feature.time))
+
+    @property
+    def strongest(self) -> Optional[PlanetFeature]:
+        return max(self.features, key=lambda feature: feature.strength, default=None)
+
+    def summary_dict(self) -> dict[str, object]:
+        strongest = self.strongest
+        row: dict[str, object] = {
+            "n_peaks": self.n_peaks,
+            "n_dips": self.n_dips,
+            "n_features": self.n_peaks + self.n_dips,
+        }
+        if strongest is not None:
+            row.update(
+                {
+                    "strongest_kind": strongest.kind,
+                    "strongest_time": strongest.time,
+                    "strongest_timescale": strongest.timescale,
+                    "strongest_strength": strongest.strength,
+                }
+            )
+        return row
+
+    def feature_dicts(self) -> list[dict[str, object]]:
+        return [feature.summary_dict() for feature in self.features]
+
+    def summary_table(self):
+        """Return one row per feature as a pandas table when pandas is installed."""
+        try:
+            import pandas as pd
+        except ImportError as exc:  # pragma: no cover - optional convenience
+            raise ImportError("PlanetFeatureResult.summary_table() requires pandas.") from exc
+        return pd.DataFrame(self.feature_dicts())
+
+    def summary_text(self) -> str:
+        lines = [f"peaks={self.n_peaks}, dips={self.n_dips}"]
+        for feature in self.features:
+            lines.append(
+                f"{feature.kind}: t={feature.time:.6g}, "
+                f"timescale={feature.timescale:.6g}, "
+                f"strength={feature.strength:.3g} sigma"
+            )
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -231,53 +261,27 @@ class PlanetSignalResult:
     candidates: Tuple[PlanetSignalCandidate, ...]
     best: Optional[PlanetSignalCandidate]
 
-    def classify(
+    def measure_features(
         self,
-        config: PlanetSignalClassificationConfig = PlanetSignalClassificationConfig(),
-    ) -> PlanetSignalClassification:
+        config: Optional[PlanetFeatureConfig] = None,
+    ) -> PlanetFeatureResult:
         """
-        Classify the extracted signal morphology.
+        Measure prominent peaks and dips in the extracted residual signal.
 
         Parameters
         ----------
-        config : PlanetSignalClassificationConfig, optional
-            Peak, dip, smoothing, and optional local-template-timescale
-            settings.
+        config : PlanetFeatureConfig, optional
+            Smoothing, prominence, separation, and duration thresholds.
 
         Returns
         -------
-        PlanetSignalClassification
-            Broad component labels, prominent peaks, and prominent dips. This
-            is a shape summary and does not fit a physical lens model.
+        PlanetFeatureResult
+            Flat peak and dip lists. Each feature reports its time,
+            threshold-crossing timescale, absolute z-score strength, signed
+            residual, fractional deviation, and magnification ratio.
         """
-        return PlanetSignalClassifier(config).classify(self)
-
-    def classify_anomaly(self, config=None):
-        """
-        Measure each anomaly component with the heuristic estimator.
-
-        This is a convenience wrapper around
-        :class:`jacscanomaly.PlanetAnomalyClassifier`.  Each component's
-        local shape is measured with a small template set, and the
-        deterministic geometry ``(tau_anom, u_anom, alpha, s_dagger)`` and
-        assumption-tagged scale estimates (``dt/tE``, ``q``, ``tstar/tE``)
-        are derived from it.
-
-        Parameters
-        ----------
-        config : PlanetClassConfig, optional
-            Template routing, optimization, and uncertainty settings.
-            Defaults to :class:`PlanetClassConfig`.
-
-        Returns
-        -------
-        PlanetAnomalyFitResult
-            Per-component shape fits, geometry, and scale estimates.
-        """
-        from .planet_class import PlanetAnomalyClassifier, PlanetClassConfig
-
-        cfg = PlanetClassConfig() if config is None else config
-        return PlanetAnomalyClassifier(cfg).fit(self)
+        cfg = PlanetFeatureConfig() if config is None else config
+        return _PlanetFeatureDetector(cfg).run(self)
 
     def plot_signal(
         self,
@@ -288,8 +292,8 @@ class PlanetSignalResult:
         peak_tE_width: float = 1.5,
         signal_pad: float = 0.5,
         max_signal_width: float = 6.0,
-        show_classification: bool = True,
-        classification_config: PlanetSignalClassificationConfig = PlanetSignalClassificationConfig(),
+        show_features: bool = True,
+        feature_config: Optional[PlanetFeatureConfig] = None,
     ):
         """
         Plot the refined baseline and highlight extracted signal points.
@@ -303,10 +307,10 @@ class PlanetSignalResult:
         peak_tE_width, signal_pad, max_signal_width : float, optional
             Controls used to derive plot limits when explicit limits are not
             supplied.
-        show_classification : bool, optional
-            Overlay broad shape-classification markers.
-        classification_config : PlanetSignalClassificationConfig, optional
-            Configuration used for that overlay.
+        show_features : bool, optional
+            Overlay measured peak and dip positions and durations.
+        feature_config : PlanetFeatureConfig, optional
+            Configuration used for the measurements.
 
         Returns
         -------
@@ -383,11 +387,11 @@ class PlanetSignalResult:
                 f"chi2={self.best.chi2:.1f}, n={self.best.n_points}"
             )
 
-        if show_classification:
-            classification = self.classify(classification_config)
-            self._draw_classification_overlay(
+        if show_features:
+            features = self.measure_features(feature_config)
+            self._draw_feature_overlay(
                 axes=(ax_peak, ax_zoom, ax_res),
-                classification=classification,
+                features=features,
             )
         ax_peak.legend(loc="best")
 
@@ -455,22 +459,14 @@ class PlanetSignalResult:
         return (lo, hi)
 
     @staticmethod
-    def _draw_classification_overlay(
+    def _draw_feature_overlay(
         *,
         axes,
-        classification: PlanetSignalClassification,
+        features: PlanetFeatureResult,
     ) -> None:
         ax_peak, ax_zoom, ax_res = axes
-        signal_color = "tab:purple"
         signal_alpha = 0.14
-        best = classification.best
-        n_peaks = len(best.peaks) if best is not None else 0
-        n_dips = len(best.dips) if best is not None else 0
-        label = (
-            f"type: {classification.signal_type}\n"
-            f"components: {len(classification.components)}\n"
-            f"peaks: {n_peaks}, dips: {n_dips}"
-        )
+        label = f"peaks: {features.n_peaks}, dips: {features.n_dips}"
         ax_peak.text(
             0.02,
             0.98,
@@ -484,41 +480,26 @@ class PlanetSignalResult:
             zorder=10,
         )
 
-        if best is None:
-            return
-
-        extrema: Tuple[PlanetSignalPeak, ...]
-        if best.signal_type == "dip":
-            raw_extrema = best.dips
-        elif best.signal_type == "caustic_crossing":
-            raw_extrema = best.peaks
-        elif best.signal_type in {"single_peak", "whole_event_anomaly"}:
-            raw_extrema = best.peaks
-        else:
-            raw_extrema = best.peaks + best.dips
-        extrema = PlanetSignalResult._non_overlapping_extrema(raw_extrema)
-        extrema = tuple(sorted(extrema, key=lambda p: p.time))
-
-        first_line = True
-        for peak in extrema:
-            is_dip = peak.z < 0.0
+        used_labels: set[str] = set()
+        for feature in features.features:
+            is_dip = feature.kind == "dip"
+            color = "tab:red" if is_dip else "tab:green"
             line_style = "--" if is_dip else "-"
-            line_label = "signal peak" if first_line else None
-            line_time = float(peak.time)
-            first_line = False
+            line_label = feature.kind if feature.kind not in used_labels else None
+            used_labels.add(feature.kind)
             for ax in (ax_peak, ax_zoom, ax_res):
-                if peak.t_end > peak.t_start:
+                if feature.t_end > feature.t_start:
                     ax.axvspan(
-                        peak.t_start,
-                        peak.t_end,
-                        color=signal_color,
+                        feature.t_start,
+                        feature.t_end,
+                        color=color,
                         alpha=signal_alpha,
                         lw=0,
                         zorder=0.5,
                     )
                 ax.axvline(
-                    line_time,
-                    color=signal_color,
+                    feature.time,
+                    color=color,
                     ls=line_style,
                     lw=1.5,
                     alpha=0.9,
@@ -526,45 +507,13 @@ class PlanetSignalResult:
                     zorder=4,
                 )
 
-    @staticmethod
-    def _non_overlapping_extrema(
-        extrema: Tuple[PlanetSignalPeak, ...],
-        *,
-        max_overlap_fraction: float = 0.25,
-    ) -> Tuple[PlanetSignalPeak, ...]:
-        selected: list[PlanetSignalPeak] = []
-        for peak in sorted(extrema, key=lambda p: abs(float(p.z)), reverse=True):
-            width = max(float(peak.t_end) - float(peak.t_start), 0.0)
-            keep = True
-            for other in selected:
-                other_width = max(float(other.t_end) - float(other.t_start), 0.0)
-                overlap = max(
-                    0.0,
-                    min(float(peak.t_end), float(other.t_end))
-                    - max(float(peak.t_start), float(other.t_start)),
-                )
-                denom = max(min(width, other_width), 1e-12)
-                if overlap / denom > float(max_overlap_fraction):
-                    keep = False
-                    break
-            if keep:
-                selected.append(peak)
-        return tuple(sorted(selected, key=lambda p: p.time))
-
-
 @dataclass
-class PlanetSignalClassifier:
-    """
-    Shape-based classifier for extracted planet-signal components.
+class _PlanetFeatureDetector:
+    """Measure prominent peaks and dips in an extracted residual signal."""
 
-    The classifier does not try to infer the physical caustic orientation.
-    If two prominent positive peaks are found in one connected component, they
-    are reported as the same kind of crossing peak in time order.
-    """
+    config: PlanetFeatureConfig = PlanetFeatureConfig()
 
-    config: PlanetSignalClassificationConfig = PlanetSignalClassificationConfig()
-
-    def classify(self, result: PlanetSignalResult) -> PlanetSignalClassification:
+    def run(self, result: PlanetSignalResult) -> PlanetFeatureResult:
         time = np.asarray(result.time, dtype=float)
         flux = np.asarray(result.flux, dtype=float)
         ferr = np.asarray(result.ferr, dtype=float)
@@ -572,146 +521,77 @@ class PlanetSignalClassifier:
         mask = np.asarray(result.signal_mask, dtype=bool)
 
         if not np.any(mask):
-            return PlanetSignalClassification(
-                signal_type="none",
-                components=(),
-                best=None,
-            )
+            return PlanetFeatureResult(peaks=(), dips=())
 
         z = residual / np.maximum(ferr, 1e-12)
         z_smooth = self._smooth(z, int(self.config.smooth_points))
-        components: list[PlanetSignalComponentClassification] = []
+        model_flux = np.asarray(result.refined_fit.model_flux, dtype=float)
+        peaks: list[PlanetFeature] = []
         for start, end in self._mask_slices(mask):
-            component = self._classify_component(
-                result=result,
-                time=time,
-                flux=flux,
-                ferr=ferr,
-                residual=residual,
-                z=z,
-                z_smooth=z_smooth,
+            indices = self._prominent_extrema(
+                time,
+                z_smooth,
                 start=start,
                 end=end,
-            )
-            components.append(component)
-
-        components_tuple = tuple(sorted(components, key=self._component_chi2, reverse=True))
-        best = components_tuple[0] if components_tuple else None
-        return PlanetSignalClassification(
-            signal_type=best.signal_type if best is not None else "none",
-            components=components_tuple,
-            best=best,
-        )
-
-    def _classify_component(
-        self,
-        *,
-        result: PlanetSignalResult,
-        time: np.ndarray,
-        flux: np.ndarray,
-        ferr: np.ndarray,
-        residual: np.ndarray,
-        z: np.ndarray,
-        z_smooth: np.ndarray,
-        start: int,
-        end: int,
-    ) -> PlanetSignalComponentClassification:
-        sl = slice(start, end)
-        z_seg = z[sl]
-        positive_chi2 = float(np.sum(np.where(z_seg > 0.0, z_seg * z_seg, 0.0)))
-        negative_chi2 = float(np.sum(np.where(z_seg < 0.0, z_seg * z_seg, 0.0)))
-        total_chi2 = positive_chi2 + negative_chi2
-        signed_balance = (
-            (positive_chi2 - negative_chi2) / total_chi2
-            if total_chi2 > 0.0
-            else 0.0
-        )
-
-        peak_indices = self._prominent_extrema(
-            time,
-            z_smooth,
-            start=start,
-            end=end,
-            sign=1.0,
-        )
-        dip_indices = self._prominent_extrema(
-            time,
-            z_smooth,
-            start=start,
-            end=end,
-            sign=-1.0,
-        )
-        peaks = tuple(
-            self._peaks_from_indices(
-                result=result,
-                time=time,
-                flux=flux,
-                residual=residual,
-                z=z,
-                z_smooth=z_smooth,
-                indices=peak_indices,
-                component_start=start,
-                component_end=end,
                 sign=1.0,
             )
-        )
-        dips = tuple(
-            self._peaks_from_indices(
-                result=result,
-                time=time,
-                flux=flux,
-                residual=residual,
-                z=z,
-                z_smooth=z_smooth,
-                indices=dip_indices,
-                component_start=start,
-                component_end=end,
+            peaks.extend(
+                self._features_from_indices(
+                    kind="peak",
+                    time=time,
+                    flux=flux,
+                    residual=residual,
+                    z=z,
+                    z_smooth=z_smooth,
+                    model_flux=model_flux,
+                    indices=indices,
+                    component_start=start,
+                    component_end=end,
+                    sign=1.0,
+                    result=result,
+                )
+            )
+
+        # Positive caustic/bump features take precedence. Negative wings around
+        # a strong positive perturbation are usually baseline mismatch, not an
+        # independent minor-image dip.
+        if peaks:
+            return PlanetFeatureResult(
+                peaks=tuple(sorted(peaks, key=lambda feature: feature.time)),
+                dips=(),
+            )
+
+        dips: list[PlanetFeature] = []
+        for start, end in self._mask_slices(mask):
+            indices = self._prominent_extrema(
+                time,
+                z_smooth,
+                start=start,
+                end=end,
                 sign=-1.0,
             )
-        )
+            dips.extend(
+                self._features_from_indices(
+                    kind="dip",
+                    time=time,
+                    flux=flux,
+                    residual=residual,
+                    z=z,
+                    z_smooth=z_smooth,
+                    model_flux=model_flux,
+                    indices=indices,
+                    component_start=start,
+                    component_end=end,
+                    sign=-1.0,
+                    result=result,
+                    require_closed=True,
+                )
+            )
 
-        signal_type = self._component_type(
-            n_peaks=len(peaks),
-            n_dips=len(dips),
-            positive_chi2=positive_chi2,
-            negative_chi2=negative_chi2,
-            flat_baseline=result.flat_baseline_diagnostic.use_flat_baseline,
+        return PlanetFeatureResult(
+            peaks=(),
+            dips=tuple(sorted(dips, key=lambda feature: feature.time)),
         )
-
-        return PlanetSignalComponentClassification(
-            signal_type=signal_type,
-            start_index=int(start),
-            end_index=int(end),
-            t_start=float(time[start]),
-            t_end=float(time[end - 1]),
-            n_points=int(end - start),
-            positive_chi2=positive_chi2,
-            negative_chi2=negative_chi2,
-            signed_chi2_balance=float(signed_balance),
-            peaks=peaks,
-            dips=dips,
-        )
-
-    def _component_type(
-        self,
-        *,
-        n_peaks: int,
-        n_dips: int,
-        positive_chi2: float,
-        negative_chi2: float,
-        flat_baseline: bool,
-    ) -> str:
-        if flat_baseline:
-            return "whole_event_anomaly"
-        if n_dips > 0 and negative_chi2 >= float(self.config.negative_dominance) * max(positive_chi2, 1e-12):
-            return "dip"
-        if n_peaks >= 2 and positive_chi2 >= max(negative_chi2, 1e-12):
-            return "caustic_crossing"
-        if n_peaks == 1 and positive_chi2 >= float(self.config.positive_dominance) * max(negative_chi2, 1e-12):
-            return "single_peak"
-        if n_peaks == 0 and n_dips == 0:
-            return "low_significance"
-        return "complex"
 
     def _prominent_extrema(
         self,
@@ -726,44 +606,56 @@ class PlanetSignalClassifier:
         if segment.size == 0:
             return []
 
-        min_height = float(self.config.min_peak_abs_z)
+        min_height = float(self.config.min_abs_z)
         peak_height = float(np.max(segment))
-        threshold = max(min_height, float(self.config.peak_relative_height) * peak_height)
-        if not np.isfinite(peak_height) or peak_height < threshold:
+        if not np.isfinite(peak_height) or peak_height < min_height:
             return []
+        min_height = max(
+            min_height,
+            float(self.config.min_relative_strength) * peak_height,
+        )
 
         extrema = self._monotonic_extrema(segment)
         if not extrema:
             return []
 
         local: list[int] = []
-        selected_offsets: list[int] = []
-        for offset in sorted(extrema, key=lambda i: segment[i], reverse=True):
+        for offset in extrema:
             value = float(segment[offset])
-            if value < threshold:
+            if value < min_height:
                 continue
-
-            separate = True
-            for kept in selected_offsets:
-                lo = min(int(offset), int(kept))
-                hi = max(int(offset), int(kept)) + 1
-                valley = float(np.min(segment[lo:hi]))
-                weaker = min(value, float(segment[kept]))
-                min_prominence = max(
-                    float(self.config.min_peak_prominence),
-                    float(self.config.peak_prominence_frac) * weaker,
-                )
-                if weaker - valley < min_prominence:
-                    separate = False
-                    break
-            if separate:
-                selected_offsets.append(int(offset))
-
-        for offset in selected_offsets:
-            local.append(start + int(offset))
+            prominence = self._local_prominence(segment, int(offset))
+            min_prominence = max(
+                float(self.config.min_prominence),
+                float(self.config.prominence_fraction) * value,
+            )
+            if prominence >= min_prominence:
+                local.append(start + int(offset))
 
         local.sort(key=lambda idx: sign * values[idx], reverse=True)
         return self._suppress_nearby_extrema(time, values, local, sign)
+
+    @staticmethod
+    def _local_prominence(segment: np.ndarray, offset: int) -> float:
+        """Return prominence relative to the higher of the two local floors."""
+        values = np.asarray(segment, dtype=float)
+        height = float(values[offset])
+
+        left_floor = height
+        for i in range(int(offset) - 1, -1, -1):
+            value = float(values[i])
+            if value > height:
+                break
+            left_floor = min(left_floor, value)
+
+        right_floor = height
+        for i in range(int(offset) + 1, values.size):
+            value = float(values[i])
+            if value > height:
+                break
+            right_floor = min(right_floor, value)
+
+        return max(height - max(left_floor, right_floor), 0.0)
 
     @staticmethod
     def _monotonic_extrema(segment: np.ndarray) -> list[int]:
@@ -805,7 +697,7 @@ class PlanetSignalClassifier:
         sign: float,
     ) -> list[int]:
         selected: list[int] = []
-        min_sep = float(self.config.min_peak_separation)
+        min_sep = float(self.config.min_separation)
         for index in extrema:
             far_enough = all(
                 abs(float(time[index]) - float(time[kept])) >= min_sep
@@ -816,20 +708,23 @@ class PlanetSignalClassifier:
         selected.sort()
         return selected
 
-    def _peaks_from_indices(
+    def _features_from_indices(
         self,
         *,
+        kind: str,
         result: PlanetSignalResult,
         time: np.ndarray,
         flux: np.ndarray,
         residual: np.ndarray,
         z: np.ndarray,
         z_smooth: np.ndarray,
+        model_flux: np.ndarray,
         indices: list[int],
         component_start: int,
         component_end: int,
         sign: float,
-    ) -> list[PlanetSignalPeak]:
+        require_closed: bool = False,
+    ) -> list[PlanetFeature]:
         if not indices:
             return []
 
@@ -844,14 +739,17 @@ class PlanetSignalClassifier:
             prev_boundary = valley + 1
         cells.append((prev_boundary, int(component_end)))
 
-        return [
-            self._peak_from_index(
+        features: list[PlanetFeature] = []
+        for cell_start, cell_end in cells:
+            feature = self._feature_from_index(
+                kind=kind,
                 result=result,
                 time=time,
                 flux=flux,
                 residual=residual,
                 z=z,
                 z_smooth=z_smooth,
+                model_flux=model_flux,
                 index=self._raw_extremum_in_cell(
                     z=z,
                     cell_start=max(component_start, cell_start),
@@ -861,9 +759,11 @@ class PlanetSignalClassifier:
                 cell_start=max(component_start, cell_start),
                 cell_end=min(component_end, cell_end),
                 sign=sign,
+                require_closed=require_closed,
             )
-            for index, (cell_start, cell_end) in zip(sorted_indices, cells)
-        ]
+            if feature is not None:
+                features.append(feature)
+        return features
 
     @staticmethod
     def _raw_extremum_in_cell(
@@ -879,20 +779,23 @@ class PlanetSignalClassifier:
         values = np.where(np.isfinite(values), values, -np.inf)
         return int(cell_start + np.argmax(values))
 
-    def _peak_from_index(
+    def _feature_from_index(
         self,
         *,
+        kind: str,
         result: PlanetSignalResult,
         time: np.ndarray,
         flux: np.ndarray,
         residual: np.ndarray,
         z: np.ndarray,
         z_smooth: np.ndarray,
+        model_flux: np.ndarray,
         index: int,
         cell_start: int,
         cell_end: int,
         sign: float,
-    ) -> PlanetSignalPeak:
+        require_closed: bool = False,
+    ) -> Optional[PlanetFeature]:
         values = sign * z_smooth
         height = float(values[index])
         left_floor = float(np.min(values[cell_start : index + 1]))
@@ -910,6 +813,8 @@ class PlanetSignalClassifier:
         hi = int(index)
         while hi + 1 < cell_end and values[hi + 1] >= threshold:
             hi += 1
+        if require_closed and (lo == cell_start or hi + 1 == cell_end):
+            return None
         t_start, t_end = self._interpolated_threshold_bounds(
             time=time,
             values=values,
@@ -920,47 +825,30 @@ class PlanetSignalClassifier:
             threshold=threshold,
         )
 
-        pspl_mag, observed_mag, strength_ratio = self._magnification_strength(
+        magnification_ratio = self._magnification_ratio(
             result=result,
             flux=float(flux[index]),
-            model_flux=float(np.asarray(result.refined_fit.model_flux)[index]),
+            model_flux=float(model_flux[index]),
+        )
+        baseline = float(model_flux[index])
+        fractional_deviation = (
+            float(residual[index]) / baseline
+            if np.isfinite(baseline) and abs(baseline) > 1e-30
+            else float("nan")
         )
 
-        fitted_t0 = np.nan
-        fitted_teff = np.nan
-        fitted_chi2 = np.nan
-        if bool(self.config.fit_template_timescale):
-            fit = self._fit_template_peak(
-                time=time,
-                residual=residual,
-                ferr=np.asarray(result.ferr, dtype=float),
-                index=index,
-                cell_start=cell_start,
-                cell_end=cell_end,
-                t_start=float(t_start),
-                t_end=float(t_end),
-            )
-            if fit is not None:
-                fitted_t0, fitted_teff, fitted_chi2 = fit
-                half_width = float(self.config.fit_template_half_width_scale) * float(fitted_teff)
-                if np.isfinite(half_width) and half_width > 0.0:
-                    t_start = max(float(time[cell_start]), float(fitted_t0) - half_width)
-                    t_end = min(float(time[cell_end - 1]), float(fitted_t0) + half_width)
-
-        return PlanetSignalPeak(
+        return PlanetFeature(
+            kind=kind,
             index=int(index),
             time=float(time[index]),
-            z=float(z[index]),
-            residual=float(residual[index]),
-            timescale=max(float(t_end) - float(t_start), 0.0),
             t_start=float(t_start),
             t_end=float(t_end),
-            pspl_magnification=float(pspl_mag),
-            observed_magnification=float(observed_mag),
-            strength_ratio=float(strength_ratio),
-            fitted_t0=float(fitted_t0),
-            fitted_teff=float(fitted_teff),
-            fitted_chi2=float(fitted_chi2),
+            timescale=max(float(t_end) - float(t_start), 0.0),
+            strength=abs(float(z[index])),
+            signed_z=float(z[index]),
+            residual=float(residual[index]),
+            fractional_deviation=float(fractional_deviation),
+            magnification_ratio=float(magnification_ratio),
         )
 
     @staticmethod
@@ -998,122 +886,22 @@ class PlanetSignalClassifier:
             start, end = end, start
         return start, end
 
-    def _fit_template_peak(
-        self,
-        *,
-        time: np.ndarray,
-        residual: np.ndarray,
-        ferr: np.ndarray,
-        index: int,
-        cell_start: int,
-        cell_end: int,
-        t_start: float,
-        t_end: float,
-    ) -> Optional[tuple[float, float, float]]:
-        if minimize is None:
-            return None
-
-        time = np.asarray(time, dtype=float)
-        residual = np.asarray(residual, dtype=float)
-        ferr = np.maximum(np.asarray(ferr, dtype=float), 1e-12)
-        cell_start = int(max(0, cell_start))
-        cell_end = int(min(time.size, cell_end))
-        if cell_end - cell_start < int(self.config.fit_template_min_points):
-            return None
-
-        t_peak = float(time[index])
-        shape_width = max(float(t_end) - float(t_start), 0.0)
-        if shape_width > 0.0:
-            init_teff = max(0.5 * shape_width, float(self.config.fit_template_min_teff))
-        else:
-            local_dt = np.median(np.diff(time[cell_start:cell_end])) if cell_end - cell_start > 1 else 0.05
-            init_teff = max(float(local_dt), float(self.config.fit_template_min_teff))
-        init_teff = float(np.clip(init_teff, self.config.fit_template_min_teff, self.config.fit_template_max_teff))
-
-        lo_t = float(time[cell_start])
-        hi_t = float(time[cell_end - 1])
-        use = np.zeros(time.shape, dtype=bool)
-        use[cell_start:cell_end] = True
-        if int(np.sum(use)) < int(self.config.fit_template_min_points):
-            return None
-
-        t_fit = time[use]
-        r_fit = residual[use]
-        fe_fit = ferr[use]
-        w_fit = 1.0 / (fe_fit * fe_fit)
-
-        def model_chi2(x: np.ndarray) -> float:
-            t0 = float(x[0])
-            teff = float(np.exp(x[1]))
-            if not (lo_t <= t0 <= hi_t):
-                return 1e300
-            if not (
-                float(self.config.fit_template_min_teff)
-                <= teff
-                <= float(self.config.fit_template_max_teff)
-            ):
-                return 1e300
-
-            chi2_best = np.inf
-            for kind in (0, 1):
-                if kind == 0:
-                    A = 1.0 / np.sqrt(1.0 + ((t_fit - t0) / teff) ** 2)
-                else:
-                    Q = 1.0 + ((t_fit - t0) / teff) ** 2
-                    A = (Q + 2.0) / np.sqrt(Q * (Q + 4.0))
-                sw = float(np.sum(w_fit))
-                x_mean = float(np.sum(w_fit * A) / sw)
-                y_mean = float(np.sum(w_fit * r_fit) / sw)
-                xc = A - x_mean
-                yc = r_fit - y_mean
-                wxx = float(np.sum(w_fit * xc * xc))
-                if not np.isfinite(wxx) or wxx <= 0.0:
-                    continue
-                fs = float(np.sum(w_fit * xc * yc) / wxx)
-                fb = y_mean - fs * x_mean
-                chi2 = float(np.sum(((r_fit - (fs * A + fb)) / fe_fit) ** 2))
-                if chi2 < chi2_best:
-                    chi2_best = chi2
-            return chi2_best if np.isfinite(chi2_best) else 1e300
-
-        bounds = ((lo_t, hi_t), (np.log(float(self.config.fit_template_min_teff)), np.log(float(self.config.fit_template_max_teff))))
-        fixed_t0 = t_peak
-        best = None
-        for teff0 in (init_teff, max(0.5 * init_teff, float(self.config.fit_template_min_teff)), min(2.0 * init_teff, float(self.config.fit_template_max_teff))):
-            def fixed_t0_chi2(log_teff: np.ndarray) -> float:
-                return model_chi2(np.asarray([fixed_t0, float(log_teff[0])], dtype=float))
-
-            opt = minimize(
-                fixed_t0_chi2,
-                x0=np.asarray([np.log(float(teff0))], dtype=float),
-                method="Nelder-Mead",
-                options={"maxiter": 200, "xatol": 1e-5, "fatol": 1e-3},
-            )
-            log_teff = float(np.clip(float(opt.x[0]), bounds[1][0], bounds[1][1]))
-            x = np.asarray([fixed_t0, log_teff], dtype=float)
-            chi2 = model_chi2(x)
-            if best is None or chi2 < best[2]:
-                best = (float(fixed_t0), float(np.exp(log_teff)), float(chi2))
-        return best
-
     @staticmethod
-    def _magnification_strength(
+    def _magnification_ratio(
         *,
         result: PlanetSignalResult,
         flux: float,
         model_flux: float,
-    ) -> tuple[float, float, float]:
+    ) -> float:
         fs = float(np.asarray(result.refined_fit.fs))
         fb = float(np.asarray(result.refined_fit.fb))
         if np.isfinite(fs) and abs(fs) > 1e-12:
             pspl_mag = (model_flux - fb) / fs
             observed_mag = (flux - fb) / fs
-            strength_ratio = observed_mag / pspl_mag if abs(pspl_mag) > 1e-12 else np.nan
+            ratio = observed_mag / pspl_mag if abs(pspl_mag) > 1e-12 else np.nan
         else:
-            pspl_mag = np.nan
-            observed_mag = np.nan
-            strength_ratio = flux / model_flux if abs(model_flux) > 1e-12 else np.nan
-        return float(pspl_mag), float(observed_mag), float(strength_ratio)
+            ratio = flux / model_flux if abs(model_flux) > 1e-12 else np.nan
+        return float(ratio)
 
     @staticmethod
     def _mask_slices(mask: np.ndarray) -> list[tuple[int, int]]:
@@ -1136,11 +924,6 @@ class PlanetSignalClassifier:
         padded = np.pad(np.asarray(values, dtype=float), pad, mode="edge")
         kernel = np.ones(width, dtype=float) / float(width)
         return np.convolve(padded, kernel, mode="valid")
-
-    @staticmethod
-    def _component_chi2(component: PlanetSignalComponentClassification) -> float:
-        return float(component.positive_chi2 + component.negative_chi2)
-
 
 @dataclass
 class PlanetSignalExtractor:
@@ -1206,7 +989,7 @@ class PlanetSignalExtractor:
         -----
         The extractor uses the finder's template grid to propose signal
         intervals, but does not call ``Finder.run``. Read
-        :doc:`planet_classification` for mode selection and interpretation.
+        :doc:`planet_features` for mode selection and interpretation.
         """
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self.finder._to_arrays(
             time, flux, ferr, x0
@@ -1686,7 +1469,7 @@ class PlanetSignalExtractor:
         *,
         verbose: bool,
     ) -> Optional[BestCandidate]:
-        _seasons, clusters_all, grid_metrics_all = self.finder.runner.run(
+        seasons, clusters_all, grid_metrics_all = self.finder.runner.run(
             time_j=time_j,
             residual_j=residual_j,
             ferr_j=ferr_j,
@@ -1700,7 +1483,11 @@ class PlanetSignalExtractor:
                 ferr_j=ferr_j,
                 grid_metrics_all=grid_metrics_all,
             )
-        return self.finder._pick_best_candidate(clusters_all, grid_metrics_all)
+        return self.finder._pick_best_candidate(
+            clusters_all,
+            grid_metrics_all,
+            seasons=seasons,
+        )
 
     def _unimodal_scan_clusters(
         self,

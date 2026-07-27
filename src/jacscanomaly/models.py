@@ -48,17 +48,20 @@ class BestCandidate:
     dchi2 : float
         Improvement in chi-square: chi2_null - chi2_anom (larger is better).
     med_others : float
-        Median dchi2 among the bulk of the other candidates
-        (excluding the best, with the upper tail trimmed when configured).
+        Median dchi2 among comparable same-season background clusters.
     std_others : float
-        Standard deviation of dchi2 among the bulk of the other candidates
-        (excluding the best, with the upper tail trimmed when configured).
+        Robust scale of comparable same-season background clusters. The
+        historical field name is retained for API compatibility; the value is
+        MAD-based, with stable fallbacks for degenerate samples.
     score : float
         Standardized score of the best candidate.
-        Computed as ``(dchi2_best - med_others) / std_others``.
+        Computed as ``(dchi2_best - med_others) / std_others``, where the
+        historical ``std_others`` field stores the robust background scale.
         (may be NaN/inf depending on the number of candidates / std_others).
     quality : CandidateQuality
         Per-point support and temporal diagnostics for this candidate.
+    n_score_reference : int
+        Number of background clusters retained for score normalization.
     """
     t0: float
     teff: float
@@ -67,6 +70,7 @@ class BestCandidate:
     std_others: float
     score: float
     quality: CandidateQuality
+    n_score_reference: int = 0
 
 
 @dataclass(frozen=True)
@@ -83,7 +87,8 @@ class SeasonSummary:
     n_grid : int
         Number of grid points evaluated in this season.
     clusters : np.ndarray
-        Extracted clusters for this season, shape (K, 3) with rows [t0, teff, dchi2].
+        Raw extracted clusters for this season, shape (K, 3) with rows
+        [t0, teff, dchi2]. Candidate-quality criteria do not remove rows.
     grid_metrics : np.ndarray
         Raw per-grid diagnostics, shape (N, 9), columns:
         [t0, teff, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run].
@@ -119,7 +124,9 @@ class AnomalyResult:
     seasons : list[SeasonSummary]
         Per-season summaries including clusters.
     clusters_all : np.ndarray
-        Flattened clusters across all seasons, shape (N, 3) with rows [t0, teff, dchi2].
+        Flattened raw clusters across all seasons, shape (N, 3) with rows
+        [t0, teff, dchi2]. Candidate-quality criteria affect ``best`` but do
+        not remove rows from this diagnostic population.
     grid_metrics_all : np.ndarray
         Flattened per-grid diagnostics, shape (M, 9), columns:
         [t0, teff, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run].
@@ -168,6 +175,7 @@ class AnomalyResult:
                 "best_teff": float(b.teff),
                 "best_dchi2": float(b.dchi2),
                 "best_score": float(b.score),
+                "best_score_n_reference": int(b.n_score_reference),
                 "best_n_window": int(q.n_window),
                 "best_n_contrib": int(q.n_contrib),
                 "best_n_eff": float(q.n_eff),

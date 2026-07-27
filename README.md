@@ -108,6 +108,18 @@ Example notebooks are available in `example/`:
 * `template_scan_example.ipynb` for the standard bell-template scan
 * `template_free_example.ipynb` for the template-free residual chi-square scan
 
+For a refined planetary residual, measure its peaks and dips directly:
+
+```python
+features = signal.measure_features()
+print(features.n_peaks, features.n_dips)
+for feature in features.features:
+    print(feature.kind, feature.time, feature.timescale, feature.strength)
+```
+
+This measurement does not assign a caustic shape or estimate binary-lens
+parameters.
+
 ---
 
 ## Method Overview
@@ -146,13 +158,15 @@ To quantify how significant the best anomaly candidate is relative to others,
 we define a **score**:
 
 ```
-score = (Δχ²_best − median(Δχ²_others)) / std(Δχ²_others)
+score = (Δχ²_best − median(Δχ²_others)) / robust_scale(Δχ²_others)
 ```
 
-In practice, `jacscanomaly` estimates `median(Δχ²_others)` and
-`std(Δχ²_others)` from the bulk of the other cluster peaks, trimming values
-above `best_score_trim_percentile` first when possible. This makes the score
-less sensitive to a few strong secondary peaks.
+The reference population is restricted to raw clusters from the same observing
+season and a comparable `teff`. Candidate-quality cuts are applied only after
+raw cluster extraction, so changing those cuts does not redefine the score
+background. The center and scale are estimated robustly with the median and
+MAD. Strong secondary candidates are removed with adaptive one-sided clipping
+rather than an unconditional percentile cut.
 
 This measures how strongly the best candidate stands out from the rest of the grid.
 
@@ -223,7 +237,8 @@ config = FinderConfig(
     teff_grid_n=20,      # number of teff grid points
     sigma=3.0,           # per-point improvement threshold for n_contrib
     candidate_criteria=CandidateCriteria(min_n_eff=2.0),
-    best_score_trim_percentile=95.0,  # trim upper tail for best-candidate score
+    best_score_teff_ratio=2.0,
+    best_score_upper_clip_sigma=5.0,
 )
 ```
 

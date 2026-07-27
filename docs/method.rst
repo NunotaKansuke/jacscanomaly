@@ -29,8 +29,7 @@ The following pages document the later stages in detail:
 * :doc:`template_free_method` explains the residual-only zero-crossing search.
 * :doc:`signal_extraction_method` explains iterative baseline refinement and
   signal masking.
-* :doc:`morphology_classification_method` explains the shape templates and
-  the heuristic anomaly geometry and mass-ratio estimates.
+* :doc:`planet_features` explains direct peak and dip measurements.
 
 Detection statistic
 -------------------
@@ -93,12 +92,14 @@ relative to other extracted clusters:
    \mathrm{score}
    =
    \frac{\Delta\chi^2_{\mathrm{best}} - \mathrm{median}(\Delta\chi^2_{\mathrm{others}})}
-        {\mathrm{std}(\Delta\chi^2_{\mathrm{others}})}
+        {\mathrm{MAD\ scale}(\Delta\chi^2_{\mathrm{others}})}
 
-The background sample is trimmed using
-``FinderConfig.best_score_trim_percentile`` before estimating the median and
-standard deviation. This keeps a few strong secondary peaks from dominating the
-score normalization.
+The background contains raw cluster peaks from the same observing season and a
+comparable ``teff`` range. Candidate-quality cuts are applied after clustering
+and therefore do not censor this background population. The reported
+``std_others`` is a robust MAD-based scale retained under its historical field
+name. A one-sided, MAD-based upper clip removes strong secondary candidates
+without discarding a fixed percentile of ordinary background clusters.
 
 Effective number of points
 --------------------------
@@ -170,8 +171,8 @@ What the standard scan does not do
 
 The standard scan does not choose a 2L1S or 1L2S model, fit caustic geometry,
 or estimate a planet mass ratio. It reports local residual candidates.
-:doc:`planet_classification` adds local shape measurements and the
-deterministic heuristic geometry and scale estimates derived from them.
+:doc:`planet_features` adds direct peak and dip counts, positions,
+timescales, and strengths.
 
 Method details
 --------------
@@ -181,4 +182,3 @@ Method details
 
    template_free_method
    signal_extraction_method
-   morphology_classification_method

@@ -28,7 +28,7 @@ Workflow map
 
 ``PlanetSignalExtractor(finder).run(...)``
    Iteratively refine a baseline while separating strong residual signal,
-   classify its morphology, and measure local physical constraints. Use this after
+   measure its prominent peaks and dips. Use this after
    detection or for targeted event analysis.
 
 Standard template scan
@@ -116,12 +116,12 @@ Each ``TemplateFreeCandidate`` reports its time span, total and reduced
 chi-square, maximum absolute z-score, and the strongest seed point. This mode
 does not infer or alter a baseline model.
 
-Signal extraction and local physical constraints
-------------------------------------------------
+Signal extraction and peak/dip measurements
+--------------------------------------------
 
 For a candidate event, use the extractor to prevent the strongest anomaly
-from biasing the single-lens baseline. Then classify the refined residual and
-inspect locally identifiable constraints:
+from biasing the single-lens baseline. Then measure extrema in the refined
+residual:
 
 .. code-block:: python
 
@@ -136,13 +136,11 @@ inspect locally identifiable constraints:
        ),
    )
    signal = extractor.run(time, flux, ferr, x0=x0, refit=False)
-   anomaly = signal.classify_anomaly()
+   features = signal.measure_features()
 
-   print(anomaly.summary_text())
-   components = anomaly.component_summary_dicts()
+   print(features.summary_text())
+   rows = features.feature_dicts()
 
-This stage is deliberately more selective and more expensive than the initial
-scan. It returns candidate intervals, a refined baseline, per-component shape
-labels, and the heuristic anomaly geometry and scale estimates.
-Read :doc:`planet_classification` before interpreting a shape label as a
-physical conclusion.
+This stage returns candidate intervals, a refined baseline, and direct
+measurements of each peak and dip. It does not assign physical caustic labels
+or estimate binary-lens parameters.

@@ -17,9 +17,8 @@ Main workflow
    jacscanomaly.PlanetSignalExtractor
    jacscanomaly.PlanetSignalConfig
    jacscanomaly.PlanetSignalResult
-   jacscanomaly.PlanetAnomalyClassifier
-   jacscanomaly.PlanetClassConfig
-   jacscanomaly.PlanetAnomalyFitResult
+   jacscanomaly.PlanetFeatureConfig
+   jacscanomaly.PlanetFeatureResult
    jacscanomaly.TemplateFreeScanner
    jacscanomaly.TemplateFreeSearchConfig
    jacscanomaly.TemplateFreeSearchResult
@@ -83,5 +82,4 @@ Module reference
    jacscanomaly.singlelens_model
    jacscanomaly.template_free
    jacscanomaly.planet_signal
-   jacscanomaly.planet_class
    jacscanomaly.plot

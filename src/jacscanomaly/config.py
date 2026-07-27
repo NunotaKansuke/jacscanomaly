@@ -288,23 +288,42 @@ class FinderConfig:
     falls below this value.
     """
 
-    best_score_trim_percentile: float = 95.0
+    best_score_teff_ratio: float = 2.0
     """
-    Upper percentile used when estimating the background spread of
-    ``dchi2`` values for the best-candidate score.
+    Maximum timescale ratio used for best-score background clusters.
 
-    When selecting the best candidate, the score is computed from the
-    other cluster peaks after trimming values above this percentile.
-    This makes the score less sensitive to a few strong secondary peaks
-    that would otherwise inflate the background standard deviation.
-
-    Set to ``100`` to disable trimming.
+    The score compares a candidate only with clusters from the same season
+    whose ``teff`` differs by at most this factor. If too few such clusters
+    exist, the nearest timescales from the same season are added.
     """
+
+    best_score_min_reference_clusters: int = 8
+    """
+    Preferred minimum number of same-season background clusters.
+
+    When the local ``teff`` band contains fewer clusters, the nearest
+    same-season timescales are added up to this count. A score still requires
+    at least two usable background clusters.
+    """
+
+    best_score_upper_clip_sigma: float = 5.0
+    """
+    One-sided robust clipping threshold for strong secondary candidates.
+
+    Background clusters above ``median + value * robust_scale`` are excluded
+    iteratively. The center and scale are estimated with the median and MAD,
+    so strong secondary anomalies do not inflate the score normalization.
+    Set to ``inf`` to disable upper clipping.
+    """
+
+    best_score_clip_maxiters: int = 3
+    """Maximum number of one-sided robust clipping iterations."""
 
     candidate_criteria: Optional[CandidateCriteria] = None
     """
-    Optional criteria to reject anomaly candidates before best-candidate
-    selection. If ``None``, no additional filtering is applied.
+    Optional criteria applied to raw cluster peaks before best-candidate
+    selection. The criteria do not alter cluster extraction or the score
+    background. If ``None``, no additional selection is applied.
     """
 
     # ==================================================

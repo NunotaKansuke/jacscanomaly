@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Literal, Optional
+from typing import Literal, Optional, Sequence
 import logging
 
 import numpy as np
@@ -37,7 +37,7 @@ from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .runner import SeasonGridRunner
-from .models import AnomalyResult, BestCandidate, CandidateQuality
+from .models import AnomalyResult, BestCandidate, CandidateQuality, SeasonSummary
 from .template_free import TemplateFreeScanner, TemplateFreeSearchConfig, TemplateFreeSearchResult
 
 
@@ -423,7 +423,11 @@ class Finder:
             log=log,
         )
 
-        best_obj = self._pick_best_candidate(clusters_all, grid_metrics_all)
+        best_obj = self._pick_best_candidate(
+            clusters_all,
+            grid_metrics_all,
+            seasons=seasons,
+        )
 
         result = AnomalyResult(
             time=time_np,
@@ -890,46 +894,40 @@ class Finder:
         self,
         clusters_all: np.ndarray,
         grid_metrics_all: np.ndarray,
+        *,
+        seasons: Optional[Sequence[SeasonSummary]] = None,
     ) -> Optional[BestCandidate]:
         """
-        Select the strongest anomaly candidate from all extracted clusters.
+        Select the strongest accepted candidate and score it against raw clusters.
+
+        Candidate-quality criteria are intentionally applied only after raw
+        cluster extraction. The score background therefore does not change
+        when selection thresholds are adjusted.
         """
         if clusters_all is None or clusters_all.size == 0:
             return None
 
-        clusters_use = np.asarray(clusters_all, dtype=float)
-        clusters_use = clusters_use[np.isfinite(clusters_use).all(axis=1)]
-        if clusters_use.size == 0:
+        raw_clusters = np.asarray(clusters_all, dtype=float)
+        raw_clusters = raw_clusters[np.isfinite(raw_clusters).all(axis=1)]
+        if raw_clusters.size == 0:
             return None
 
-        max_ind = int(np.argmax(clusters_use[:, 2]))
-        best = clusters_use[max_ind]
-        others = np.delete(clusters_use, max_ind, axis=0)
+        candidates = self._accepted_candidates(raw_clusters, grid_metrics_all)
+        if candidates.size == 0:
+            return None
 
-        if others.shape[0] >= 2:
-            other_dchi2 = others[:, 2]
+        max_ind = int(np.argmax(candidates[:, 2]))
+        best = candidates[max_ind]
+        references = self._score_reference_clusters(
+            best,
+            raw_clusters,
+            seasons=seasons,
+        )
+        bulk_dchi2 = self._upper_clip_score_background(references[:, 2])
 
-            # Estimate the background spread from the bulk of the distribution.
-            # A few large-dchi2 secondary peaks can otherwise inflate std and
-            # suppress the best-candidate score.
-            trim_percentile = float(self.config.best_score_trim_percentile)
-            if not (0.0 < trim_percentile <= 100.0):
-                raise ValueError(
-                    "best_score_trim_percentile must satisfy 0 < value <= 100."
-                )
-
-            bulk_dchi2 = other_dchi2
-            if trim_percentile < 100.0:
-                cutoff = float(np.percentile(other_dchi2, trim_percentile))
-                trimmed_dchi2 = other_dchi2[other_dchi2 <= cutoff]
-                if trimmed_dchi2.shape[0] >= 2:
-                    bulk_dchi2 = trimmed_dchi2
-
-            if bulk_dchi2.shape[0] < 2:
-                bulk_dchi2 = other_dchi2
-
+        if bulk_dchi2.shape[0] >= 2:
             med = float(np.median(bulk_dchi2))
-            std = float(np.std(bulk_dchi2))
+            std = self._robust_scale(bulk_dchi2)
             score = (best[2] - med) / std if std > 0 else float("nan")
         else:
             med = std = score = float("nan")
@@ -944,7 +942,122 @@ class Finder:
             std_others=std,
             score=float(score),
             quality=quality,
+            n_score_reference=int(bulk_dchi2.shape[0]),
         )
+
+    def _accepted_candidates(
+        self,
+        raw_clusters: np.ndarray,
+        grid_metrics_all: np.ndarray,
+    ) -> np.ndarray:
+        criteria = self.config.candidate_criteria
+        if criteria is None:
+            return raw_clusters
+
+        accepted = []
+        for cluster in raw_clusters:
+            quality = self._quality_for_point(
+                float(cluster[0]),
+                float(cluster[1]),
+                grid_metrics_all,
+            )
+            if criteria.accepts(dchi2=float(cluster[2]), quality=quality):
+                accepted.append(cluster)
+        if not accepted:
+            return np.zeros((0, 3), dtype=float)
+        return np.asarray(accepted, dtype=float)
+
+    def _score_reference_clusters(
+        self,
+        best: np.ndarray,
+        raw_clusters: np.ndarray,
+        *,
+        seasons: Optional[Sequence[SeasonSummary]] = None,
+    ) -> np.ndarray:
+        references = np.asarray(raw_clusters, dtype=float)
+
+        if seasons is not None:
+            for season in seasons:
+                if float(season.t_start) <= float(best[0]) <= float(season.t_end):
+                    references = references[
+                        (references[:, 0] >= float(season.t_start))
+                        & (references[:, 0] <= float(season.t_end))
+                    ]
+                    break
+
+        same = (
+            np.isclose(references[:, 0], best[0], rtol=0.0, atol=1e-9)
+            & np.isclose(references[:, 1], best[1], rtol=1e-12, atol=1e-12)
+            & np.isclose(references[:, 2], best[2], rtol=1e-12, atol=1e-12)
+        )
+        same_idx = np.flatnonzero(same)
+        if same_idx.size:
+            references = np.delete(references, int(same_idx[0]), axis=0)
+
+        references = references[
+            np.isfinite(references).all(axis=1)
+            & (references[:, 1] > 0.0)
+        ]
+        if references.size == 0:
+            return np.zeros((0, 3), dtype=float)
+
+        ratio = float(self.config.best_score_teff_ratio)
+        if not np.isfinite(ratio) or ratio < 1.0:
+            raise ValueError("best_score_teff_ratio must be finite and >= 1.")
+        log_distance = np.abs(np.log(references[:, 1] / float(best[1])))
+        local = references[log_distance <= np.log(ratio) + 1e-12]
+
+        min_reference = int(self.config.best_score_min_reference_clusters)
+        if min_reference < 2:
+            raise ValueError("best_score_min_reference_clusters must be >= 2.")
+        if local.shape[0] >= min_reference or local.shape[0] == references.shape[0]:
+            return local
+
+        nearest = np.argsort(log_distance, kind="stable")
+        return references[nearest[: min(min_reference, references.shape[0])]]
+
+    def _upper_clip_score_background(self, values: np.ndarray) -> np.ndarray:
+        bulk = np.asarray(values, dtype=float)
+        bulk = bulk[np.isfinite(bulk)]
+        clip_sigma = float(self.config.best_score_upper_clip_sigma)
+        maxiters = int(self.config.best_score_clip_maxiters)
+        if clip_sigma <= 0.0:
+            raise ValueError("best_score_upper_clip_sigma must be > 0.")
+        if maxiters < 0:
+            raise ValueError("best_score_clip_maxiters must be >= 0.")
+        if not np.isfinite(clip_sigma) or maxiters == 0:
+            return bulk
+
+        for _ in range(maxiters):
+            if bulk.shape[0] < 3:
+                break
+            med = float(np.median(bulk))
+            scale = self._robust_scale(bulk)
+            if not np.isfinite(scale) or scale <= 0.0:
+                break
+            keep = bulk <= med + clip_sigma * scale
+            if np.all(keep) or np.count_nonzero(keep) < 2:
+                break
+            bulk = bulk[keep]
+        return bulk
+
+    @staticmethod
+    def _robust_scale(values: np.ndarray) -> float:
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        if values.shape[0] < 2:
+            return float("nan")
+
+        med = float(np.median(values))
+        scale = 1.482602218505602 * float(np.median(np.abs(values - med)))
+        if scale > 0.0:
+            return scale
+
+        q25, q75 = np.percentile(values, [25.0, 75.0])
+        scale = float(q75 - q25) / 1.3489795003921634
+        if scale > 0.0:
+            return scale
+        return float(np.std(values))
 
     @staticmethod
     def _quality_for_point(t0: float, teff: float, grid_metrics_all: np.ndarray) -> CandidateQuality:

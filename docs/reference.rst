@@ -49,58 +49,29 @@ Planet signal extraction API
 .. autoclass:: jacscanomaly.PlanetSignalResult
    :no-index:
 
-.. automethod:: jacscanomaly.PlanetSignalResult.classify
-
-.. automethod:: jacscanomaly.PlanetSignalResult.classify_anomaly
+.. automethod:: jacscanomaly.PlanetSignalResult.measure_features
 
 .. automethod:: jacscanomaly.PlanetSignalResult.plot_signal
 
 .. autoclass:: jacscanomaly.PlanetSignalConfig
    :no-index:
 
-.. autoclass:: jacscanomaly.PlanetSignalClassificationConfig
-   :no-index:
-
 The extractor returns both ``initial_fit`` and ``refined_fit``. Use
 ``signal_mask`` to identify excluded points, ``point_weight`` to inspect the
 fit weighting, and ``iterations`` to audit accepted refinement steps. See
-:doc:`planet_classification` for the three baseline modes and their controls.
+:doc:`planet_features` for the three baseline modes and their controls.
 
-Heuristic anomaly estimation API
---------------------------------
+Peak and dip measurement API
+----------------------------
 
-.. autoclass:: jacscanomaly.PlanetAnomalyClassifier
+.. autoclass:: jacscanomaly.PlanetFeatureConfig
    :no-index:
 
-.. automethod:: jacscanomaly.PlanetAnomalyClassifier.fit
-
-.. autoclass:: jacscanomaly.PlanetClassConfig
+.. autoclass:: jacscanomaly.PlanetFeatureResult
    :no-index:
 
-.. autoclass:: jacscanomaly.PlanetAnomalyFitResult
-   :no-index:
+.. automethod:: jacscanomaly.PlanetFeatureResult.summary_dict
 
-.. automethod:: jacscanomaly.PlanetAnomalyFitResult.summary_dict
+.. automethod:: jacscanomaly.PlanetFeatureResult.feature_dicts
 
-.. automethod:: jacscanomaly.PlanetAnomalyFitResult.summary_table
-
-.. automethod:: jacscanomaly.PlanetAnomalyFitResult.shape_fit_table
-
-.. autoclass:: jacscanomaly.ComponentAnomalyResult
-   :no-index:
-
-.. autoclass:: jacscanomaly.AnomalyGeometry
-   :no-index:
-
-.. autoclass:: jacscanomaly.AnomalyScales
-   :no-index:
-
-.. autoclass:: jacscanomaly.GridSeed
-   :no-index:
-
-``summary_table()`` has one row per component with the best shape fit, the
-deterministic anomaly geometry (``tau_anom``, ``u_anom``, ``alpha``,
-``s_dagger_plus/minus``), and the timescale-derived estimates.
-``shape_fit_table()`` has one row per fitted shape template, including the
-fitted parameters, ``*_err`` uncertainty columns when estimated, ``chi2``,
-``delta_chi2``, and BIC.
+.. automethod:: jacscanomaly.PlanetFeatureResult.summary_table

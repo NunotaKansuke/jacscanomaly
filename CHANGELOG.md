@@ -9,42 +9,27 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 ## [Unreleased]
 
 ### Added
-- `GridSeed` on each significant anomaly component: an explicit 2L1S
-  grid-search region (both `s_dagger` branches, the four mirror-degenerate
-  `alpha` candidates, and a quality-tagged `q` range) with a
-  `contains(s=, q=, alpha=)` test. Default widths are the ~84%-coverage
-  values measured on the Roman OMPLDG simulation (configurable via the
-  `seed_*` fields of `PlanetClassConfig`).
-- Simulation-derived median-bias calibrations for the `q` estimators
-  (`DIP_Q_CALIBRATION` = 2.2, residual scatter ~0.30 dex;
-  `BUMP_Q_CALIBRATION` = 2.5, scatter ~1.5 dex). The bump relation now uses
-  the fitted FWHM as the planet Einstein-ring crossing diameter,
-  `q = C (FWHM/2tE)^2`. Pass `calibration=1.0` for the raw literature
-  relations.
+- `PlanetSignalResult.measure_features()` for direct peak/dip counts,
+  positions, threshold-crossing timescales, z-score strengths, residuals, and
+  fractional deviations.
 
 ### Changed
-- Rewrote `planet_class` as a heuristic anomaly estimator based on the
-  standard literature formalism (Gould & Loeb 1992; Gaudi & Gould 1997;
-  Han 2006; Hwang et al. 2022; Ryu et al. 2022). Each anomaly component is
-  measured with a small template set (`bump`, `dip`, `fold`,
-  `caustic_crossing`, `null`), and the deterministic geometry
-  (`tau_anom`, `u_anom`, `alpha`, `s_dagger_plus/minus` with the
-  bump→major-image / dip→minor-image branch), the duration ratio `dt/tE`,
-  and assumption-tagged mass-ratio estimates (`dip_han2006`,
-  `bump_planet_einstein_crossing`) are derived from the fitted anomaly time
-  and duration. Fold-type shapes report `tstar/tE = rho/|sin(psi)|` per
-  crossing. Anomalies with small `u_anom` are flagged
-  `central_or_resonant` and receive no `q` estimate.
+- Candidate-quality criteria are now applied after raw cluster extraction, so
+  they select the reported candidate without censoring its score background.
+- Best-candidate scores now use same-season, comparable-timescale cluster
+  backgrounds with median/MAD normalization and adaptive one-sided clipping.
+- Replaced fixed percentile trimming controls with
+  `best_score_teff_ratio`, `best_score_min_reference_clusters`,
+  `best_score_upper_clip_sigma`, and `best_score_clip_maxiters`.
+- Planet-signal follow-up now reports only direct extrema measurements. It no
+  longer assigns a physical anomaly morphology or derives binary-lens
+  parameters from a local residual shape.
 
 ### Removed
-- The residual-atom template atlas (about 20 atoms including rim-trough,
-  shear-quadrupole, curved/grazing/two-fold, canonical and finite-source
-  cusp variants), the local-window physical refit machinery, the
-  Chang--Refsdal lookup fit, warning/validity score penalties, BIC-weighted
-  class probabilities, and the `physical_constraint`/`physical_relation`
-  output tables. `AtomFitResult`, `LocalPhysicalFitResult`, and
-  `SegmentModelResult` are replaced by `AnomalyShapeFit`, `AnomalyGeometry`,
-  `AnomalyScales`, and `ComponentAnomalyResult`.
+- The `planet_class` template/BIC estimator and its heuristic `s`, `q`,
+  `alpha`, caustic-shape, and grid-seed outputs.
+- The optional local analytic template fit previously used to adjust extrema
+  timescales.
 
 ---
 

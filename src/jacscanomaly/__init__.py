@@ -32,28 +32,14 @@ from .template_free import (
 )
 from .planet_signal import (
     FlatBaselineDiagnostic,
-    PlanetSignalClassification,
-    PlanetSignalClassificationConfig,
-    PlanetSignalClassifier,
-    PlanetSignalComponentClassification,
+    PlanetFeature,
+    PlanetFeatureConfig,
+    PlanetFeatureResult,
     PlanetSignalCandidate,
     PlanetSignalConfig,
     PlanetSignalExtractor,
     PlanetSignalIteration,
-    PlanetSignalPeak,
     PlanetSignalResult,
-)
-from .planet_class import (
-    AnomalyGeometry,
-    AnomalyScales,
-    AnomalyShapeFit,
-    ComponentAnomalyResult,
-    GridSeed,
-    PlanetAnomalyClassifier,
-    PlanetAnomalyFitResult,
-    PlanetClassConfig,
-    PSPLParams,
-    SegmentData,
 )
 
 __all__ = [
@@ -83,26 +69,14 @@ __all__ = [
     "TemplateFreeSearchConfig",
     "TemplateFreeSearchResult",
     "FlatBaselineDiagnostic",
-    "PlanetSignalClassification",
-    "PlanetSignalClassificationConfig",
-    "PlanetSignalClassifier",
-    "PlanetSignalComponentClassification",
+    "PlanetFeature",
+    "PlanetFeatureConfig",
+    "PlanetFeatureResult",
     "PlanetSignalCandidate",
     "PlanetSignalConfig",
     "PlanetSignalExtractor",
     "PlanetSignalIteration",
-    "PlanetSignalPeak",
     "PlanetSignalResult",
-    "AnomalyGeometry",
-    "AnomalyScales",
-    "AnomalyShapeFit",
-    "ComponentAnomalyResult",
-    "GridSeed",
-    "PlanetAnomalyClassifier",
-    "PlanetAnomalyFitResult",
-    "PlanetClassConfig",
-    "PSPLParams",
-    "SegmentData",
 ]
 
 __version__ = "0.3.2"
