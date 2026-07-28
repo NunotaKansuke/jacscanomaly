@@ -42,6 +42,12 @@ def _compile_and_link_args() -> tuple[list[str], list[str]]:
     if sys.platform == "win32":
         return ["/O2", "/std:c++17", "/openmp"], []
     if sys.platform == "darwin":
+        # Apple does not ship an OpenMP runtime.  macOS wheels disable the
+        # OpenMP pragmas so they do not depend on the Homebrew libomp version
+        # or on a particular macOS deployment target.  Local source builds
+        # keep OpenMP enabled unless this switch is set explicitly.
+        if os.environ.get("JACSCANOMALY_DISABLE_OPENMP", "").lower() in {"1", "true", "yes"}:
+            return ["-O3", "-std=c++17"], []
         return ["-O3", "-std=c++17", "-Xpreprocessor", "-fopenmp"], ["-lomp"]
     return ["-O3", "-std=c++17", "-fopenmp"], ["-fopenmp"]
 
