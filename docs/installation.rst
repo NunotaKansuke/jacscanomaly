@@ -10,10 +10,11 @@ Install from PyPI:
 
    pip install jacscanomaly
 
-The default PSPL survey workflow uses the compiled C++ backend. A normal
-source install therefore builds ``jacscanomaly._cpp_grid`` during installation.
-If you need to force a local source build instead of using an already-built
-wheel, run:
+The default PSPL survey workflow uses the compiled C++ backend. PyPI provides
+platform wheels containing this backend, so a normal install does not require
+a local compiler. If no compatible wheel is available for your platform,
+``pip`` falls back to a source build. To force that source build explicitly,
+run:
 
 .. code-block:: bash
 
