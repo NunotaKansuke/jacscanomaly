@@ -252,6 +252,52 @@ def test_planet_signal_extractor_uses_flat_baseline_for_masked_tiny_u0_peak():
     assert np.allclose(np.asarray(flat.params), params)
 
 
+def test_planet_signal_refit_preserves_selected_model_family():
+    time = np.linspace(0.0, 20.0, 40)
+    ferr = np.full_like(time, 0.1)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+
+    fit = SingleLensFitResult(
+        time=time,
+        flux=model,
+        ferr=ferr,
+        params=params,
+        param_names=("t0", "tE", "u0"),
+        chi2=np.array(0.0),
+        chi2_dof=np.array(0.0),
+        fs=np.array(2.0),
+        fb=np.array(1.0),
+        model_flux=model,
+        residual=np.zeros_like(time),
+    )
+    object.__setattr__(fit, "model_kind", "fspl_vbm_fd")
+
+    class FixedModelFitter:
+        def __init__(self):
+            self.called = None
+
+        def fit_fixed_model(self, time, flux, ferr, q0, model_kind):
+            self.called = model_kind
+            return fit
+
+        def fit(self, *args, **kwargs):  # pragma: no cover - must not be used
+            raise AssertionError("masked refit changed model-selection path")
+
+    fitter = FixedModelFitter()
+    extractor = PlanetSignalExtractor(Finder(FinderConfig(), fitter=fitter))
+    extractor._fit_masked_single_lens_and_evaluate_full(
+        time_j=time,
+        flux_j=model,
+        ferr_j=ferr,
+        keep_mask_np=np.ones(time.shape, dtype=bool),
+        x0_j=params,
+        model_kind="fspl_vbm_fd",
+    )
+
+    assert fitter.called == "fspl_vbm_fd"
+
+
 def test_planet_signal_measurement_identifies_single_peak():
     time = np.linspace(0.0, 20.0, 401)
     ferr = np.full_like(time, 0.02)
@@ -373,6 +419,27 @@ def test_planet_feature_measurement_prefers_positive_features_over_dips():
     assert features.summary_dict()["n_features"] == 2
     assert len(features.feature_dicts()) == 2
     assert "peaks=2, dips=0" in features.summary_text()
+
+
+def test_planet_feature_measurement_keeps_deep_bracketed_dip():
+    time = np.linspace(8.0, 12.0, 801)
+    ferr = np.full_like(time, 0.01)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = (
+        0.08 * np.exp(-0.5 * ((time - 9.4) / 0.08) ** 2)
+        - 0.20 * np.exp(-0.5 * ((time - 10.0) / 0.10) ** 2)
+        + 0.07 * np.exp(-0.5 * ((time - 10.6) / 0.08) ** 2)
+    )
+    flux = model + residual
+    mask = (time > 9.0) & (time < 11.0)
+    result = _feature_result(time, flux, ferr, residual, mask)
+
+    features = result.measure_features(PlanetFeatureConfig(smooth_points=3))
+
+    assert features.n_peaks == 2
+    assert features.n_dips == 1
+    assert abs(features.dips[0].time - 10.0) < 0.05
 
 
 def test_planet_feature_measurement_keeps_locally_prominent_smaller_peak():

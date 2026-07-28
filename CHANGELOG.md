@@ -6,6 +6,26 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [0.5.0] - 2026-07-29
+
+### Added
+- Planet-signal extraction now preserves the selected PSPL/FSPL model family
+  during masked and robust refits.
+- Deep closed troughs in a `bump--dip--bump` pattern are retained as dip
+  features, while one-sided negative wings remain suppressed.
+
+### Changed
+- FSPL fitting retries a small set of guarded initial seeds when the first
+  finite-source solution is a poor local fit.
+- Refined-fit plots label the selected single-lens model family.
+- Version bumped to `0.5.0`.
+
+### Removed
+- Removed the experimental HMC/NumPyro API, optional dependency, example, and
+  tests.
+
+---
+
 ## [0.4.0] - 2026-07-28
 
 ### Added

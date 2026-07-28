@@ -38,10 +38,10 @@ then measure extrema in the refined residual:
 
 ``features.peaks`` and ``features.dips`` contain the same measurements split
 by sign. ``features.features`` combines them in time order. Positive features
-take precedence: when one or more locally prominent peaks are found, negative
-wings around that perturbation are ignored. Dips are reported only when no
-positive peak is present, and only when the negative excursion returns below
-the duration threshold on both sides.
+still take precedence over one-sided negative wings, which are usually the
+tail of a caustic crossing or a baseline mismatch. A deep negative excursion
+is retained alongside the peaks when it is a closed trough bracketed by nearby
+positive recoveries (the ``bump--dip--bump`` pattern).
 
 Measurements
 ------------
@@ -88,6 +88,8 @@ duration measurement.
            min_relative_strength=0.1,
            min_prominence=3.0,
            min_separation=0.15,
+           allow_bracketed_dips=True,
+           dip_bracket_min_depth_ratio=1.5,
        )
    )
 

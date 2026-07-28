@@ -19,9 +19,9 @@ class PlanetSignalConfig:
     """
     Configuration for iterative single-lens refinement and signal extraction.
 
-    This first implementation is PSPL-only. It uses the existing template scan
-    as a seed finder, masks the strongest unexplained local windows, and refits
-    the PSPL baseline on the remaining data.
+    It uses the existing template scan as a seed finder, masks the strongest
+    unexplained local windows, and refits the selected single-lens baseline on
+    the remaining data while preserving its model family (PSPL or FSPL).
     """
 
     baseline_mode: str = "beam_interval"
@@ -144,6 +144,14 @@ class PlanetFeatureConfig:
     min_separation: float = 0.15
     duration_min_abs_z: float = 3.0
     duration_relative_height: float = 0.5
+    # Keep a negative feature only when it is a deep, closed trough bracketed
+    # by positive recoveries.  This rejects one-sided caustic wings while
+    # retaining bump--dip--bump structures.
+    allow_bracketed_dips: bool = True
+    dip_bracket_min_peak_frac: float = 0.1
+    dip_bracket_min_depth_ratio: float = 1.5
+    dip_bracket_max_gap_factor: float = 4.0
+    bracketed_peak_min_separation: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -356,7 +364,14 @@ class PlanetSignalResult:
             fmt="o", markersize=2.5, c=signal_color, ecolor=signal_color, alpha=signal_alpha,
             label="extracted signal", zorder=2,
         )
-        ax_peak.plot(t_peak_model, f_peak_model, c="k", lw=2.0, label="refined PSPL", zorder=1)
+        model_kind = str(getattr(self.refined_fit, "model_kind", "single_lens"))
+        model_label = {
+            "pspl": "refined PSPL",
+            "fspl": "refined FSPL",
+            "fspl_vbm_fd": "refined FSPL",
+            "fspl_space_parallax_gulls_vbm_fd": "refined FSPL+parallax",
+        }.get(model_kind, "refined single-lens")
+        ax_peak.plot(t_peak_model, f_peak_model, c="k", lw=2.0, label=model_label, zorder=1)
         ax_peak.set_xlim(peak_xlim)
         ax_peak.set_ylabel("flux")
 
@@ -534,6 +549,14 @@ class _PlanetFeatureDetector:
                 start=start,
                 end=end,
                 sign=1.0,
+                min_separation=(
+                    min(
+                        float(self.config.min_separation),
+                        float(self.config.bracketed_peak_min_separation),
+                    )
+                    if bool(self.config.allow_bracketed_dips)
+                    else None
+                ),
             )
             peaks.extend(
                 self._features_from_indices(
@@ -550,15 +573,6 @@ class _PlanetFeatureDetector:
                     sign=1.0,
                     result=result,
                 )
-            )
-
-        # Positive caustic/bump features take precedence. Negative wings around
-        # a strong positive perturbation are usually baseline mismatch, not an
-        # independent minor-image dip.
-        if peaks:
-            return PlanetFeatureResult(
-                peaks=tuple(sorted(peaks, key=lambda feature: feature.time)),
-                dips=(),
             )
 
         dips: list[PlanetFeature] = []
@@ -588,9 +602,62 @@ class _PlanetFeatureDetector:
                 )
             )
 
+        if peaks and dips and bool(self.config.allow_bracketed_dips):
+            dips = [dip for dip in dips if self._is_bracketed_dip(dip, peaks, result)]
+
+        # Positive caustic/bump features still take precedence over ordinary
+        # negative wings.  The explicit bracketed-dip exception above keeps a
+        # genuine bump--dip--bump structure without reopening every dip.
+        if peaks or dips:
+            return PlanetFeatureResult(
+                peaks=tuple(sorted(peaks, key=lambda feature: feature.time)),
+                dips=tuple(sorted(dips, key=lambda feature: feature.time)),
+            )
+
         return PlanetFeatureResult(
             peaks=(),
             dips=tuple(sorted(dips, key=lambda feature: feature.time)),
+        )
+
+    def _is_bracketed_dip(
+        self,
+        dip: PlanetFeature,
+        peaks: list[PlanetFeature],
+        result: PlanetSignalResult,
+    ) -> bool:
+        """Keep only a deep trough with local positive recovery on both sides."""
+        left = [peak for peak in peaks if peak.time < dip.time]
+        right = [peak for peak in peaks if peak.time > dip.time]
+        if not left or not right:
+            return False
+        left_peak = max(left, key=lambda peak: peak.time)
+        right_peak = min(right, key=lambda peak: peak.time)
+
+        peak_floor = max(
+            float(self.config.min_abs_z),
+            float(self.config.dip_bracket_min_peak_frac) * float(dip.strength),
+        )
+        if left_peak.strength < peak_floor or right_peak.strength < peak_floor:
+            return False
+        if dip.strength < float(self.config.dip_bracket_min_depth_ratio) * max(
+            left_peak.strength, right_peak.strength
+        ):
+            return False
+
+        dt = np.diff(np.asarray(result.time, dtype=float))
+        positive_dt = dt[dt > 0.0]
+        cadence = float(np.nanmedian(positive_dt)) if positive_dt.size else 0.0
+        local_scale = max(
+            float(dip.timescale),
+            float(left_peak.timescale),
+            float(right_peak.timescale),
+            3.0 * cadence,
+            np.finfo(float).eps,
+        )
+        max_gap = float(self.config.dip_bracket_max_gap_factor) * local_scale
+        return (
+            float(dip.time) - float(left_peak.time) <= max_gap
+            and float(right_peak.time) - float(dip.time) <= max_gap
         )
 
     def _prominent_extrema(
@@ -601,6 +668,7 @@ class _PlanetFeatureDetector:
         start: int,
         end: int,
         sign: float,
+        min_separation: Optional[float] = None,
     ) -> list[int]:
         segment = sign * values[start:end]
         if segment.size == 0:
@@ -633,7 +701,13 @@ class _PlanetFeatureDetector:
                 local.append(start + int(offset))
 
         local.sort(key=lambda idx: sign * values[idx], reverse=True)
-        return self._suppress_nearby_extrema(time, values, local, sign)
+        return self._suppress_nearby_extrema(
+            time,
+            values,
+            local,
+            sign,
+            min_separation=min_separation,
+        )
 
     @staticmethod
     def _local_prominence(segment: np.ndarray, offset: int) -> float:
@@ -695,9 +769,14 @@ class _PlanetFeatureDetector:
         values: np.ndarray,
         extrema: list[int],
         sign: float,
+        min_separation: Optional[float] = None,
     ) -> list[int]:
         selected: list[int] = []
-        min_sep = float(self.config.min_separation)
+        min_sep = (
+            float(self.config.min_separation)
+            if min_separation is None
+            else max(float(min_separation), 0.0)
+        )
         for index in extrema:
             far_enough = all(
                 abs(float(time[index]) - float(time[kept])) >= min_sep
@@ -1050,6 +1129,7 @@ class PlanetSignalExtractor:
                 ferr_j=ferr_j,
                 keep_mask_np=~signal_mask,
                 x0_j=self._raw_params_for_refit(current_fit),
+                model_kind=getattr(current_fit, "model_kind", None),
             )
             if not self._fit_is_catastrophically_worse(current_fit, candidate_fit):
                 current_fit = candidate_fit
@@ -1153,6 +1233,7 @@ class PlanetSignalExtractor:
                 ferr_j=ferr_j,
                 keep_mask_np=~combined,
                 x0_j=self._raw_params_for_refit(current_fit),
+                model_kind=getattr(current_fit, "model_kind", None),
             )
             new_unmasked_chi2_dof = self._masked_chi2_dof(candidate_fit, ~combined)
             allowed = current_unmasked_chi2_dof * (1.0 + float(self.config.max_unmasked_chi2_dof_increase))
@@ -1244,6 +1325,7 @@ class PlanetSignalExtractor:
                 ferr_j=ferr_j,
                 point_weight=point_weight,
                 x0_j=self._raw_params_for_refit(current_fit),
+                model_kind=getattr(current_fit, "model_kind", None),
             )
             current_fit = candidate_fit
             signal_mask = self._signal_mask_from_weight_and_residual(
@@ -1325,6 +1407,7 @@ class PlanetSignalExtractor:
                             ferr_j=ferr_j,
                             keep_mask_np=~combined,
                             x0_j=self._raw_params_for_refit(branch.fit),
+                            model_kind=getattr(branch.fit, "model_kind", None),
                         )
                     except ValueError:
                         continue
@@ -1686,12 +1769,23 @@ class PlanetSignalExtractor:
         ferr_j: jnp.ndarray,
         keep_mask_np: np.ndarray,
         x0_j: jnp.ndarray,
+        model_kind: Optional[str] = None,
     ) -> SingleLensFitResult:
         if int(np.sum(keep_mask_np)) < 4:
             raise ValueError("Not enough unmasked points to refit single-lens model.")
 
         keep_j = jnp.asarray(keep_mask_np)
-        masked_fit = self.finder.fitter.fit(time_j[keep_j], flux_j[keep_j], ferr_j[keep_j], x0_j)
+        fitter = self.finder.fitter
+        if model_kind is not None and hasattr(fitter, "fit_fixed_model"):
+            masked_fit = fitter.fit_fixed_model(
+                time_j[keep_j],
+                flux_j[keep_j],
+                ferr_j[keep_j],
+                x0_j,
+                model_kind=model_kind,
+            )
+        else:
+            masked_fit = fitter.fit(time_j[keep_j], flux_j[keep_j], ferr_j[keep_j], x0_j)
         return self._evaluate_single_lens_fit_on_full_data(
             time_j=time_j,
             flux_j=flux_j,
@@ -1709,10 +1803,21 @@ class PlanetSignalExtractor:
         ferr_j: jnp.ndarray,
         point_weight: np.ndarray,
         x0_j: jnp.ndarray,
+        model_kind: Optional[str] = None,
     ) -> SingleLensFitResult:
         weight_j = jnp.asarray(np.clip(point_weight, float(self.config.robust_min_weight), 1.0))
         ferr_eff_j = ferr_j / jnp.sqrt(weight_j)
-        weighted_fit = self.finder.fitter.fit(time_j, flux_j, ferr_eff_j, x0_j)
+        fitter = self.finder.fitter
+        if model_kind is not None and hasattr(fitter, "fit_fixed_model"):
+            weighted_fit = fitter.fit_fixed_model(
+                time_j,
+                flux_j,
+                ferr_eff_j,
+                x0_j,
+                model_kind=model_kind,
+            )
+        else:
+            weighted_fit = fitter.fit(time_j, flux_j, ferr_eff_j, x0_j)
         return self._evaluate_single_lens_fit_on_full_data(
             time_j=time_j,
             flux_j=flux_j,
@@ -1899,7 +2004,7 @@ class PlanetSignalExtractor:
         chi2 = jnp.sum(z * z)
         n = int(time_j.shape[0])
 
-        return SingleLensFitResult(
+        evaluated = SingleLensFitResult(
             time=np.asarray(time_j),
             flux=np.asarray(flux_j),
             ferr=np.asarray(ferr_safe),
@@ -1914,6 +2019,7 @@ class PlanetSignalExtractor:
             raw_params=jnp.asarray(fit.raw_params, dtype=time_j.dtype) if fit.raw_params is not None else None,
             parallax_projector=getattr(fit, "parallax_projector", None),
         )
+        return evaluated
 
     @staticmethod
     def _count_mask_intervals(mask: np.ndarray) -> int:
@@ -1966,7 +2072,7 @@ class PlanetSignalExtractor:
         n = int(time_j.shape[0])
         param_names = tuple(getattr(fit, "param_names", ("t0", "tE", "u0")))
 
-        return SingleLensFitResult(
+        evaluated = SingleLensFitResult(
             time=np.asarray(time_j),
             flux=np.asarray(flux_j),
             ferr=np.asarray(ferr_safe),
@@ -1981,6 +2087,13 @@ class PlanetSignalExtractor:
             raw_params=jnp.asarray(fit.raw_params, dtype=time_j.dtype) if fit.raw_params is not None else None,
             parallax_projector=getattr(fit, "parallax_projector", None),
         )
+        # Keep the selected model family attached to the full-data evaluation.
+        # This is used by subsequent masked/weighted refits to avoid silently
+        # switching from FSPL to PSPL after the anomaly has been removed.
+        for attr in ("model_kind", "bic", "model_selection"):
+            if hasattr(fit, attr):
+                object.__setattr__(evaluated, attr, getattr(fit, attr))
+        return evaluated
 
     def _candidates_from_mask(
         self,

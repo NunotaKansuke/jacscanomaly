@@ -1092,13 +1092,14 @@ class BICSingleLensFitter:
             np.asarray([t0, tE, u0, logrho, piEN, piEE], dtype=float),
         )
 
-    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
-        time_np = np.asarray(time, dtype=float)
-        q_pspl, q_fspl, q_space = self._initial_values(np.asarray(q0, dtype=float))
-        n = max(int(time_np.size), 1)
-        trials: list[tuple[str, SingleLensFitResult, float]] = []
-        errors: dict[str, str] = {}
+    def _candidate_specs(self, q0: np.ndarray):
+        """Return the model candidates and their starting vectors.
 
+        Keeping this construction in one place is important for masked
+        refits: a BIC-selected model can be refit without silently selecting a
+        different model family after the anomaly points have been removed.
+        """
+        q_pspl, q_fspl, q_space = self._initial_values(np.asarray(q0, dtype=float))
         q0_size = int(np.asarray(q0, dtype=float).size)
         if q0_size == 4:
             candidates = [("fspl_vbm_fd", VBMFiniteDiffFSPLFitter(), q_fspl)]
@@ -1110,23 +1111,127 @@ class BICSingleLensFitter:
         if bool(self.include_space_parallax) and q0_size != 4:
             candidates.append(
                 (
-                "fspl_space_parallax_gulls_vbm_fd",
-                VBMFiniteDiffGullsFSPLSpaceParallaxFitter(
-                    RA=float(self.RA),
-                    Dec=float(self.Dec),
-                    tref=float(self.tref),
-                    satellite_ephemeris_path=str(self.satellite_ephemeris_path),
-                    max_piE=float(self.max_piE),
-                    piE_prior_weight=float(self.piE_prior_weight),
-                    piE_prior_eps=float(self.piE_prior_eps),
-                ),
-                q_space,
+                    "fspl_space_parallax_gulls_vbm_fd",
+                    VBMFiniteDiffGullsFSPLSpaceParallaxFitter(
+                        RA=float(self.RA),
+                        Dec=float(self.Dec),
+                        tref=float(self.tref),
+                        satellite_ephemeris_path=str(self.satellite_ephemeris_path),
+                        max_piE=float(self.max_piE),
+                        piE_prior_weight=float(self.piE_prior_weight),
+                        piE_prior_eps=float(self.piE_prior_eps),
+                    ),
+                    q_space,
                 )
             )
+        return candidates
+
+    def fit_fixed_model(
+        self,
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        ferr: jnp.ndarray,
+        q0: jnp.ndarray,
+        model_kind: str,
+    ) -> SingleLensFitResult:
+        """Refit a previously selected model without rerunning model selection.
+
+        Planet-signal extraction masks the anomaly before refitting the
+        single-lens baseline.  Running BIC again on that masked data can turn a
+        well-supported FSPL baseline into PSPL simply because the finite-source
+        information was inside the mask.  This method preserves the original
+        model family for that refit.
+        """
+        time_np = np.asarray(time, dtype=float)
+        candidates = {kind: (fitter, x0) for kind, fitter, x0 in self._candidate_specs(np.asarray(q0, dtype=float))}
+        if model_kind not in candidates:
+            raise ValueError(
+                f"Model '{model_kind}' is not available for this parameter vector; "
+                f"available models are {sorted(candidates)}."
+            )
+        fitter, x0 = candidates[model_kind]
+        # Masked refits see a different effective light curve and can fall
+        # into the same FSPL local basin as the initial full-data fit.  Use
+        # the identical guarded candidate path here so a selected FSPL model
+        # gets the small multi-start retry set as well.
+        fit = self._fit_candidate(
+            model_kind,
+            fitter,
+            x0,
+            time,
+            flux,
+            ferr,
+        )
+        n = max(int(time_np.size), 1)
+        k = len(tuple(fit.param_names)) + 2
+        bic = float(np.asarray(fit.chi2)) + float(k) * float(np.log(n))
+        selection = {"selected": model_kind, "bic": {model_kind: float(bic)}, "errors": {}}
+        return self._annotate_fit(fit, model_kind=model_kind, bic=bic, model_selection=selection)
+
+    @staticmethod
+    def _fspl_retry_seeds(x0: np.ndarray) -> tuple[np.ndarray, ...]:
+        """Generate a small set of FSPL starts for a poor local solution."""
+        base = np.asarray(x0, dtype=float).copy()
+        seeds = []
+        # The source radius and tE are correlated near a central peak.  These
+        # modest perturbations escape the common high-u0/small-rho local basin
+        # without turning every survey fit into a large multistart search.
+        for te_factor, rho_factor, u0_sign in (
+            (0.70, 1.0, 1.0),
+            (1.35, 1.0, 1.0),
+            (1.0, 0.50, 1.0),
+            (1.0, 2.00, 1.0),
+            (1.0, 1.0, -1.0),
+        ):
+            seed = base.copy()
+            seed[1] = max(abs(seed[1]) * te_factor, 1e-6)
+            seed[2] = seed[2] * u0_sign
+            seed[3] = seed[3] + np.log(rho_factor)
+            seeds.append(seed)
+        return tuple(seeds)
+
+    def _fit_candidate(
+        self,
+        model_kind: str,
+        fitter,
+        x0: np.ndarray,
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        ferr: jnp.ndarray,
+    ) -> SingleLensFitResult:
+        """Fit one BIC candidate, retrying only a poor FSPL local solution."""
+        fit = fitter.fit(time, flux, ferr, jnp.asarray(x0, dtype=float))
+        if model_kind != "fspl_vbm_fd":
+            return fit
+        if not np.isfinite(float(np.asarray(fit.chi2_dof))) or float(np.asarray(fit.chi2_dof)) <= 10.0:
+            return fit
+
+        best = fit
+        best_chi2 = float(np.asarray(fit.chi2))
+        for seed in self._fspl_retry_seeds(x0):
+            try:
+                trial = VBMFiniteDiffFSPLFitter().fit(
+                    time, flux, ferr, jnp.asarray(seed, dtype=float)
+                )
+                trial_chi2 = float(np.asarray(trial.chi2))
+                if np.isfinite(trial_chi2) and trial_chi2 < best_chi2:
+                    best = trial
+                    best_chi2 = trial_chi2
+            except Exception:
+                continue
+        return best
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, q0: jnp.ndarray) -> SingleLensFitResult:
+        time_np = np.asarray(time, dtype=float)
+        n = max(int(time_np.size), 1)
+        trials: list[tuple[str, SingleLensFitResult, float]] = []
+        errors: dict[str, str] = {}
+
+        candidates = self._candidate_specs(np.asarray(q0, dtype=float))
 
         for model_kind, fitter, x0 in candidates:
             try:
-                fit = fitter.fit(time, flux, ferr, jnp.asarray(x0, dtype=float))
+                fit = self._fit_candidate(model_kind, fitter, x0, time, flux, ferr)
                 k = len(tuple(fit.param_names)) + 2
                 bic = float(np.asarray(fit.chi2)) + float(k) * float(np.log(n))
                 if np.isfinite(bic):
