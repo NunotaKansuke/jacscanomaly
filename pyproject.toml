@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jacscanomaly"
-version = "0.5.0"
+version = "0.5.1"
 description = "JAX-based scan anomaly detection for time-series residuals"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -45,7 +45,11 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-exclude = ["jacscanomaly.test_tool*"]
+exclude = [
+  "jacscanomaly.test_tool*",
+  "jacscanomaly.planet_class*",
+  "jacscanomaly.*.__pycache__*",
+]
 
 [tool.setuptools.package-data]
 jacscanomaly = ["data/*"]

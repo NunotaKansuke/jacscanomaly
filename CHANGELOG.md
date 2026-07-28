@@ -6,7 +6,7 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
-## [0.5.0] - 2026-07-29
+## [0.5.1] - 2026-07-29
 
 ### Added
 - Planet-signal extraction now preserves the selected PSPL/FSPL model family
@@ -18,7 +18,8 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 - FSPL fitting retries a small set of guarded initial seeds when the first
   finite-source solution is a poor local fit.
 - Refined-fit plots label the selected single-lens model family.
-- Version bumped to `0.5.0`.
+- Version bumped to `0.5.1` because PyPI already contains an independent
+  `0.5.0` release.
 
 ### Removed
 - Removed the experimental HMC/NumPyro API, optional dependency, example, and
