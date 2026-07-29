@@ -38,17 +38,10 @@ Supported values:
    FSPL with annual parallax plus a spacecraft ephemeris. Requires
    ``ra_deg``, ``dec_deg``, and ``satellite_ephemeris_path``.
 
-``"fspl_space_parallax_gulls_vbm_fd"``
-   Finite-difference FSPL space-parallax fit using VBMicrolensing and the
-   GULLS trajectory convention. Requires the ``vbm`` optional dependency,
-   ``ra_deg``, ``dec_deg``, and ``satellite_ephemeris_path``.
-
 ``"bic_single_lens"``
-   Compare PSPL and finite-difference FSPL fits by BIC, then return the
+   Compare PSPL and FSPL fits by BIC, then return the
    selected fit. Set ``bic_include_space_parallax=True`` to also compare the
-   GULLS/VBMicrolensing FSPL space-parallax model; that option requires the
-   same sky coordinates, satellite table, and optional dependency as
-   ``"fspl_space_parallax_gulls_vbm_fd"``.
+   native C++/VBMicrolensing FSPL space-parallax model.
 
 For parallax models:
 
@@ -77,10 +70,10 @@ The satellite table is expected to contain rows of
 ``JD RA_deg Dec_deg distance_AU`` inside an optional ``$$SOE`` / ``$$EOE``
 block, matching the VBMicrolensing satellite-table convention.
 
-For the GULLS/VBMicrolensing finite-difference fitter, install the optional
-dependencies with ``pip install 'jacscanomaly[vbm]'``. Its parallax components
-can be bounded and softly penalized through ``max_piE``,
-``piE_prior_weight``, and ``piE_prior_eps``:
+All parallax model kinds use the native C++ trajectory/VBMicrolensing
+evaluator and SciPy trust-region optimization. Select the observer convention
+explicitly with ``parallax_observer_convention``; ``"gulls"`` is available
+for GULLS-format simulations. Parallax components are bounded by ``max_piE``:
 
 .. code-block:: python
 
@@ -91,8 +84,9 @@ can be bounded and softly penalized through ``max_piE``,
        dec_deg=-29.1164180355,
        tref=2459000.0,
        satellite_ephemeris_path="satellitedir/satellite1.txt",
+       parallax_observer_convention="gulls",
+       parallax_time_scale="hjd",
        max_piE=1.0,
-       piE_prior_weight=0.0,
    )
 
 The BIC-selection result includes ``model_kind``, ``bic``, and
@@ -102,22 +96,29 @@ values of successful trials.
 Automatic single-lens initialization
 ------------------------------------
 
-When no initial guess is passed to :meth:`jacscanomaly.Finder.run`, the finder
-estimates initial values with a coarse scan. Important options include:
+When no initial guess is passed to :meth:`jacscanomaly.Finder.run` for a PSPL
+fit, the finder uses the profiled FFT search over a logarithmic ``(u0, teff)``
+bank and passes the best candidates to the final fitter. Important options
+include:
 
 ``auto_init_teff_min`` / ``auto_init_teff_max``
    Range of effective timescales used for initial candidate search.
 
 ``auto_init_teff_grid_n``
-   Number of effective timescale grid points.
+   Number of logarithmic effective-timescale templates.
 
-``auto_init_tE_min`` / ``auto_init_tE_max``
-   Range of event timescales used to convert candidate durations into PSPL
-   seeds.
+``auto_init_u0_min`` / ``auto_init_u0_max`` / ``auto_init_u0_grid_n``
+   Impact-parameter range and number of logarithmic ``u0`` templates.
 
-``auto_init_min_n_eff``
-   Minimum effective point count required for initial candidates. This helps
-   avoid single-point outliers driving the PSPL initial guess.
+``auto_init_fft_grid_dt``
+   Regular FFT calculation-grid spacing. Smaller values improve short-event
+   resolution but increase runtime and memory use.
+
+``auto_init_fft_top_k``
+   Number of ranked FFT seeds passed to the PSPL fitter.
+
+The legacy ``auto_init_tE_*``, ``auto_init_dt0_coeff``, and
+``auto_init_min_n_eff`` options remain relevant to non-PSPL initialization.
 
 Season splitting
 ----------------
@@ -185,6 +186,10 @@ The PSPL workflow uses C++ backends by default:
        grid_backend="cpp",
        single_fit_backend="cpp",
    )
+
+The nonlinear PSPL initial-value search itself uses the FFT ``(u0, teff)``
+bank; ``single_fit_backend`` controls the final continuous fit after those
+seeds are generated.
 
 Use the JAX backend when you want the original vectorized implementation or
 when comparing backend behavior:

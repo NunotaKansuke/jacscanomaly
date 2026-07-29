@@ -30,7 +30,19 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+# Internal design notes are retained in the repository but are not part of the
+# published user manual.  Keeping them out of the source set prevents stale
+# planning references from turning a release documentation build into a
+# warning.
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    "plans/**",
+    "luna_robust_fspl_parallax_fix_instructions_ja.md",
+    "native_cpp_parallax_planet_pipeline_design_ja.md",
+    "robust_fspl_parallax_plan_ja.md",
+]
 
 html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]

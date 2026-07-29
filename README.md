@@ -263,23 +263,25 @@ config = FinderConfig(
 )
 ```
 
-For GULLS-convention spacecraft parallax:
+For GULLS-convention spacecraft parallax, use the standard native model and
+select the coordinate convention explicitly:
 
 ```python
 config = FinderConfig(
-    fitter_kind="fspl_space_parallax_gulls_vbm_fd",
+    fitter_kind="fspl_space_parallax",
     grid_backend="cpp",
     ra_deg=267.3,
     dec_deg=-29.9,
     tref=2461504.0,
     satellite_ephemeris_path="gulls_orbit5_heliocentric.dat",
+    parallax_observer_convention="gulls",
+    parallax_time_scale="hjd",
 )
 ```
 
-These fitters evaluate finite-source magnification with
-`VBMicrolensing.ESPLMag` and optimize nonlinear parameters with SciPy
-finite-difference least squares. They are useful for large CPU survey runs
-where JAX FSPL autodiff overhead dominates runtime.
+Parallax fitters evaluate the trajectory and finite-source magnification in
+the compiled C++/VBMicrolensing backend and optimize nonlinear parameters with
+SciPy trust-region least squares.
 
 ---
 
@@ -318,13 +320,13 @@ to the grid-scan and Δχ² evaluation in `jacscanomaly`.
 
 ### Finite-source magnification (FSPL)
 
-`jacscanomaly` provides two FSPL implementation families:
+`jacscanomaly` provides a standard FSPL fitter and a CPU/VBMicrolensing
+variant. All annual and space-parallax FSPL models use the compiled native
+trajectory/VBMicrolensing backend.
 
-* JAX/microjax fitters: `fspl`, `fspl_parallax`, and `fspl_space_parallax`.
-* CPU finite-difference fitters using VBMicrolensing ESPL magnification:
-  `fspl_vbm_fd` and `fspl_space_parallax_gulls_vbm_fd`.
-
-Install the VBM backend dependencies with:
+VBMicrolensing is installed as a required dependency because the native FSPL
+and parallax extensions are part of the standard build. The historical extra
+remains an accepted no-op:
 
 ```bash
 pip install -e ".[vbm]"
@@ -377,13 +379,10 @@ which can be used directly by GitHub and reference managers.
 * Python ≥ 3.9
 * numpy
 * jax
-* jaxopt
+* scipy
 * matplotlib
 
-Optional for VBM finite-difference FSPL fitters:
-
-* scipy
-* VBMicrolensing
+VBMicrolensing ≥ 5.5 is also required to build the native C++ extensions.
 
 ---
 

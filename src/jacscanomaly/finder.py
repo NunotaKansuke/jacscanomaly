@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Literal, Optional, Sequence
+from typing import TYPE_CHECKING, Literal, Optional, Sequence
 import logging
 
 import numpy as np
@@ -9,36 +9,46 @@ import jax
 import jax.numpy as jnp
 
 from .config import FinderConfig
-from .criteria import CandidateCriteria
 from .singlelens_fit import (
     SingleLensFitResult,
     PSPLFitter,
     CPPPSPLFitter,
-    CPPVBMFSPLParallaxFitter,
     FSPLFitter,
     VBMFiniteDiffFSPLFitter,
-    PSPLParallaxFitter,
-    FSPLParallaxFitter,
-    PSPLSpaceParallaxFitter,
-    FSPLSpaceParallaxFitter,
-    VBMFiniteDiffGullsFSPLSpaceParallaxFitter,
     BICSingleLensFitter,
     evaluate_single_lens_fixed,
 )
 from .singlelens_model import (
     A_pspl_func,
     A_fspl_logrho_func,
-    A_pspl_parallax_func,
-    A_fspl_parallax_logrho_func,
-    A_pspl_space_parallax_func,
-    A_fspl_space_parallax_logrho_func,
 )
+from .parallax_backend import NativeParallaxFitter
 from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .runner import SeasonGridRunner
 from .models import AnomalyResult, BestCandidate, CandidateQuality, SeasonSummary
 from .template_free import TemplateFreeScanner, TemplateFreeSearchConfig, TemplateFreeSearchResult
+from .pspl_fft import PSPLFFTScanner
+from .effect_detection import (
+    detect_fspl_from_pspl_fit,
+    detect_parallax_from_pspl_fit,
+    detect_physical_effects as _detect_physical_effects,
+)
+from .effect_routing import RoutingThresholds, route_candidates
+from .singlelens_fallback import (
+    FallbackConfig,
+    FallbackResult,
+    make_effect_fitter,
+    run_robust_fallback,
+    run_staged_joint_fallback,
+)
+from .exact_probe import run_exact_probe
+from .effect_aware import EffectAwareFinderResult, match_planet_candidates
+from .parallax_backend import native_parallax_effect_score
+
+if TYPE_CHECKING:
+    from .planet_signal import PlanetSignalConfig
 
 
 def _vbm_coordinate_string(ra_deg: float, dec_deg: float) -> str:
@@ -160,7 +170,6 @@ class Finder:
             "fspl_parallax",
             "pspl_space_parallax",
             "fspl_space_parallax",
-            "fspl_space_parallax_gulls_vbm_fd",
             "bic_single_lens",
         }
         if k not in valid:
@@ -177,7 +186,6 @@ class Finder:
             "fspl_parallax",
             "pspl_space_parallax",
             "fspl_space_parallax",
-            "fspl_space_parallax_gulls_vbm_fd",
         } or (k == "bic_single_lens" and self.config.bic_include_space_parallax)
         if needs_sky:
             if self.config.ra_deg is None or self.config.dec_deg is None:
@@ -188,7 +196,6 @@ class Finder:
         needs_satellite = k in {
             "pspl_space_parallax",
             "fspl_space_parallax",
-            "fspl_space_parallax_gulls_vbm_fd",
         } or (k == "bic_single_lens" and self.config.bic_include_space_parallax)
         if needs_satellite and self.config.satellite_ephemeris_path is None:
             raise ValueError(
@@ -223,46 +230,21 @@ class Finder:
             tref = t_ref
     
         if k == "pspl_parallax":
-            self.fitter = PSPLParallaxFitter(
-                RA=self.config.ra_deg,
-                Dec=self.config.dec_deg,
-                tref=tref,
-                use_HJD=self.config.parallax_use_HJD,
-            )
+            self.fitter = make_effect_fitter(
+                self.config, "annual_parallax", float(tref)
+            ).fitter
             return
 
         if k == "pspl_space_parallax":
-            self.fitter = PSPLSpaceParallaxFitter(
-                RA=self.config.ra_deg,
-                Dec=self.config.dec_deg,
-                tref=tref,
-                satellite_ephemeris_path=self.config.satellite_ephemeris_path,
-                use_HJD=self.config.parallax_use_HJD,
-                convention=self.config.space_parallax_convention,
-            )
+            self.fitter = make_effect_fitter(
+                self.config, "space_parallax", float(tref)
+            ).fitter
             return
 
         if k == "fspl_space_parallax":
-            self.fitter = FSPLSpaceParallaxFitter(
-                RA=self.config.ra_deg,
-                Dec=self.config.dec_deg,
-                tref=tref,
-                satellite_ephemeris_path=self.config.satellite_ephemeris_path,
-                use_HJD=self.config.parallax_use_HJD,
-                convention=self.config.space_parallax_convention,
-            )
-            return
-
-        if k == "fspl_space_parallax_gulls_vbm_fd":
-            self.fitter = VBMFiniteDiffGullsFSPLSpaceParallaxFitter(
-                RA=self.config.ra_deg,
-                Dec=self.config.dec_deg,
-                tref=tref,
-                satellite_ephemeris_path=self.config.satellite_ephemeris_path,
-                max_piE=float(self.config.max_piE),
-                piE_prior_weight=float(self.config.piE_prior_weight),
-                piE_prior_eps=float(self.config.piE_prior_eps),
-            )
+            self.fitter = make_effect_fitter(
+                self.config, "fspl_space_parallax", float(tref)
+            ).fitter
             return
 
         if k == "bic_single_lens":
@@ -275,25 +257,17 @@ class Finder:
                 piE_prior_weight=float(self.config.piE_prior_weight),
                 piE_prior_eps=float(self.config.piE_prior_eps),
                 include_space_parallax=bool(self.config.bic_include_space_parallax),
+                observer_convention=str(self.config.parallax_observer_convention),
+                time_scale=str(self.config.parallax_time_scale),
+                time_offset=float(self.config.parallax_time_offset),
+                ephemeris_extrapolation=str(self.config.parallax_extrapolation),
             )
             return
     
         # k == "fspl_parallax"
-        if self.config.single_fit_backend == "vbm_cpp":
-            self.fitter = CPPVBMFSPLParallaxFitter(
-                coordinates=_vbm_coordinate_string(self.config.ra_deg, self.config.dec_deg),
-                max_piE=float(self.config.max_piE),
-                maxiter=int(self.config.vbm_cpp_maxiter),
-                damping_parameter=float(self.config.vbm_cpp_damping_parameter),
-                tol=float(self.config.vbm_cpp_tol),
-            )
-            return
-        self.fitter = FSPLParallaxFitter(
-            RA=self.config.ra_deg,
-            Dec=self.config.dec_deg,
-            tref=tref,
-            use_HJD=self.config.parallax_use_HJD,
-        )
+        self.fitter = make_effect_fitter(
+            self.config, "fspl_parallax", float(tref)
+        ).fitter
 
 
     # ------------------------------------------------------------------
@@ -336,6 +310,287 @@ class Finder:
         if x0_j is None:
             return self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
         return self.fitter.fit(time_j, flux_j, ferr_j, x0_j)
+
+    def detect_effects(
+        self,
+        fit: Optional[SingleLensFitResult] = None,
+        *,
+        parallax_projector=None,
+        space_parallax_projector=None,
+        route: bool = True,
+        routing_thresholds: Optional[RoutingThresholds] = None,
+        include_fspl: bool = True,
+        execute_exact_probe: bool = True,
+        **fspl_kwargs,
+    ):
+        """Run the physical detector in shadow mode on a PSPL fit.
+
+        The detector never calls a nonlinear FSPL/parallax optimizer.  Pass an
+        existing PSPL ``fit`` (or use the last :meth:`run` result), and pass an
+        observer projector when annual/space parallax should be tested.  With
+        ``route=True`` the returned candidates also carry a three-stage routing
+        decision; the raw detector diagnostics remain unchanged.
+        """
+        if fit is None:
+            if self._last_result is None or self._last_result.fit is None:
+                raise ValueError("detect_effects requires a PSPL fit or a previous Finder.run result.")
+            fit = self._last_result.fit
+        if parallax_projector is None and self.config.fitter_kind == "pspl_parallax":
+            parallax_projector = getattr(self.fitter, "_P", None)
+        if space_parallax_projector is None and self.config.fitter_kind == "pspl_space_parallax":
+            space_parallax_projector = getattr(self.fitter, "_P", None)
+        if parallax_projector is None and self.config.ra_deg is not None and self.config.dec_deg is not None:
+            from .trajectory import make_parallax_projector, make_space_parallax_projector
+            try:
+                parallax_projector = make_parallax_projector(
+                    self.config.ra_deg,
+                    self.config.dec_deg,
+                    float(self.config.tref if self.config.tref is not None else np.median(fit.time)),
+                    use_HJD=self.config.parallax_time_scale == "hjd",
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "annual-parallax detector geometry could not be constructed"
+                ) from exc
+        if space_parallax_projector is None and self.config.satellite_ephemeris_path is not None and self.config.ra_deg is not None and self.config.dec_deg is not None:
+            from .trajectory import make_space_parallax_projector
+            try:
+                space_parallax_projector = make_space_parallax_projector(
+                    self.config.ra_deg,
+                    self.config.dec_deg,
+                    float(self.config.tref if self.config.tref is not None else np.median(fit.time)),
+                    self.config.satellite_ephemeris_path,
+                    use_HJD=self.config.parallax_time_scale == "hjd",
+                    convention="gulls" if self.config.parallax_observer_convention == "gulls" else "vbm",
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "space-parallax detector geometry could not be constructed"
+                ) from exc
+        candidates = _detect_physical_effects(
+            fit,
+            parallax_projector=parallax_projector,
+            space_parallax_projector=space_parallax_projector,
+            include_fspl=include_fspl,
+            **fspl_kwargs,
+        )
+        if not route:
+            return candidates
+        thresholds = RoutingThresholds() if routing_thresholds is None else routing_thresholds
+        routed = route_candidates(candidates, thresholds)
+        if not execute_exact_probe:
+            return routed
+        probed = []
+        for candidate in routed:
+            if candidate.decision != "exact_probe":
+                probed.append(candidate)
+                continue
+            projector = space_parallax_projector if candidate.effect == "space_parallax" else parallax_projector
+            try:
+                probe = run_exact_probe(fit, projector, candidate, **fspl_kwargs)
+                promoted = probe.promoted_candidate
+                if (
+                    probe.decision == "skip"
+                    and candidate.score_without_compact_blocks >= thresholds.fallback_score
+                ):
+                    # An inconclusive cheap probe must not turn a robust,
+                    # broad physical score into a dead-end skip.
+                    promoted = candidate.with_decision(
+                        "fallback",
+                        ("exact_probe_not_promoted", "fallback_after_probe_inconclusive"),
+                    )
+                probed.append(promoted)
+            except Exception as exc:
+                probed.append(
+                    candidate.with_decision(
+                        "fallback" if candidate.score_without_compact_blocks >= thresholds.fallback_score else "skip",
+                        ("exact_probe_failed", type(exc).__name__),
+                    )
+                )
+        return tuple(probed)
+
+    def robust_fallback(
+        self,
+        time,
+        flux,
+        ferr,
+        *,
+        fit: Optional[SingleLensFitResult] = None,
+        base_seed=None,
+        candidates=(),
+        effect: str = "mixed",
+        config: FallbackConfig = FallbackConfig(),
+        protected_mask=None,
+        known_anomaly_mask=None,
+    ) -> FallbackResult:
+        """Run detector-seeded contamination-aware refitting.
+
+        This is an optional path and does not alter :meth:`run`.  The fitter is
+        selected from the routed physical effect, while segmentation alternates
+        with that model using inflated errors for contiguous anomaly states.
+        """
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.asarray(ferr, dtype=float)
+        if fit is None and self._last_result is not None:
+            fit = self._last_result.fit
+        if base_seed is None:
+            if fit is None:
+                raise ValueError("robust_fallback requires fit or base_seed.")
+            base_seed = np.asarray(fit.params, dtype=float).copy()
+            names = tuple(getattr(fit, "param_names", ()))
+            if "rho" in names:
+                rho_index = names.index("rho")
+                base_seed[rho_index] = np.log(
+                    max(abs(float(base_seed[rho_index])), 1.0e-12)
+                )
+        self._ensure_fitter(float(np.median(time_np)))
+        candidate_tuple = tuple(candidates)
+        resolved_effect = self._resolve_fallback_effect(effect, candidate_tuple)
+        if resolved_effect is None:
+            raise ValueError(
+                "robust_fallback could not resolve an effect-specific fitter; "
+                "provide candidates or an explicit effect."
+            )
+        spec = make_effect_fitter(self.config, resolved_effect, float(np.median(time_np)))
+        if base_seed is not None and np.asarray(base_seed).size not in (3, spec.parameter_dimension):
+            raise ValueError(
+                f"Base seed dimension {np.asarray(base_seed).size} does not match "
+                f"{resolved_effect} fitter dimension {spec.parameter_dimension}."
+            )
+        config = FallbackConfig(
+            tE_factors=config.tE_factors,
+            u0_sign_flip=config.u0_sign_flip,
+            parallax_radii=config.parallax_radii,
+            parallax_angle_steps=config.parallax_angle_steps,
+            max_seeds=config.max_seeds,
+            contamination=config.contamination,
+            max_point_parameter_change=config.max_point_parameter_change,
+            max_basin_distance=config.max_basin_distance,
+            parameter_dimension=spec.parameter_dimension,
+            default_logrho=config.default_logrho,
+            u0_factors=config.u0_factors,
+            rho_over_u0=config.rho_over_u0,
+            t_star_factors=config.t_star_factors,
+            t0_offsets=config.t0_offsets,
+            max_piE=(
+                config.max_piE
+                if config.max_piE is not None
+                else float(self.config.max_piE)
+            ),
+        )
+        projector = getattr(spec.fitter, "_P", None)
+
+        def physical_effect_score(value, score_effect: Optional[str] = None) -> float:
+            def relevant(candidate) -> bool:
+                if score_effect is None or score_effect == "mixed":
+                    return True
+                if candidate.effect == "fspl":
+                    return "fspl" in score_effect
+                return candidate.effect in score_effect or (
+                    "parallax" in score_effect and "parallax" in candidate.effect
+                )
+
+            if value is fit:
+                return float(
+                    sum(
+                        max(float(candidate.score_without_compact_blocks), 0.0)
+                        for candidate in candidate_tuple
+                        if relevant(candidate)
+                    )
+                )
+            scores: list[float] = []
+            native_parallax_scored = False
+            for candidate in candidate_tuple:
+                if not relevant(candidate):
+                    continue
+                if candidate.effect == "fspl":
+                    detected = detect_fspl_from_pspl_fit(value)
+                    scores.append(
+                        max(float(detected.score_without_compact_blocks), 0.0)
+                    )
+                elif candidate.effect in {"annual_parallax", "space_parallax"}:
+                    native_evaluator = getattr(value, "parallax_projector", None)
+                    if native_evaluator is not None and hasattr(
+                        native_evaluator, "jacobian"
+                    ):
+                        if not native_parallax_scored:
+                            scores.append(
+                                native_parallax_effect_score(
+                                    value,
+                                    exclude_mask=candidate.compact_block_mask,
+                                )
+                            )
+                            native_parallax_scored = True
+                        continue
+                    if projector is None:
+                        # A single-effect FSPL stage has no parallax
+                        # trajectory. Its acceptance must be based on the
+                        # FSPL detector only; the joint native stage evaluates
+                        # the parallax component.
+                        continue
+                    detected = detect_parallax_from_pspl_fit(
+                        value,
+                        projector,
+                        space=candidate.effect == "space_parallax",
+                    )
+                    scores.append(
+                        max(float(detected.score_without_compact_blocks), 0.0)
+                    )
+                else:
+                    continue
+            if not scores:
+                raise ValueError("No residual physical-effect detector is available.")
+            return float(np.sum(scores))
+
+        effect_score_fn = physical_effect_score if candidate_tuple else None
+        if resolved_effect in {"fspl_parallax", "fspl_space_parallax"} and effect == "mixed":
+            return run_staged_joint_fallback(
+                self.config,
+                time_np,
+                flux_np,
+                ferr_np,
+                base_seed,
+                candidates=candidate_tuple,
+                effect=resolved_effect,
+                fallback_config=config,
+                protected_mask=protected_mask,
+                known_anomaly_mask=known_anomaly_mask,
+                baseline_fit=fit,
+                effect_score_fn=effect_score_fn,
+            )
+        return run_robust_fallback(
+            spec.fitter,
+            time_np,
+            flux_np,
+            ferr_np,
+            base_seed,
+            candidates=candidate_tuple,
+            effect=resolved_effect,
+            config=config,
+            protected_mask=protected_mask,
+            known_anomaly_mask=known_anomaly_mask,
+            baseline_fit=fit,
+            effect_score_fn=effect_score_fn,
+            model_spec=spec,
+        )
+
+    @staticmethod
+    def _resolve_fallback_effect(effect: str, candidates) -> Optional[str]:
+        if effect != "mixed":
+            return str(effect)
+        effects = {str(candidate.effect) for candidate in candidates}
+        if "fspl" in effects and "space_parallax" in effects:
+            return "fspl_space_parallax"
+        if "fspl" in effects and "annual_parallax" in effects:
+            return "fspl_parallax"
+        if "fspl" in effects:
+            return "fspl"
+        if "space_parallax" in effects:
+            return "space_parallax"
+        if "annual_parallax" in effects:
+            return "annual_parallax"
+        return None
 
     def run(
         self,
@@ -448,6 +703,240 @@ class Finder:
 
         self._last_result = result
         return result
+
+    def run_effect_aware(
+        self,
+        time,
+        flux,
+        ferr,
+        x0=None,
+        *,
+        data_kind: Literal["flux", "mag"] = "flux",
+        run_planet_before: bool = True,
+        run_planet_after: bool = True,
+        planet_config: Optional["PlanetSignalConfig"] = None,
+        planet_fast_mode: bool = True,
+        routing_thresholds: Optional[RoutingThresholds] = None,
+        fallback_config: FallbackConfig = FallbackConfig(),
+        verbose: bool = False,
+    ) -> EffectAwareFinderResult:
+        """Run the explicit planet-before/physical-fallback/planet-after flow.
+
+        ``Finder.run`` remains unchanged.  This method keeps the initial planet
+        extraction even when a later robust fallback fails or is rejected.
+
+        By default, routine effect-aware runs use a one-iteration, one-branch
+        planet pass.  Set ``planet_fast_mode=False`` to use the supplied (or
+        default) full configuration from the outset.  A caller that needs a
+        full beam search after routing can pass ``planet_fast_mode=False``.
+        """
+        time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self._to_arrays(
+            time, flux, ferr, x0, data_kind=data_kind
+        )
+        self._ensure_fitter(float(np.median(time_np)))
+        if x0_j is None:
+            initial_fit = self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
+        else:
+            initial_fit = self.fitter.fit(time_j, flux_j, ferr_j, x0_j)
+
+        planet_before = None
+        reason_codes: list[str] = []
+        if run_planet_before:
+            from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
+            resolved_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
+            if planet_fast_mode:
+                resolved_planet_config = replace(
+                    resolved_planet_config,
+                    baseline_mode="beam_interval",
+                    beam_max_iter=1,
+                    beam_width=1,
+                    beam_candidates_per_iter=1,
+                    beam_probe_only=True,
+                )
+            planet_before = PlanetSignalExtractor(self, resolved_planet_config).run(
+                time_np, flux_np, ferr_np, initial_fit=initial_fit, refit=False, verbose=verbose
+            )
+            reason_codes.append("planet_scan_before_completed")
+
+        # Detector routing is intentionally kept separate from the fallback.
+        # The fallback factory is the only place that selects the native
+        # parallax evaluator, so a skip path remains cheap.
+        thresholds = RoutingThresholds() if routing_thresholds is None else routing_thresholds
+        # This entry point owns an exact-probe executor, so the router should
+        # never mark it unavailable and leave a boundary candidate stranded.
+        thresholds = replace(thresholds, exact_probe_available=True)
+        effects = self.detect_effects(
+            fit=initial_fit,
+            route=True,
+            routing_thresholds=thresholds,
+            execute_exact_probe=True,
+        )
+        effects = tuple(effects)
+        fallback_candidates = tuple(candidate for candidate in effects if getattr(candidate, "decision", "skip") == "fallback")
+        # A cheap first pass keeps ordinary events fast.  Preserve the full
+        # beam search for an event that already looks planetary, or for one
+        # that the physical-effect router judges worthy of fallback.  Doing
+        # this before fallback also gives the contamination mask its best
+        # available planet intervals.
+        if (
+            run_planet_before
+            and planet_fast_mode
+            and (
+                bool(
+                    planet_before is not None
+                    and planet_before.initial_seed is not None
+                    and np.isfinite(planet_before.initial_seed.dchi2)
+                    and planet_before.initial_seed.dchi2
+                    >= float(
+                        (PlanetSignalConfig() if planet_config is None else planet_config).seed_min_dchi2
+                    )
+                )
+                or bool(fallback_candidates)
+            )
+        ):
+            from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
+            full_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
+            planet_before = PlanetSignalExtractor(self, full_planet_config).run(
+                time_np,
+                flux_np,
+                ferr_np,
+                initial_fit=initial_fit,
+                initial_seed=planet_before.initial_seed,
+                refit=False,
+                verbose=verbose,
+            )
+            reason_codes.append("planet_scan_before_escalated")
+        fallback_result = None
+        selected_fit = initial_fit
+        routing_decision = effects
+        if fallback_candidates:
+            known_anomaly_mask = np.zeros(time_np.size, dtype=bool)
+            if planet_before is not None and planet_before.candidates:
+                cadence = (
+                    float(np.median(np.diff(np.sort(time_np))))
+                    if time_np.size > 1
+                    else 0.0
+                )
+                for candidate in planet_before.candidates:
+                    start = float(candidate.t_start)
+                    end = float(candidate.t_end)
+                    padding = max(
+                        2.0 * cadence,
+                        0.25 * max(end - start, 0.0),
+                    )
+                    known_anomaly_mask |= (
+                        (time_np >= start - padding)
+                        & (time_np <= end + padding)
+                    )
+            try:
+                fallback_result = self.robust_fallback(
+                    time_np, flux_np, ferr_np, fit=initial_fit,
+                    candidates=fallback_candidates, effect="mixed",
+                    config=fallback_config,
+                    known_anomaly_mask=known_anomaly_mask,
+                )
+                if fallback_result.success:
+                    selected_fit = fallback_result.fit
+                    reason_codes.append("fallback_accepted")
+                else:
+                    reason_codes.append("fallback_rejected")
+            except Exception as exc:
+                reason_codes.append("fallback_failed")
+                fallback_result = None
+                logger.debug("effect-aware fallback failed", exc_info=True)
+        else:
+            reason_codes.append("fallback_skipped")
+
+        planet_after = None
+        accepted = selected_fit is not initial_fit
+        if accepted and run_planet_after:
+            from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
+            prior_windows = tuple(
+                (
+                    float(candidate.peak_time),
+                    max(
+                        0.5 * max(
+                            float(candidate.t_end) - float(candidate.t_start),
+                            0.0,
+                        ),
+                        float(np.median(np.diff(np.sort(time_np))))
+                        if time_np.size > 1
+                        else 0.0,
+                    ),
+                )
+                for candidate in (() if planet_before is None else planet_before.candidates)
+            )
+            resolved_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
+            if planet_fast_mode:
+                resolved_planet_config = replace(
+                    resolved_planet_config,
+                    baseline_mode="beam_interval",
+                    beam_max_iter=1,
+                    beam_width=1,
+                    beam_candidates_per_iter=1,
+                    beam_probe_only=True,
+                )
+            planet_after = PlanetSignalExtractor(self, resolved_planet_config).run(
+                time_np,
+                flux_np,
+                ferr_np,
+                initial_fit=selected_fit,
+                refit=False,
+                verbose=verbose,
+                prior_signal_windows=prior_windows,
+            )
+            if planet_fast_mode and (
+                bool(
+                    planet_after.initial_seed is not None
+                    and np.isfinite(planet_after.initial_seed.dchi2)
+                    and planet_after.initial_seed.dchi2 >= float(resolved_planet_config.seed_min_dchi2)
+                )
+                or bool(fallback_candidates)
+            ):
+                full_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
+                planet_after = PlanetSignalExtractor(self, full_planet_config).run(
+                    time_np,
+                    flux_np,
+                    ferr_np,
+                    initial_fit=selected_fit,
+                    initial_seed=planet_after.initial_seed,
+                    refit=False,
+                    verbose=verbose,
+                    prior_signal_windows=prior_windows,
+                )
+                reason_codes.append("planet_scan_after_escalated")
+            reason_codes.append("planet_scan_after_completed")
+        elif not accepted:
+            reason_codes.append("planet_after_not_needed")
+
+        matches = match_planet_candidates(
+            planet_before, planet_after if accepted else planet_before,
+            season_gap=float(self.config.gap),
+        )
+        final_source = planet_after if accepted and planet_after is not None else planet_before
+        final_candidates = tuple(() if final_source is None else final_source.candidates)
+        diagnostics = {
+            "n_effect_candidates": len(effects),
+            "n_fallback_candidates": len(fallback_candidates),
+            "fallback_accepted": bool(accepted),
+            "before_candidate_count": 0 if planet_before is None else len(planet_before.candidates),
+            "after_candidate_count": 0 if planet_after is None else len(planet_after.candidates),
+            "candidate_categories": {category: sum(match.category == category for match in matches) for category in {match.category for match in matches}},
+            "routing_thresholds": thresholds,
+        }
+        return EffectAwareFinderResult(
+            initial_fit=initial_fit,
+            selected_fit=selected_fit,
+            effect_candidates=effects,
+            routing_decision=routing_decision,
+            fallback_result=fallback_result,
+            planet_before=planet_before,
+            planet_after=planet_after,
+            candidate_matches=matches,
+            final_candidates=final_candidates,
+            reason_codes=tuple(reason_codes),
+            diagnostics=diagnostics,
+        )
 
     def run_template_free(
         self,
@@ -574,45 +1063,6 @@ class Finder:
         errors = []
 
         starts = [np.asarray(x0, dtype=float) for x0 in guesses]
-        if isinstance(self.fitter, CPPVBMFSPLParallaxFitter):
-            # First refine the broad jacscanomaly grid seeds with the robust
-            # PSPL C++ solver. Feeding every coarse (often decade-separated)
-            # tE proposal directly to VBM is both wasteful and numerically
-            # fragile. The best PSPL solution supplies the common trajectory
-            # seed; VBM then explores only the FSPL/parallax directions.
-            pspl_fitter = CPPPSPLFitter(
-                maxiter=int(self.config.vbm_cpp_maxiter),
-                u0_min=float(self.config.pspl_fit_u0_min),
-                min_t0_support_points=int(self.config.pspl_fit_min_t0_support_points),
-                t0_support_tE_coeff=float(self.config.pspl_fit_t0_support_tE_coeff),
-            )
-            pspl_fits = []
-            for x0 in guesses:
-                try:
-                    pspl_fits.append(pspl_fitter.fit(time_j, flux_j, ferr_j, jnp.asarray(x0[:3])))
-                except Exception as exc:
-                    errors.append(exc)
-            if pspl_fits:
-                pspl_seed = np.asarray(min(pspl_fits, key=lambda fit: float(fit.chi2)).params, dtype=float)
-                starts = [np.r_[pspl_seed, float(guesses[0, 3]), 0.0, 0.0]]
-            piE_values = tuple(float(value) for value in self.config.vbm_cpp_piE_seed_values) or (0.0,)
-            logrho_values = tuple(float(value) for value in self.config.vbm_cpp_logrho_seed_values)
-            if not logrho_values:
-                logrho_values = tuple(float(x0[3]) for x0 in starts)
-            max_piE = float(self.config.max_piE)
-            trajectory_seeds = starts
-            starts = []
-            for x0 in trajectory_seeds:
-                for logrho in logrho_values:
-                    for piEN in piE_values:
-                        for piEE in piE_values:
-                            if np.isfinite(max_piE) and max_piE > 0.0 and (
-                                abs(piEN) > max_piE or abs(piEE) > max_piE
-                            ):
-                                continue
-                            start = np.asarray(x0, dtype=float).copy()
-                            start[3:] = (logrho, piEN, piEE)
-                            starts.append(start)
 
         for x0 in starts:
             try:
@@ -645,7 +1095,8 @@ class Finder:
             raise ValueError("Finder.run(refit=False) requires x0.")
 
         k = self.config.fitter_kind
-        P = getattr(self.fitter, "_P", None)
+        if isinstance(self.fitter, NativeParallaxFitter):
+            return self.fitter.evaluate_fixed(time_j, flux_j, ferr_j, x0_j)
 
         if k == "pspl":
             return evaluate_single_lens_fixed(
@@ -686,81 +1137,6 @@ class Finder:
                 dof=4,
                 param_names=("t0", "tE", "u0", "rho"),
                 parallax_projector=None,
-            )
-
-        if k == "pspl_parallax":
-            return evaluate_single_lens_fixed(
-                time=time_j,
-                flux=flux_j,
-                ferr=ferr_j,
-                x0=x0_j,
-                build_A=lambda p, t: A_pspl_parallax_func(p, t, P),
-                dof=5,
-                param_names=("t0", "tE", "u0", "piEN", "piEE"),
-                min_points=6,
-                parallax_projector=P,
-            )
-
-        if k == "fspl_parallax":
-            def q_to_params(q):
-                t0, tE, u0, logrho, piEN, piEE = q
-                return jnp.array([t0, tE, u0, jnp.exp(logrho), piEN, piEE])
-
-            return evaluate_single_lens_fixed(
-                time=time_j,
-                flux=flux_j,
-                ferr=ferr_j,
-                x0=x0_j,
-                build_A=lambda q, t: A_fspl_parallax_logrho_func(q, t, P),
-                dof=6,
-                param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
-                x_to_params=q_to_params,
-                min_points=7,
-                store_raw_params=True,
-                parallax_projector=P,
-            )
-
-        if k == "pspl_space_parallax":
-            return evaluate_single_lens_fixed(
-                time=time_j,
-                flux=flux_j,
-                ferr=ferr_j,
-                x0=x0_j,
-                build_A=lambda p, t: A_pspl_space_parallax_func(p, t, P),
-                dof=5,
-                param_names=("t0", "tE", "u0", "piEN", "piEE"),
-                min_points=6,
-                parallax_projector=P,
-            )
-
-        if k == "fspl_space_parallax":
-            def q_to_params(q):
-                t0, tE, u0, logrho, piEN, piEE = q
-                return jnp.array([t0, tE, u0, jnp.exp(logrho), piEN, piEE])
-
-            return evaluate_single_lens_fixed(
-                time=time_j,
-                flux=flux_j,
-                ferr=ferr_j,
-                x0=x0_j,
-                build_A=lambda q, t: A_fspl_space_parallax_logrho_func(q, t, P),
-                dof=6,
-                param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
-                x_to_params=q_to_params,
-                min_points=7,
-                store_raw_params=True,
-                parallax_projector=P,
-            )
-
-        if k == "fspl_space_parallax_gulls_vbm_fd":
-            return self._fixed_single_lens_from_numpy_model(
-                time_j=time_j,
-                flux_j=flux_j,
-                ferr_j=ferr_j,
-                x0_j=x0_j,
-                dof=6,
-                param_names=("t0", "tE", "u0", "rho", "piEN", "piEE"),
-                parallax_projector=P,
             )
 
         raise ValueError(f"Unknown fitter_kind '{k}'.")
@@ -814,6 +1190,14 @@ class Finder:
         time_np: np.ndarray,
     ) -> np.ndarray:
         cfg = self.config
+        if cfg.fitter_kind == "pspl":
+            return self._estimate_pspl_fft_initial_guesses(
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                time_np=time_np,
+            )
+
         if cfg.auto_init_teff_min <= 0 or cfg.auto_init_teff_max <= 0:
             raise ValueError("auto_init_teff_min and auto_init_teff_max must be positive.")
         if cfg.auto_init_teff_max < cfg.auto_init_teff_min:
@@ -915,6 +1299,75 @@ class Finder:
 
         return np.asarray(guesses, dtype=float)
 
+    def _estimate_pspl_fft_initial_guesses(
+        self,
+        *,
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        time_np: np.ndarray,
+    ) -> np.ndarray:
+        """Estimate PSPL starts with a profiled ``(u0, teff, t0)`` FFT bank."""
+        cfg = self.config
+        if cfg.auto_init_teff_min <= 0 or cfg.auto_init_teff_max <= 0:
+            raise ValueError("auto_init_teff_min and auto_init_teff_max must be positive.")
+        if cfg.auto_init_teff_max < cfg.auto_init_teff_min:
+            raise ValueError("auto_init_teff_max must be >= auto_init_teff_min.")
+        if cfg.auto_init_u0_min <= 0 or cfg.auto_init_u0_max <= 0:
+            raise ValueError("auto_init_u0_min and auto_init_u0_max must be positive.")
+        if cfg.auto_init_u0_max < cfg.auto_init_u0_min:
+            raise ValueError("auto_init_u0_max must be >= auto_init_u0_min.")
+
+        n_teff = int(cfg.auto_init_teff_grid_n)
+        n_u0 = int(cfg.auto_init_u0_grid_n)
+        top_k = int(cfg.auto_init_fft_top_k)
+        if n_teff < 1 or n_u0 < 1:
+            raise ValueError("PSPL FFT template-grid sizes must be at least one.")
+        if top_k < 1:
+            raise ValueError("auto_init_fft_top_k must be at least one.")
+
+        teff_grid = np.geomspace(
+            float(cfg.auto_init_teff_min),
+            float(cfg.auto_init_teff_max),
+            n_teff,
+        )
+        u0_grid = np.geomspace(
+            float(cfg.auto_init_u0_min),
+            float(cfg.auto_init_u0_max),
+            n_u0,
+        )
+        scanner = PSPLFFTScanner(
+            grid_dt=cfg.auto_init_fft_grid_dt,
+            max_grid_points=int(cfg.auto_init_fft_max_grid_points),
+        )
+        search = scanner.search(
+            time_np,
+            np.asarray(jax.device_get(flux_j), dtype=float),
+            np.asarray(jax.device_get(ferr_j), dtype=float),
+            u0_grid=u0_grid,
+            teff_grid=teff_grid,
+            top_k=top_k,
+        )
+
+        if search.candidates:
+            return np.asarray(
+                [
+                    self._build_initial_vector(candidate.t0, candidate.tE, candidate.u0)
+                    for candidate in search.candidates
+                ],
+                dtype=float,
+            )
+
+        # Keep the automatic workflow recoverable for flat or numerically
+        # singular light curves. The subsequent fitter will decide whether
+        # this conservative seed is usable.
+        flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
+        i_peak = int(np.nanargmax(flux_np))
+        t0 = float(time_np[i_peak])
+        teff = float(np.sqrt(float(cfg.auto_init_teff_min) * float(cfg.auto_init_teff_max)))
+        u0 = float(np.sqrt(float(cfg.auto_init_u0_min) * float(cfg.auto_init_u0_max)))
+        return np.asarray([self._build_initial_vector(t0, teff / u0, u0)], dtype=float)
+
     @staticmethod
     def _grid_quality_for_cluster(t0: float, teff: float, metrics: np.ndarray) -> tuple[float, float]:
         if metrics.size == 0:
@@ -930,7 +1383,7 @@ class Finder:
             return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho)], dtype=float)
         if k in {"pspl_parallax", "pspl_space_parallax"}:
             return np.asarray([t0, tE, u0, 0.0, 0.0], dtype=float)
-        if k in {"fspl_parallax", "fspl_space_parallax", "fspl_space_parallax_gulls_vbm_fd"}:
+        if k in {"fspl_parallax", "fspl_space_parallax"}:
             return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho), 0.0, 0.0], dtype=float)
         raise ValueError(f"Unknown fitter_kind '{k}'.")
 

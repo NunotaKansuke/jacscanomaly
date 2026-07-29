@@ -16,6 +16,7 @@ from .models import SeasonSummary
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .anomaly_models import get_chi2_anom_masked, get_chi2_flat_masked
+from .fft_grid import FFTAnomalyGridRunner
 
 try:
     from . import _cpp_grid
@@ -339,6 +340,8 @@ class SeasonGridRunner:
             # build (t0, teff) grids for this season
             t0_flat_list: List[np.ndarray] = []
             teff_flat_list: List[np.ndarray] = []
+            teff_scale_list: List[float] = []
+            t0_step_list: List[float] = []
 
             for teff in teff_k:
                 dt0 = self.config.dt0_coeff * float(teff)
@@ -348,6 +351,8 @@ class SeasonGridRunner:
 
                 t0_flat_list.append(t0_vals.astype(float, copy=False))
                 teff_flat_list.append(np.full_like(t0_vals, float(teff), dtype=float))
+                teff_scale_list.append(float(teff))
+                t0_step_list.append(float(dt0))
 
             if len(t0_flat_list) == 0:
                 if verbose:
@@ -376,14 +381,20 @@ class SeasonGridRunner:
             t0_flat_np = np.concatenate(t0_flat_list).astype(float, copy=False)
             teff_flat_np = np.concatenate(teff_flat_list).astype(float, copy=False)
 
-            # JAX arrays for the grid
-            t0_flat = jnp.asarray(t0_flat_np, dtype=jnp.float64)
-            teff_flat = jnp.asarray(teff_flat_np, dtype=jnp.float64)
+            backend = self.config.grid_backend
+            if backend == "jax":
+                t0_flat = jnp.asarray(t0_flat_np, dtype=jnp.float64)
+                teff_flat = jnp.asarray(teff_flat_np, dtype=jnp.float64)
+            else:
+                t0_flat = None
+                teff_flat = None
 
             # ---- timed block: grid run
             t_grid0 = time.perf_counter()
 
-            used_cpp_backend = self.config.grid_backend == "cpp"
+            used_cpp_backend = backend == "cpp"
+            used_fft_backend = backend == "fft"
+            fft_runner = None
             if used_cpp_backend:
                 if _cpp_grid is None:
                     raise RuntimeError(
@@ -406,7 +417,40 @@ class SeasonGridRunner:
                 )
                 t0_np_out = t0_flat_np
                 teff_np_out = teff_flat_np
-            elif self.config.grid_chunk_auto:
+            elif used_fft_backend:
+                if verbose:
+                    log.info(
+                        "  -> grid exec: fft(oversample=%d)",
+                        int(self.config.fft_oversample),
+                    )
+                t_season_np = np.asarray(device_get(t_season), dtype=float)
+                r_season_np = np.asarray(device_get(r_season), dtype=float)
+                w_season_np = np.asarray(device_get(w_season), dtype=float)
+                fft_runner = FFTAnomalyGridRunner(
+                    oversample=int(self.config.fft_oversample),
+                    max_grid_points=int(self.config.fft_max_grid_points),
+                    singular_rtol=float(self.config.fft_singular_rtol),
+                )
+                fft_result = fft_runner.run(
+                    time=t_season_np,
+                    flux=r_season_np,
+                    weight=w_season_np,
+                    t0_grids=t0_flat_list,
+                    teff_values=teff_scale_list,
+                    t0_steps=t0_step_list,
+                    teff_coeff=float(self.config.teff_coeff),
+                    min_pts=int(self.config.min_pts_in_window),
+                )
+                t0_np_out = fft_result.t0
+                teff_np_out = fft_result.teff
+                dchi2_np = fft_result.dchi2
+                nwin_np = fft_result.n_window
+                ncontrib_np = np.zeros_like(nwin_np, dtype=np.int32)
+                neff_np = np.zeros_like(dchi2_np, dtype=float)
+                peak_np = np.zeros_like(dchi2_np, dtype=float)
+                rho1_np = np.zeros_like(dchi2_np, dtype=float)
+                longest_np = np.zeros_like(nwin_np, dtype=np.int32)
+            elif backend == "jax" and self.config.grid_chunk_auto:
                 if verbose:
                     log.info("  -> grid exec: chunked(auto,size=%d)", self.config.grid_chunk_size)
                 t0_out, teff_out, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run = GridRunner.run_auto(
@@ -418,7 +462,7 @@ class SeasonGridRunner:
                     chunk_size=self.config.grid_chunk_size,
                     threshold=self.config.grid_chunk_threshold,
                 )
-            elif self.config.grid_chunked:
+            elif backend == "jax" and self.config.grid_chunked:
                 if verbose:
                     log.info("  -> grid exec: chunked(forced,size=%d)", self.config.grid_chunk_size)
                 t0_out, teff_out, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run = GridRunner.run_chunked(
@@ -429,7 +473,7 @@ class SeasonGridRunner:
                     min_pts=self.config.min_pts_in_window,
                     chunk_size=self.config.grid_chunk_size,
                 )
-            else:
+            elif backend == "jax":
                 if verbose:
                     log.info("  -> grid exec: vmap")
                 t0_out, teff_out, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run = GridRunner.run(
@@ -439,8 +483,12 @@ class SeasonGridRunner:
                     teff_coeff=self.config.teff_coeff,
                     min_pts=self.config.min_pts_in_window,
                 )
+            else:
+                raise ValueError(
+                    f"Unknown grid_backend '{backend}'. Valid options are 'jax', 'cpp', and 'fft'."
+                )
 
-            if used_cpp_backend:
+            if used_cpp_backend or used_fft_backend:
                 dt_grid = time.perf_counter() - t_grid0
                 dt_copy = 0.0
             else:
@@ -475,22 +523,66 @@ class SeasonGridRunner:
 
             # ---- timed block: extract clusters
             t_ext0 = time.perf_counter()
-            clusters = self.extractor.iterative_anomaly_extraction(
-                np.asarray(t0_np_out),
-                np.asarray(teff_np_out),
-                dchi2_extract,
-            )
+            if used_cpp_backend and hasattr(_cpp_grid, "extract_clusters"):
+                clusters = _cpp_grid.extract_clusters(
+                    np.asarray(t0_np_out),
+                    np.asarray(teff_np_out),
+                    dchi2_extract,
+                    sigma_overlap=float(self.extractor.sigma_overlap),
+                    min_points=int(self.extractor.min_points),
+                )
+            else:
+                clusters = self.extractor.iterative_anomaly_extraction(
+                    np.asarray(t0_np_out),
+                    np.asarray(teff_np_out),
+                    dchi2_extract,
+                )
             dt_ext = time.perf_counter() - t_ext0
 
-            dt_season = time.perf_counter() - t_season0  # ★ season end
+            dt_refine = 0.0
+            if used_fft_backend and clusters.size:
+                t_refine0 = time.perf_counter()
+                exact = fft_runner.refine_points(
+                    time=t_season_np,
+                    flux=r_season_np,
+                    weight=w_season_np,
+                    t0=clusters[:, 0],
+                    teff=clusters[:, 1],
+                    sigma=float(self.config.sigma),
+                    teff_coeff=float(self.config.teff_coeff),
+                    min_pts=int(self.config.min_pts_in_window),
+                )
+                clusters = np.asarray(clusters, dtype=float).copy()
+                clusters[:, 2] = exact.dchi2
+                for cluster_index, (cluster_t0, cluster_teff, _) in enumerate(clusters):
+                    distance = np.abs(grid_metrics[:, 0] - cluster_t0) + np.abs(
+                        grid_metrics[:, 1] - cluster_teff
+                    )
+                    metric_index = int(np.argmin(distance))
+                    grid_metrics[metric_index, 2:] = (
+                        exact.dchi2[cluster_index],
+                        exact.n_window[cluster_index],
+                        exact.n_contrib[cluster_index],
+                        exact.n_eff[cluster_index],
+                        exact.peak_frac[cluster_index],
+                        exact.rho1[cluster_index],
+                        exact.longest_run[cluster_index],
+                    )
+                dt_refine = time.perf_counter() - t_refine0
+
+            dt_season = time.perf_counter() - t_season0
 
             if verbose:
-                log.info(
-                    "  -> extracted clusters: %d | grid=%.3fs copy=%.3fs extract=%.3fs | season total=%.3fs",
-                    int(clusters.shape[0]),
-                    dt_grid, dt_copy, dt_ext,
-                    dt_season,
-                )
+                if used_fft_backend:
+                    log.info(
+                        "  -> extracted clusters: %d | grid=%.3fs refine=%.3fs extract=%.3fs | season total=%.3fs",
+                        int(clusters.shape[0]), dt_grid, dt_refine, dt_ext, dt_season,
+                    )
+                else:
+                    log.info(
+                        "  -> extracted clusters: %d | grid=%.3fs copy=%.3fs extract=%.3fs | season total=%.3fs",
+                        int(clusters.shape[0]), dt_grid, dt_copy, dt_ext, dt_season,
+                    )
 
             all_clusters.append(clusters)
             all_grid_metrics.append(grid_metrics)
@@ -499,7 +591,7 @@ class SeasonGridRunner:
                     season_idx=season_idx,
                     t_start=season.start,
                     t_end=season.end,
-                    n_grid=int(t0_flat.shape[0]),
+                        n_grid=n_grid,
                     clusters=clusters,
                     grid_metrics=grid_metrics,
                 )

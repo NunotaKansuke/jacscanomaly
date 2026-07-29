@@ -13,6 +13,7 @@ from jacscanomaly import (
 )
 from jacscanomaly.singlelens_fit import SingleLensFitResult
 from jacscanomaly.singlelens_model import A_pspl_func
+from jacscanomaly.models import BestCandidate, CandidateQuality
 
 
 def _flat_diagnostic(use_flat_baseline=False):
@@ -210,6 +211,125 @@ def test_planet_signal_extractor_beam_interval_selects_connected_interval():
     assert result.best.t_start < 9.0
     assert result.best.t_end > 10.9
     assert np.all(result.signal_mask[(time > 9.4) & (time < 10.4)])
+
+
+def test_beam_interval_stops_after_first_weak_scan(monkeypatch):
+    """Routine events must not repeat an unchanged beam grid scan."""
+    time = np.linspace(0.0, 20.0, 80)
+    params = np.array([10.0, 4.0, 0.2])
+    flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
+    ferr = np.full_like(time, 0.02)
+    extractor = PlanetSignalExtractor(
+        Finder(FinderConfig(grid_backend="jax")),
+        PlanetSignalConfig(beam_max_iter=3, seed_min_dchi2=20.0),
+    )
+    calls = []
+
+    def weak_scan(*args, **kwargs):
+        calls.append(None)
+        return None
+
+    monkeypatch.setattr(extractor, "_scan_best", weak_scan)
+    result = extractor.run(time, flux, ferr, x0=params, refit=False)
+
+    assert len(calls) == 1
+    assert not result.signal_mask.any()
+
+
+def test_beam_interval_stops_when_no_interval_is_adopted(monkeypatch):
+    time = np.linspace(0.0, 20.0, 80)
+    params = np.array([10.0, 4.0, 0.2])
+    flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
+    ferr = np.full_like(time, 0.02)
+    extractor = PlanetSignalExtractor(
+        Finder(FinderConfig(grid_backend="jax")),
+        PlanetSignalConfig(beam_max_iter=3, seed_min_dchi2=20.0),
+    )
+    calls = []
+    seed = BestCandidate(
+        t0=10.0,
+        teff=0.1,
+        dchi2=100.0,
+        med_others=0.0,
+        std_others=1.0,
+        score=100.0,
+        quality=CandidateQuality(10, 5, 5.0, 0.2, 0.0, 5),
+    )
+
+    def strong_scan(*args, **kwargs):
+        calls.append(None)
+        return seed
+
+    monkeypatch.setattr(extractor, "_scan_best", strong_scan)
+    monkeypatch.setattr(extractor, "_beam_interval_masks_from_seed", lambda **kwargs: ())
+    result = extractor.run(time, flux, ferr, x0=params, refit=False)
+
+    assert len(calls) == 1
+    assert not result.signal_mask.any()
+
+
+def test_beam_interval_reuses_cached_initial_seed_without_rescan(monkeypatch):
+    time = np.linspace(0.0, 20.0, 80)
+    params = np.array([10.0, 4.0, 0.2])
+    flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
+    ferr = np.full_like(time, 0.02)
+    extractor = PlanetSignalExtractor(
+        Finder(FinderConfig(grid_backend="jax")),
+        PlanetSignalConfig(beam_max_iter=1, seed_min_dchi2=20.0),
+    )
+    seed = BestCandidate(
+        t0=10.0,
+        teff=0.1,
+        dchi2=100.0,
+        med_others=0.0,
+        std_others=1.0,
+        score=100.0,
+        quality=CandidateQuality(10, 5, 5.0, 0.2, 0.0, 5),
+    )
+
+    monkeypatch.setattr(
+        extractor,
+        "_scan_best",
+        lambda *args, **kwargs: pytest.fail("cached first seed should avoid a grid scan"),
+    )
+    monkeypatch.setattr(extractor, "_beam_interval_masks_from_seed", lambda **kwargs: ())
+    result = extractor.run(
+        time, flux, ferr, x0=params, refit=False, initial_seed=seed
+    )
+
+    assert result.initial_seed is seed
+    assert result.timing.n_scans == 0
+
+
+def test_probe_returns_seed_without_masked_fit(monkeypatch):
+    time = np.linspace(0.0, 20.0, 80)
+    params = np.array([10.0, 4.0, 0.2])
+    flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
+    ferr = np.full_like(time, 0.02)
+    extractor = PlanetSignalExtractor(
+        Finder(FinderConfig(grid_backend="jax")),
+        PlanetSignalConfig.probe(seed_min_dchi2=20.0),
+    )
+    seed = BestCandidate(
+        t0=10.0,
+        teff=0.1,
+        dchi2=100.0,
+        med_others=0.0,
+        std_others=1.0,
+        score=100.0,
+        quality=CandidateQuality(10, 5, 5.0, 0.2, 0.0, 5),
+    )
+    monkeypatch.setattr(extractor, "_scan_best", lambda *args, **kwargs: seed)
+    monkeypatch.setattr(
+        extractor,
+        "_fit_masked_single_lens_and_evaluate_full",
+        lambda **kwargs: pytest.fail("probe must not fit a masked baseline"),
+    )
+
+    result = extractor.run(time, flux, ferr, x0=params, refit=False)
+
+    assert result.initial_seed is seed
+    assert not result.signal_mask.any()
 
 
 def test_planet_signal_extractor_uses_flat_baseline_for_masked_tiny_u0_peak():

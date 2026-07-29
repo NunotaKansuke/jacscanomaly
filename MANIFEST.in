@@ -3,6 +3,8 @@ include setup.py
 include README.md
 include src/jacscanomaly/_cpp_grid.cpp
 include src/jacscanomaly/_vbm_cpp.cpp
+include src/jacscanomaly/_parallax_cpp.cpp
+recursive-include src/jacscanomaly/cpp *.hpp
 recursive-include src/jacscanomaly/data *
 recursive-exclude src *.pyc
 recursive-exclude src __pycache__

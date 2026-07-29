@@ -61,7 +61,6 @@ class FinderConfig:
         "fspl_parallax",
         "pspl_space_parallax",
         "fspl_space_parallax",
-        "fspl_space_parallax_gulls_vbm_fd",
         "bic_single_lens",
     ] = "pspl"
     """
@@ -84,9 +83,6 @@ class FinderConfig:
         PSPL with annual parallax plus a spacecraft ephemeris.
     - ``"fspl_space_parallax"`` :
         FSPL with annual parallax plus a spacecraft ephemeris.
-    - ``"fspl_space_parallax_gulls_vbm_fd"`` :
-        GULLS-convention FSPL space-parallax fitter using VBMicrolensing ESPL
-        magnification and finite-difference SciPy least squares.
     - ``"bic_single_lens"`` :
         Select the lowest-BIC fit among PSPL and finite-difference FSPL, with
         an optional GULLS FSPL space-parallax trial.
@@ -110,31 +106,11 @@ class FinderConfig:
     Path to the spacecraft/observer ephemeris table used by space-parallax
     models.
 
-    Required for ``"pspl_space_parallax"``, ``"fspl_space_parallax"``,
-    ``"fspl_space_parallax_gulls_vbm_fd"``, and ``"bic_single_lens"`` when
+    Required for ``"pspl_space_parallax"``, ``"fspl_space_parallax"``, and
+    ``"bic_single_lens"`` when
     ``bic_include_space_parallax`` is enabled. Expected columns are
-    ``JD RA_deg Dec_deg distance_AU``. The interpretation of the position is
-    controlled by ``space_parallax_convention``.
-    """
-
-    space_parallax_convention: Literal["vbm", "gulls"] = "vbm"
-    """
-    Convention used for ``"*_space_parallax"`` models.
-
-    - ``"vbm"`` interprets ``satellite_ephemeris_path`` as a geocentric
-      VBMicrolensing/RTModel satellite table and adds it to the annual Earth
-      parallax displacement.
-    - ``"gulls"`` interprets ``satellite_ephemeris_path`` as a heliocentric
-      GULLS observer ephemeris and uses the GULLS reference-frame subtraction
-      ``x(t) - x(tref) - v(tref) * (t - tref)``.
-    """
-
-    parallax_use_HJD: bool = True
-    """
-    If True, input times for parallax models are treated as HJD-style times.
-    If False, input times are treated as JD-style times and the observer
-    light-travel correction is included in the source trajectory, matching
-    VBMicrolensing's ``t_in_HJD=0`` convention.
+    ``JD RA_deg Dec_deg distance_AU``. It is Earth-relative in the default
+    ``earth_geocentric_offset`` convention.
     """
 
     max_piE: float = 1.0
@@ -152,44 +128,56 @@ class FinderConfig:
     # ==================================================
     # 0b) Automatic single-lens initialization
     # ==================================================
-    auto_init_teff_min: float = 1.0
-    """Smallest teff used when estimating single-lens initial values."""
+    auto_init_teff_min: float = 0.03
+    """Smallest teff used by the PSPL FFT initial-value search."""
 
-    auto_init_teff_max: float = 1000.0
-    """Largest teff used when estimating single-lens initial values."""
+    auto_init_teff_max: float = 100.0
+    """Largest teff used by the PSPL FFT initial-value search."""
 
-    auto_init_teff_grid_n: int = 25
-    """Number of teff grid points used for automatic initialization."""
+    auto_init_teff_grid_n: int = 24
+    """Number of logarithmic teff templates used for PSPL initialization."""
 
     auto_init_dt0_coeff: float = 0.25
-    """t0 grid spacing coefficient used for automatic initialization."""
+    """Legacy t0 grid spacing coefficient used for non-PSPL initialization."""
 
     auto_init_max_clusters: int = 1
     """Maximum number of scan clusters used as t0/teff seeds."""
 
     auto_init_min_n_eff: float = 2.0
     """
-    Minimum effective number of contributing points required for automatic
-    single-lens initial grid clusters.
+    Minimum effective number of contributing points required by the legacy
+    non-PSPL initial grid search.
 
     This suppresses initial guesses driven by one unrealistically high-weight
     data point.
     """
 
     auto_init_u0_min: float = 1e-4
-    """Smallest allowed u0 seed after converting from teff/tE."""
+    """Smallest u0 template used by the PSPL FFT initial-value search."""
 
     auto_init_u0_max: float = 1.0
-    """Largest allowed u0 seed after converting from teff/tE."""
+    """Largest u0 template used by the PSPL FFT initial-value search."""
+
+    auto_init_u0_grid_n: int = 8
+    """Number of logarithmic u0 templates used by the PSPL FFT search."""
+
+    auto_init_fft_grid_dt: Optional[float] = 0.02
+    """Regular FFT time spacing used for PSPL initialization."""
+
+    auto_init_fft_max_grid_points: int = 500_000
+    """Maximum regular FFT grid length used for PSPL initialization."""
+
+    auto_init_fft_top_k: int = 4
+    """Number of ranked PSPL FFT seeds passed to the fitter."""
 
     auto_init_tE_min: float = 1.0
-    """Smallest tE seed used in the log grid."""
+    """Smallest legacy tE seed used for non-PSPL initialization."""
 
     auto_init_tE_max: float = 1000.0
-    """Largest tE seed used in the log grid."""
+    """Largest legacy tE seed used for non-PSPL initialization."""
 
     auto_init_tE_grid_n: int = 4
-    """Number of tE seeds used in the log grid."""
+    """Number of legacy tE seeds used for non-PSPL initialization."""
 
     auto_init_logrho: float = -7.0
     """Initial logrho used for FSPL models when x0 is omitted."""
@@ -330,13 +318,24 @@ class FinderConfig:
     # 5) Grid execution mode
     # ==================================================
     
-    grid_backend: Literal["jax", "cpp"] = "cpp"
+    grid_backend: Literal["jax", "cpp", "fft"] = "cpp"
     """
     Grid evaluation backend.
 
     - ``"cpp"`` uses the C++ for-loop backend for low-memory survey scans.
     - ``"jax"`` uses the JAX vectorized/chunked implementation.
+    - ``"fft"`` uses an oversampled regular grid and FFT correlations, then
+      exactly re-evaluates extracted representatives on the original data.
     """
+
+    fft_oversample: int = 4
+    """Number of FFT calculation-grid cells per ``t0`` grid interval."""
+
+    fft_max_grid_points: int = 1_000_000
+    """Maximum regular calculation-grid length for one FFT timescale."""
+
+    fft_singular_rtol: float = 1.0e-12
+    """Relative threshold used to reject nearly constant FFT templates."""
 
     single_fit_backend: Literal["jax", "cpp", "vbm_cpp"] = "cpp"
     """
@@ -369,6 +368,38 @@ class FinderConfig:
 
     vbm_cpp_tol: float = 1.0e-5
     """C++ LM convergence tolerance for the native VBM backend."""
+
+    # ==================================================
+    # 0c) Native parallax backend
+    # ==================================================
+    parallax_fit_backend: Literal["native_cpp"] = "native_cpp"
+    """Backend used by the effect-aware parallax fallback."""
+
+    parallax_optimizer: Literal["scipy_trf", "native_lm_polish"] = "scipy_trf"
+    """Primary optimizer for native parallax fitting."""
+
+    parallax_observer_convention: Literal[
+        "earth_geocentric_offset", "heliocentric_observer", "gulls"
+    ] = "earth_geocentric_offset"
+    """Canonical observer convention for native parallax fitting."""
+
+    parallax_time_scale: Literal["jd", "hjd"] = "jd"
+    """Explicit scale for times passed to the native parallax fitter."""
+
+    parallax_time_offset: float = 0.0
+    """Explicit additive offset used to normalize relative input times."""
+
+    parallax_extrapolation: Literal["reject", "linear"] = "reject"
+    """Whether native ephemerides may be linearly extrapolated."""
+
+    parallax_earth_ephemeris: object = None
+    """Optional validated ``parallax_backend.Ephemeris`` for annual parallax."""
+
+    parallax_observer_ephemeris: object = None
+    """Optional complete observer ephemeris for heliocentric/GULLS mode."""
+
+    parallax_reference_ephemeris: object = None
+    """Optional explicit reference ephemeris for heliocentric/GULLS mode."""
 
     grid_chunked: bool = False
     """

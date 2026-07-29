@@ -47,8 +47,12 @@ def load_horizons_vectors_file(path: str) -> np.ndarray:
                 try:
                     t = float(parts[0])
                     # parts[1] is calendar date string; ignore it
-                    x = float(parts[2]); y = float(parts[3]); z = float(parts[4])
-                    vx = float(parts[5]); vy = float(parts[6]); vz = float(parts[7])
+                    x = float(parts[2])
+                    y = float(parts[3])
+                    z = float(parts[4])
+                    vx = float(parts[5])
+                    vy = float(parts[6])
+                    vz = float(parts[7])
                 except ValueError:
                     continue
 
@@ -529,10 +533,11 @@ class GullsSpaceParallaxProjector:
     """
     GULLS-style observer-frame parallax projector.
 
-    The observer ephemeris is interpreted as a heliocentric observer position
-    table in equatorial coordinates.  Unlike the VBMicrolensing-style
-    ``SpaceOrbitalParallaxProjector``, this convention does not add a separate
-    Earth annual parallax term.  Instead it mirrors GULLS' parallax class:
+    ``observer`` contains the complete heliocentric observer position.  The
+    public projector factory constructs it by adding an RTModel/GULLS
+    geocentric satellite table to Earth's heliocentric orbit.  Unlike the
+    VBMicrolensing-style ``SpaceOrbitalParallaxProjector``, this class does not
+    add another Earth term.  It mirrors GULLS' parallax class:
 
     ``observer(t) - observer(tref) - observer_velocity(tref) * (t - tref)``
 

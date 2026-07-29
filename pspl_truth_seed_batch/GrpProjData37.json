@@ -1,0 +1,12 @@
+{
+  "data_file": "/rogue1_8/nunota/sagan_handson/pointlensdata/GrpProjData37.csv",
+  "event_type": "pspl",
+  "fitter_kind": "pspl",
+  "params": {
+    "t0": 2461483.4,
+    "tE": 8.54,
+    "u0": 0.3
+  },
+  "chi2": 24912.5515656657,
+  "chi2_dof": 1.001670683352728
+}

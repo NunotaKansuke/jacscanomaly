@@ -144,3 +144,12 @@ residual:
 This stage returns candidate intervals, a refined baseline, and direct
 measurements of each peak and dip. It does not assign physical caustic labels
 or estimate binary-lens parameters.
+
+For high-throughput first passes, use ``PlanetSignalConfig.fast()``.  It
+performs one beam iteration with one retained interval.  For routing-only
+work, ``PlanetSignalConfig.probe()`` performs the first grid scan without a
+masked fit and exposes its cached seed.  ``run_effect_aware`` uses this probe
+by default, then continues with the full beam search only for a credible seed
+or a physical-effect fallback candidate; that full pass reuses the probe seed
+instead of scanning it again.  Pass ``planet_fast_mode=False`` to always use
+the full beam configuration.

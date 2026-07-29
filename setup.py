@@ -11,14 +11,13 @@ from setuptools.command.build_ext import build_ext as _build_ext
 
 CPP_GRID_SOURCE = Path("src/jacscanomaly/_cpp_grid.cpp")
 VBM_CPP_SOURCE = Path("src/jacscanomaly/_vbm_cpp.cpp")
+PARALLAX_CPP_SOURCE = Path("src/jacscanomaly/_parallax_cpp.cpp")
 
 
 def _find_vbm_sources() -> tuple[Path, Path] | None:
-    """Locate the C++ sources installed by the optional VBMicrolensing package.
+    """Locate the C++ sources installed by the VBMicrolensing build dependency.
 
-    The VBM wrapper remains an optional extension: standard jacscanomaly
-    installs retain the existing C++ PSPL backend, while ``jacscanomaly[vbm]``
-    gains the native FSPL+annual-parallax backend when VBM ships its sources.
+    Native FSPL/parallax support is part of the standard build.
     ``VBMICROLENSING_SOURCE_DIR`` supports non-standard installations.
     """
     candidates: list[Path] = []
@@ -95,17 +94,40 @@ extensions = [
 ]
 
 vbm_sources = _find_vbm_sources()
-if vbm_sources is not None:
-    vbm_library, vbm_include = vbm_sources
-    extensions.append(
-        Extension(
-            "jacscanomaly._vbm_cpp",
-            [str(VBM_CPP_SOURCE), str(vbm_library)],
-            include_dirs=[np.get_include(), str(vbm_include)],
-            language="c++",
-            depends=[str(VBM_CPP_SOURCE), str(vbm_library), str(vbm_include / "VBMicrolensingLibrary.h")],
-        )
+if vbm_sources is None:
+    raise RuntimeError(
+        "VBMicrolensing C++ sources are required to build jacscanomaly's "
+        "native FSPL/parallax backend. Install VBMicrolensing>=5.5 or set "
+        "VBMICROLENSING_SOURCE_DIR."
     )
+vbm_library, vbm_include = vbm_sources
+# setuptools rejects absolute entries in Extension.sources when building
+# wheels, even though VBM supplies its C++ source as a build dependency.
+vbm_library_source = Path(os.path.relpath(vbm_library, Path.cwd()))
+extensions.append(
+    Extension(
+        "jacscanomaly._vbm_cpp",
+        [str(VBM_CPP_SOURCE), str(vbm_library_source)],
+        include_dirs=[np.get_include(), str(vbm_include)],
+        language="c++",
+        depends=[str(VBM_CPP_SOURCE)],
+    )
+)
+extensions.append(
+    Extension(
+        "jacscanomaly._parallax_cpp",
+        [str(PARALLAX_CPP_SOURCE), str(vbm_library_source)],
+        include_dirs=[np.get_include(), str(vbm_include), str(PARALLAX_CPP_SOURCE.parent)],
+        language="c++",
+        depends=[
+            str(PARALLAX_CPP_SOURCE),
+            "src/jacscanomaly/cpp/ephemeris.hpp",
+            "src/jacscanomaly/cpp/sky_projection.hpp",
+            "src/jacscanomaly/cpp/parallax_trajectory.hpp",
+            "src/jacscanomaly/cpp/vbm_magnification.hpp",
+        ],
+    )
+)
 
 setup(
     ext_modules=extensions,

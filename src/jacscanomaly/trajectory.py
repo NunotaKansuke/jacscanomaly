@@ -52,7 +52,24 @@ def make_space_parallax_projector(
     sat_table = parallax.load_vbm_satellite_file(satellite_ephemeris_path)
     sat = parallax.SatelliteEphemeris.from_radec_distance_table(sat_table)
     if convention == "gulls":
-        return parallax.GullsSpaceParallaxProjector(sat, RA, Dec, tref)
+        # GULLS builds each observer orbit by adding its satellite
+        # perturbation to the reference (Earth) orbit.  The RTModel-style
+        # satellite tables contain that geocentric perturbation (Roman is
+        # about 0.01 AU from Earth), not a complete heliocentric position.
+        # Treating the table as the complete orbit suppresses the annual
+        # displacement by roughly two orders of magnitude and drives piE to
+        # its configured bound.
+        earth = get_heliocentric_ephemeris()
+        earth_r = parallax.interp_uniform_linear(
+            sat.t,
+            earth.t[0],
+            earth.t[1] - earth.t[0],
+            earth.r,
+        )
+        observer_r = earth_r + sat.r
+        observer_v = jnp.gradient(observer_r, sat.t, axis=0)
+        observer = parallax.SatelliteEphemeris(sat.t, observer_r, observer_v)
+        return parallax.GullsSpaceParallaxProjector(observer, RA, Dec, tref)
     if convention != "vbm":
         raise ValueError("space parallax convention must be 'vbm' or 'gulls'.")
     eph = get_heliocentric_ephemeris()
