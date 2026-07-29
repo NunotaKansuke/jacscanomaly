@@ -536,6 +536,72 @@ fail:
     return nullptr;
 }
 
+PyObject* extract_clusters(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject* t0_obj = nullptr;
+    PyObject* teff_obj = nullptr;
+    PyObject* dchi2_obj = nullptr;
+    double sigma_overlap = 3.0;
+    int min_points = 3;
+    static const char* kwlist[] = {
+        "t0", "teff", "dchi2", "sigma_overlap", "min_points", nullptr
+    };
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "OOO|di", const_cast<char**>(kwlist),
+            &t0_obj, &teff_obj, &dchi2_obj, &sigma_overlap, &min_points)) {
+        return nullptr;
+    }
+    PyArrayObject* t0_arr = as_double_array(t0_obj);
+    PyArrayObject* teff_arr = as_double_array(teff_obj);
+    PyArrayObject* dchi2_arr = as_double_array(dchi2_obj);
+    if (!t0_arr || !teff_arr || !dchi2_arr) {
+        Py_XDECREF(t0_arr); Py_XDECREF(teff_arr); Py_XDECREF(dchi2_arr);
+        return nullptr;
+    }
+    if (PyArray_NDIM(t0_arr) != 1 || PyArray_NDIM(teff_arr) != 1 || PyArray_NDIM(dchi2_arr) != 1 ||
+        PyArray_DIM(t0_arr, 0) != PyArray_DIM(teff_arr, 0) || PyArray_DIM(t0_arr, 0) != PyArray_DIM(dchi2_arr, 0)) {
+        PyErr_SetString(PyExc_ValueError, "t0, teff, and dchi2 must be one-dimensional arrays of equal length");
+        Py_DECREF(t0_arr); Py_DECREF(teff_arr); Py_DECREF(dchi2_arr);
+        return nullptr;
+    }
+    const npy_intp n = PyArray_DIM(t0_arr, 0);
+    const double* t0 = static_cast<const double*>(PyArray_DATA(t0_arr));
+    const double* teff = static_cast<const double*>(PyArray_DATA(teff_arr));
+    const double* dchi2 = static_cast<const double*>(PyArray_DATA(dchi2_arr));
+    std::vector<unsigned char> remaining(static_cast<std::size_t>(n), 1);
+    std::vector<double> rows;
+    rows.reserve(static_cast<std::size_t>(n) * 3);
+    npy_intp remaining_count = n;
+    while (remaining_count > 0) {
+        npy_intp best = -1;
+        double best_value = -std::numeric_limits<double>::infinity();
+        for (npy_intp i = 0; i < n; ++i) {
+            if (remaining[static_cast<std::size_t>(i)] && dchi2[i] > best_value) {
+                best = i;
+                best_value = dchi2[i];
+            }
+        }
+        if (best < 0 || !std::isfinite(best_value)) break;
+        const double t0_best = t0[best];
+        const double teff_best = teff[best];
+        for (npy_intp i = 0; i < n; ++i) {
+            if (!remaining[static_cast<std::size_t>(i)]) continue;
+            if (std::abs(t0[i] - t0_best) < sigma_overlap * (teff[i] + teff_best)) {
+                remaining[static_cast<std::size_t>(i)] = 0;
+                --remaining_count;
+            }
+        }
+        rows.push_back(t0_best);
+        rows.push_back(teff_best);
+        rows.push_back(best_value);
+        if (remaining_count < min_points) break;
+    }
+    npy_intp dims[2] = {static_cast<npy_intp>(rows.size() / 3), 3};
+    PyArrayObject* out = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(2, dims, NPY_DOUBLE));
+    if (out) std::copy(rows.begin(), rows.end(), static_cast<double*>(PyArray_DATA(out)));
+    Py_DECREF(t0_arr); Py_DECREF(teff_arr); Py_DECREF(dchi2_arr);
+    return reinterpret_cast<PyObject*>(out);
+}
+
 PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
     PyObject* time_obj = nullptr;
     PyObject* flux_obj = nullptr;
@@ -760,6 +826,12 @@ PyMethodDef methods[] = {
         reinterpret_cast<PyCFunction>(fit_pspl),
         METH_VARARGS | METH_KEYWORDS,
         "Fit a PSPL single-lens model with a small C++ Levenberg-Marquardt solver.",
+    },
+    {
+        "extract_clusters",
+        reinterpret_cast<PyCFunction>(extract_clusters),
+        METH_VARARGS | METH_KEYWORDS,
+        "Extract non-overlapping anomaly clusters from a grid result.",
     },
     {nullptr, nullptr, 0, nullptr},
 };

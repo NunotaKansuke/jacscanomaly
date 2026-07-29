@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
+from time import perf_counter
 from typing import Optional, Tuple
 
 import numpy as np
@@ -52,6 +54,7 @@ class PlanetSignalConfig:
     beam_max_iter: int = 3
     beam_width: int = 3
     beam_candidates_per_iter: int = 8
+    beam_probe_only: bool = False
     beam_teff_factors: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 32.0)
     beam_min_half_width: float = 0.0
     beam_grow_min_abs_z: float = 3.0
@@ -70,6 +73,37 @@ class PlanetSignalConfig:
     scan_unimodal_peak_frac: float = 0.2
     scan_unimodal_smooth_points: int = 5
     scan_unimodal_max_lobes: int = 1
+
+    @classmethod
+    def fast(cls, **overrides) -> "PlanetSignalConfig":
+        """Return the inexpensive first-pass beam configuration.
+
+        A fast pass performs one grid scan and evaluates only its best
+        interval.  It is intended for routine events, where a full beam
+        search is needlessly expensive.  Callers can rerun with the regular
+        configuration when this pass finds a credible signal or another
+        physical-effect stage warrants the extra scrutiny.
+        """
+        values = {
+            "baseline_mode": "beam_interval",
+            "beam_max_iter": 1,
+            "beam_width": 1,
+            "beam_candidates_per_iter": 1,
+        }
+        values.update(overrides)
+        return cls(**values)
+
+    @classmethod
+    def probe(cls, **overrides) -> "PlanetSignalConfig":
+        """Return a one-scan routing probe without baseline refits.
+
+        This is for orchestration paths that will immediately run a full beam
+        pass when the seed is credible.  It exposes the cached seed while
+        avoiding duplicate masked fits during that escalation.
+        """
+        values = {"beam_probe_only": True}
+        values.update(overrides)
+        return cls.fast(**values)
 
 
 @dataclass(frozen=True)
@@ -104,6 +138,15 @@ class PlanetSignalIteration:
     n_masked_after: int
     added_points: int
     fit: SingleLensFitResult
+
+
+@dataclass(frozen=True)
+class PlanetSignalTiming:
+    """Wall-clock accounting for one extraction, excluding caller setup."""
+
+    total_seconds: float = 0.0
+    scan_seconds: float = 0.0
+    n_scans: int = 0
 
 
 @dataclass(frozen=True)
@@ -268,6 +311,8 @@ class PlanetSignalResult:
     iterations: Tuple[PlanetSignalIteration, ...]
     candidates: Tuple[PlanetSignalCandidate, ...]
     best: Optional[PlanetSignalCandidate]
+    initial_seed: Optional[BestCandidate] = None
+    timing: PlanetSignalTiming = PlanetSignalTiming()
 
     def measure_features(
         self,
@@ -1033,6 +1078,7 @@ class PlanetSignalExtractor:
         verbose: bool = False,
         prior_signal_windows: tuple[tuple[float, float], ...] = (),
         initial_fit: Optional[SingleLensFitResult] = None,
+        initial_seed: Optional[BestCandidate] = None,
     ) -> PlanetSignalResult:
         """
         Separate localized residual signal while refining a baseline fit.
@@ -1052,6 +1098,10 @@ class PlanetSignalExtractor:
         prior_signal_windows : tuple[tuple[float, float], ...], optional
             Known signal windows expressed as ``(center_time, half_width)``.
             They are added to the final mask and trigger one guarded refit.
+        initial_seed : BestCandidate, optional
+            Cached first grid-scan result for this exact initial fit and input
+            data.  Supplying it lets a full beam pass continue after a fast
+            pass without repeating the initial grid scan.
 
         Returns
         -------
@@ -1071,6 +1121,9 @@ class PlanetSignalExtractor:
         intervals, but does not call ``Finder.run``. Read
         :doc:`planet_features` for mode selection and interpretation.
         """
+        started = perf_counter()
+        self._scan_seconds = 0.0
+        self._n_scans = 0
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self.finder._to_arrays(
             time, flux, ferr, x0
         )
@@ -1102,18 +1155,22 @@ class PlanetSignalExtractor:
                 verbose=verbose,
             )
         elif mode == "beam_interval":
-            current_fit, signal_mask, point_weight, iterations = self._run_beam_interval_baseline(
+            current_fit, signal_mask, point_weight, iterations, observed_initial_seed = self._run_beam_interval_baseline(
                 initial_fit=initial_fit,
                 time_j=time_j,
                 flux_j=flux_j,
                 ferr_j=ferr_j,
                 time_np=time_np,
                 verbose=verbose,
+                initial_seed=initial_seed,
             )
         else:
             raise ValueError(
                 "PlanetSignalConfig.baseline_mode must be 'mask', 'robust', or 'beam_interval'."
             )
+
+        if mode != "beam_interval":
+            observed_initial_seed = None
 
         if self._fit_is_catastrophically_worse(initial_fit, current_fit):
             current_fit = initial_fit
@@ -1165,6 +1222,12 @@ class PlanetSignalExtractor:
             iterations=tuple(iterations),
             candidates=tuple(candidates),
             best=best,
+            initial_seed=observed_initial_seed,
+            timing=PlanetSignalTiming(
+                total_seconds=float(perf_counter() - started),
+                scan_seconds=float(self._scan_seconds),
+                n_scans=int(self._n_scans),
+            ),
         )
 
     @staticmethod
@@ -1370,7 +1433,8 @@ class PlanetSignalExtractor:
         ferr_j: jnp.ndarray,
         time_np: np.ndarray,
         verbose: bool,
-    ) -> tuple[SingleLensFitResult, np.ndarray, np.ndarray, list[PlanetSignalIteration]]:
+        initial_seed: Optional[BestCandidate] = None,
+    ) -> tuple[SingleLensFitResult, np.ndarray, np.ndarray, list[PlanetSignalIteration], Optional[BestCandidate]]:
         empty_mask = np.zeros(time_np.shape, dtype=bool)
         branches = (
             _BeamBranch(
@@ -1380,13 +1444,27 @@ class PlanetSignalExtractor:
                 iterations=(),
             ),
         )
+        observed_initial_seed = initial_seed
 
         for iteration in range(max(0, int(self.config.beam_max_iter))):
             next_branches: list[_BeamBranch] = list(branches)
             for branch in branches:
-                residual_for_seed = self._suppress_masked_residual(branch.fit.residual, branch.mask)
-                seed = self._scan_best(time_j, residual_for_seed, ferr_j, time_np, verbose=verbose)
+                if iteration == 0 and branch is branches[0] and initial_seed is not None:
+                    seed = initial_seed
+                else:
+                    residual_for_seed = self._suppress_masked_residual(branch.fit.residual, branch.mask)
+                    seed = self._scan_best(time_j, residual_for_seed, ferr_j, time_np, verbose=verbose)
+                    if iteration == 0 and branch is branches[0]:
+                        observed_initial_seed = seed
                 if seed is None or not np.isfinite(seed.dchi2) or seed.dchi2 < float(self.config.seed_min_dchi2):
+                    # At the first pass every branch has the same unmasked
+                    # baseline, so another iteration would repeat the same
+                    # expensive grid scan.  On later passes it is likewise
+                    # safe to retire this branch; the loop terminates below
+                    # when no branch made progress.
+                    continue
+
+                if self.config.beam_probe_only:
                     continue
 
                 interval_masks = self._beam_interval_masks_from_seed(
@@ -1442,11 +1520,22 @@ class PlanetSignalExtractor:
                         )
                     )
 
-            branches = tuple(sorted(next_branches, key=lambda b: b.score)[: max(1, int(self.config.beam_width))])
+            retained = tuple(
+                sorted(next_branches, key=lambda b: b.score)[: max(1, int(self.config.beam_width))]
+            )
+            # Do not rescan unchanged branches.  This is particularly
+            # important for ordinary events whose first seed is below the
+            # signal threshold, and for rejected interval proposals.
+            if not any(
+                all(branch is not existing for existing in branches)
+                for branch in retained
+            ):
+                break
+            branches = retained
 
         best_branch = min(branches, key=lambda b: b.score)
         point_weight = np.where(best_branch.mask, 0.0, 1.0)
-        return best_branch.fit, best_branch.mask, point_weight, list(best_branch.iterations)
+        return best_branch.fit, best_branch.mask, point_weight, list(best_branch.iterations), observed_initial_seed
 
     def _fit_is_catastrophically_worse(
         self,
@@ -1554,13 +1643,18 @@ class PlanetSignalExtractor:
         *,
         verbose: bool,
     ) -> Optional[BestCandidate]:
-        seasons, clusters_all, grid_metrics_all = self.finder.runner.run(
-            time_j=time_j,
-            residual_j=residual_j,
-            ferr_j=ferr_j,
-            time_np=time_np,
-            verbose=verbose,
-        )
+        started = perf_counter()
+        try:
+            seasons, clusters_all, grid_metrics_all = self.finder.runner.run(
+                time_j=time_j,
+                residual_j=residual_j,
+                ferr_j=ferr_j,
+                time_np=time_np,
+                verbose=verbose,
+            )
+        finally:
+            self._scan_seconds = getattr(self, "_scan_seconds", 0.0) + (perf_counter() - started)
+            self._n_scans = getattr(self, "_n_scans", 0) + 1
         if bool(self.config.scan_unimodal_filter) and grid_metrics_all.size:
             clusters_all, grid_metrics_all = self._unimodal_scan_clusters(
                 time_j=time_j,
@@ -1599,18 +1693,29 @@ class PlanetSignalExtractor:
         else:
             eval_idx = valid_idx
 
+        # Transfer the candidate decisions only once.  The former per-grid
+        # loop performed several device_get calls for every one of the top-N
+        # candidates, which dominated the C++ grid evaluation itself.
+        is_unimodal = np.asarray(
+            jax.device_get(
+                self._scan_grids_are_unimodal(
+                    time_j=time_j,
+                    residual_j=residual_j,
+                    ferr_j=ferr_j,
+                    t0_j=jnp.asarray(metrics[eval_idx, 0], dtype=time_j.dtype),
+                    teff_j=jnp.asarray(metrics[eval_idx, 1], dtype=time_j.dtype),
+                    teff_coeff=float(self.finder.config.teff_coeff),
+                    min_pts=int(self.finder.config.min_pts_in_window),
+                    min_improvement=float(self.config.scan_unimodal_min_improvement),
+                    peak_frac=float(self.config.scan_unimodal_peak_frac),
+                    smooth_points=int(self.config.scan_unimodal_smooth_points),
+                    max_lobes=int(self.config.scan_unimodal_max_lobes),
+                )
+            ),
+            dtype=bool,
+        )
         keep = np.zeros(metrics.shape[0], dtype=bool)
-        for idx in eval_idx:
-            t0 = float(metrics[idx, 0])
-            teff = float(metrics[idx, 1])
-            if self._scan_grid_is_unimodal(
-                time_j=time_j,
-                residual_j=residual_j,
-                ferr_j=ferr_j,
-                t0=t0,
-                teff=teff,
-            ):
-                keep[idx] = True
+        keep[eval_idx] = is_unimodal
 
         filtered = metrics[keep]
         if filtered.size == 0:
@@ -1622,6 +1727,65 @@ class PlanetSignalExtractor:
             filtered[:, 2],
         )
         return clusters, filtered
+
+    @staticmethod
+    @partial(
+        jax.jit,
+        static_argnames=(
+            "teff_coeff",
+            "min_pts",
+            "min_improvement",
+            "peak_frac",
+            "smooth_points",
+            "max_lobes",
+        ),
+    )
+    def _scan_grids_are_unimodal(
+        *,
+        time_j: jnp.ndarray,
+        residual_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        t0_j: jnp.ndarray,
+        teff_j: jnp.ndarray,
+        teff_coeff: float,
+        min_pts: int,
+        min_improvement: float,
+        peak_frac: float,
+        smooth_points: int,
+        max_lobes: int,
+    ) -> jnp.ndarray:
+        """Evaluate all candidate lobe tests in one JAX dispatch."""
+        width = max(1, int(smooth_points))
+        if width % 2 == 0:
+            width += 1
+        pad = width // 2
+        kernel = jnp.ones((width,), dtype=time_j.dtype) / float(width)
+        weights = 1.0 / (ferr_j ** 2)
+
+        def one(t0, teff):
+            window = jnp.abs(time_j - t0) < float(teff_coeff) * jnp.abs(teff)
+            chi2_anom, chi2s_anom = get_chi2_anom_masked(
+                t0, teff, time_j, residual_j, weights, window
+            )
+            chi2_flat, chi2s_flat = get_chi2_flat_masked(residual_j, weights, window)
+            improvement = jnp.where(window, jnp.maximum(chi2s_flat - chi2s_anom, 0.0), 0.0)
+            peak = jnp.max(improvement)
+            threshold = jnp.maximum(float(min_improvement), float(peak_frac) * peak)
+            if width > 1:
+                smoothed = jnp.convolve(jnp.pad(improvement, (pad, pad), mode="edge"), kernel, mode="valid")
+            else:
+                smoothed = improvement
+            active = window & (smoothed >= threshold)
+            starts = active & ~jnp.concatenate((jnp.zeros((1,), dtype=bool), active[:-1]))
+            lobes = jnp.sum(starts)
+            return (
+                (jnp.sum(window) >= int(min_pts))
+                & jnp.isfinite(peak)
+                & (peak > 0.0)
+                & (lobes <= int(max_lobes))
+            )
+
+        return jax.vmap(one)(t0_j, teff_j)
 
     def _scan_grid_is_unimodal(
         self,

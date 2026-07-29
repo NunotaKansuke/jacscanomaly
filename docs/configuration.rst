@@ -96,22 +96,29 @@ values of successful trials.
 Automatic single-lens initialization
 ------------------------------------
 
-When no initial guess is passed to :meth:`jacscanomaly.Finder.run`, the finder
-estimates initial values with a coarse scan. Important options include:
+When no initial guess is passed to :meth:`jacscanomaly.Finder.run` for a PSPL
+fit, the finder uses the profiled FFT search over a logarithmic ``(u0, teff)``
+bank and passes the best candidates to the final fitter. Important options
+include:
 
 ``auto_init_teff_min`` / ``auto_init_teff_max``
    Range of effective timescales used for initial candidate search.
 
 ``auto_init_teff_grid_n``
-   Number of effective timescale grid points.
+   Number of logarithmic effective-timescale templates.
 
-``auto_init_tE_min`` / ``auto_init_tE_max``
-   Range of event timescales used to convert candidate durations into PSPL
-   seeds.
+``auto_init_u0_min`` / ``auto_init_u0_max`` / ``auto_init_u0_grid_n``
+   Impact-parameter range and number of logarithmic ``u0`` templates.
 
-``auto_init_min_n_eff``
-   Minimum effective point count required for initial candidates. This helps
-   avoid single-point outliers driving the PSPL initial guess.
+``auto_init_fft_grid_dt``
+   Regular FFT calculation-grid spacing. Smaller values improve short-event
+   resolution but increase runtime and memory use.
+
+``auto_init_fft_top_k``
+   Number of ranked FFT seeds passed to the PSPL fitter.
+
+The legacy ``auto_init_tE_*``, ``auto_init_dt0_coeff``, and
+``auto_init_min_n_eff`` options remain relevant to non-PSPL initialization.
 
 Season splitting
 ----------------
@@ -179,6 +186,10 @@ The PSPL workflow uses C++ backends by default:
        grid_backend="cpp",
        single_fit_backend="cpp",
    )
+
+The nonlinear PSPL initial-value search itself uses the FFT ``(u0, teff)``
+bank; ``single_fit_backend`` controls the final continuous fit after those
+seeds are generated.
 
 Use the JAX backend when you want the original vectorized implementation or
 when comparing backend behavior:

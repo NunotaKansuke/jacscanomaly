@@ -35,6 +35,14 @@ from .planet_signal import (
     PlanetSignalExtractor,
     PlanetSignalIteration,
     PlanetSignalResult,
+    PlanetSignalTiming,
+)
+from .pspl_fft import (
+    PSPLFFTCandidate,
+    PSPLFFTProfile,
+    PSPLFFTScanner,
+    PSPLFFTSearchResult,
+    pspl_excess_magnification,
 )
 from .effect_detection import (
     EffectCandidate,
@@ -124,6 +132,12 @@ __all__ = [
     "PlanetSignalExtractor",
     "PlanetSignalIteration",
     "PlanetSignalResult",
+    "PlanetSignalTiming",
+    "PSPLFFTCandidate",
+    "PSPLFFTProfile",
+    "PSPLFFTScanner",
+    "PSPLFFTSearchResult",
+    "pspl_excess_magnification",
     "EffectCandidate",
     "ProjectionDiagnostics",
     "build_fspl_template_bank",

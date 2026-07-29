@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Literal, Optional, Sequence
+from typing import TYPE_CHECKING, Literal, Optional, Sequence
 import logging
 
 import numpy as np
@@ -29,6 +29,7 @@ from .extract import ResultExtractor
 from .runner import SeasonGridRunner
 from .models import AnomalyResult, BestCandidate, CandidateQuality, SeasonSummary
 from .template_free import TemplateFreeScanner, TemplateFreeSearchConfig, TemplateFreeSearchResult
+from .pspl_fft import PSPLFFTScanner
 from .effect_detection import (
     detect_fspl_from_pspl_fit,
     detect_parallax_from_pspl_fit,
@@ -45,6 +46,9 @@ from .singlelens_fallback import (
 from .exact_probe import run_exact_probe
 from .effect_aware import EffectAwareFinderResult, match_planet_candidates
 from .parallax_backend import native_parallax_effect_score
+
+if TYPE_CHECKING:
+    from .planet_signal import PlanetSignalConfig
 
 
 def _vbm_coordinate_string(ra_deg: float, dec_deg: float) -> str:
@@ -710,6 +714,8 @@ class Finder:
         data_kind: Literal["flux", "mag"] = "flux",
         run_planet_before: bool = True,
         run_planet_after: bool = True,
+        planet_config: Optional["PlanetSignalConfig"] = None,
+        planet_fast_mode: bool = True,
         routing_thresholds: Optional[RoutingThresholds] = None,
         fallback_config: FallbackConfig = FallbackConfig(),
         verbose: bool = False,
@@ -718,6 +724,11 @@ class Finder:
 
         ``Finder.run`` remains unchanged.  This method keeps the initial planet
         extraction even when a later robust fallback fails or is rejected.
+
+        By default, routine effect-aware runs use a one-iteration, one-branch
+        planet pass.  Set ``planet_fast_mode=False`` to use the supplied (or
+        default) full configuration from the outset.  A caller that needs a
+        full beam search after routing can pass ``planet_fast_mode=False``.
         """
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self._to_arrays(
             time, flux, ferr, x0, data_kind=data_kind
@@ -731,8 +742,18 @@ class Finder:
         planet_before = None
         reason_codes: list[str] = []
         if run_planet_before:
-            from .planet_signal import PlanetSignalExtractor
-            planet_before = PlanetSignalExtractor(self).run(
+            from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
+            resolved_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
+            if planet_fast_mode:
+                resolved_planet_config = replace(
+                    resolved_planet_config,
+                    baseline_mode="beam_interval",
+                    beam_max_iter=1,
+                    beam_width=1,
+                    beam_candidates_per_iter=1,
+                    beam_probe_only=True,
+                )
+            planet_before = PlanetSignalExtractor(self, resolved_planet_config).run(
                 time_np, flux_np, ferr_np, initial_fit=initial_fit, refit=False, verbose=verbose
             )
             reason_codes.append("planet_scan_before_completed")
@@ -752,6 +773,39 @@ class Finder:
         )
         effects = tuple(effects)
         fallback_candidates = tuple(candidate for candidate in effects if getattr(candidate, "decision", "skip") == "fallback")
+        # A cheap first pass keeps ordinary events fast.  Preserve the full
+        # beam search for an event that already looks planetary, or for one
+        # that the physical-effect router judges worthy of fallback.  Doing
+        # this before fallback also gives the contamination mask its best
+        # available planet intervals.
+        if (
+            run_planet_before
+            and planet_fast_mode
+            and (
+                bool(
+                    planet_before is not None
+                    and planet_before.initial_seed is not None
+                    and np.isfinite(planet_before.initial_seed.dchi2)
+                    and planet_before.initial_seed.dchi2
+                    >= float(
+                        (PlanetSignalConfig() if planet_config is None else planet_config).seed_min_dchi2
+                    )
+                )
+                or bool(fallback_candidates)
+            )
+        ):
+            from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
+            full_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
+            planet_before = PlanetSignalExtractor(self, full_planet_config).run(
+                time_np,
+                flux_np,
+                ferr_np,
+                initial_fit=initial_fit,
+                initial_seed=planet_before.initial_seed,
+                refit=False,
+                verbose=verbose,
+            )
+            reason_codes.append("planet_scan_before_escalated")
         fallback_result = None
         selected_fit = initial_fit
         routing_decision = effects
@@ -796,7 +850,7 @@ class Finder:
         planet_after = None
         accepted = selected_fit is not initial_fit
         if accepted and run_planet_after:
-            from .planet_signal import PlanetSignalExtractor
+            from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
             prior_windows = tuple(
                 (
                     float(candidate.peak_time),
@@ -812,7 +866,17 @@ class Finder:
                 )
                 for candidate in (() if planet_before is None else planet_before.candidates)
             )
-            planet_after = PlanetSignalExtractor(self).run(
+            resolved_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
+            if planet_fast_mode:
+                resolved_planet_config = replace(
+                    resolved_planet_config,
+                    baseline_mode="beam_interval",
+                    beam_max_iter=1,
+                    beam_width=1,
+                    beam_candidates_per_iter=1,
+                    beam_probe_only=True,
+                )
+            planet_after = PlanetSignalExtractor(self, resolved_planet_config).run(
                 time_np,
                 flux_np,
                 ferr_np,
@@ -821,6 +885,26 @@ class Finder:
                 verbose=verbose,
                 prior_signal_windows=prior_windows,
             )
+            if planet_fast_mode and (
+                bool(
+                    planet_after.initial_seed is not None
+                    and np.isfinite(planet_after.initial_seed.dchi2)
+                    and planet_after.initial_seed.dchi2 >= float(resolved_planet_config.seed_min_dchi2)
+                )
+                or bool(fallback_candidates)
+            ):
+                full_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
+                planet_after = PlanetSignalExtractor(self, full_planet_config).run(
+                    time_np,
+                    flux_np,
+                    ferr_np,
+                    initial_fit=selected_fit,
+                    initial_seed=planet_after.initial_seed,
+                    refit=False,
+                    verbose=verbose,
+                    prior_signal_windows=prior_windows,
+                )
+                reason_codes.append("planet_scan_after_escalated")
             reason_codes.append("planet_scan_after_completed")
         elif not accepted:
             reason_codes.append("planet_after_not_needed")
@@ -1106,6 +1190,14 @@ class Finder:
         time_np: np.ndarray,
     ) -> np.ndarray:
         cfg = self.config
+        if cfg.fitter_kind == "pspl":
+            return self._estimate_pspl_fft_initial_guesses(
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                time_np=time_np,
+            )
+
         if cfg.auto_init_teff_min <= 0 or cfg.auto_init_teff_max <= 0:
             raise ValueError("auto_init_teff_min and auto_init_teff_max must be positive.")
         if cfg.auto_init_teff_max < cfg.auto_init_teff_min:
@@ -1206,6 +1298,75 @@ class Finder:
             guesses.append(self._build_initial_vector(t0, tE, u0))
 
         return np.asarray(guesses, dtype=float)
+
+    def _estimate_pspl_fft_initial_guesses(
+        self,
+        *,
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        time_np: np.ndarray,
+    ) -> np.ndarray:
+        """Estimate PSPL starts with a profiled ``(u0, teff, t0)`` FFT bank."""
+        cfg = self.config
+        if cfg.auto_init_teff_min <= 0 or cfg.auto_init_teff_max <= 0:
+            raise ValueError("auto_init_teff_min and auto_init_teff_max must be positive.")
+        if cfg.auto_init_teff_max < cfg.auto_init_teff_min:
+            raise ValueError("auto_init_teff_max must be >= auto_init_teff_min.")
+        if cfg.auto_init_u0_min <= 0 or cfg.auto_init_u0_max <= 0:
+            raise ValueError("auto_init_u0_min and auto_init_u0_max must be positive.")
+        if cfg.auto_init_u0_max < cfg.auto_init_u0_min:
+            raise ValueError("auto_init_u0_max must be >= auto_init_u0_min.")
+
+        n_teff = int(cfg.auto_init_teff_grid_n)
+        n_u0 = int(cfg.auto_init_u0_grid_n)
+        top_k = int(cfg.auto_init_fft_top_k)
+        if n_teff < 1 or n_u0 < 1:
+            raise ValueError("PSPL FFT template-grid sizes must be at least one.")
+        if top_k < 1:
+            raise ValueError("auto_init_fft_top_k must be at least one.")
+
+        teff_grid = np.geomspace(
+            float(cfg.auto_init_teff_min),
+            float(cfg.auto_init_teff_max),
+            n_teff,
+        )
+        u0_grid = np.geomspace(
+            float(cfg.auto_init_u0_min),
+            float(cfg.auto_init_u0_max),
+            n_u0,
+        )
+        scanner = PSPLFFTScanner(
+            grid_dt=cfg.auto_init_fft_grid_dt,
+            max_grid_points=int(cfg.auto_init_fft_max_grid_points),
+        )
+        search = scanner.search(
+            time_np,
+            np.asarray(jax.device_get(flux_j), dtype=float),
+            np.asarray(jax.device_get(ferr_j), dtype=float),
+            u0_grid=u0_grid,
+            teff_grid=teff_grid,
+            top_k=top_k,
+        )
+
+        if search.candidates:
+            return np.asarray(
+                [
+                    self._build_initial_vector(candidate.t0, candidate.tE, candidate.u0)
+                    for candidate in search.candidates
+                ],
+                dtype=float,
+            )
+
+        # Keep the automatic workflow recoverable for flat or numerically
+        # singular light curves. The subsequent fitter will decide whether
+        # this conservative seed is usable.
+        flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
+        i_peak = int(np.nanargmax(flux_np))
+        t0 = float(time_np[i_peak])
+        teff = float(np.sqrt(float(cfg.auto_init_teff_min) * float(cfg.auto_init_teff_max)))
+        u0 = float(np.sqrt(float(cfg.auto_init_u0_min) * float(cfg.auto_init_u0_max)))
+        return np.asarray([self._build_initial_vector(t0, teff / u0, u0)], dtype=float)
 
     @staticmethod
     def _grid_quality_for_cluster(t0: float, teff: float, metrics: np.ndarray) -> tuple[float, float]:

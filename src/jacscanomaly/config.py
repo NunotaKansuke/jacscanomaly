@@ -128,44 +128,56 @@ class FinderConfig:
     # ==================================================
     # 0b) Automatic single-lens initialization
     # ==================================================
-    auto_init_teff_min: float = 1.0
-    """Smallest teff used when estimating single-lens initial values."""
+    auto_init_teff_min: float = 0.03
+    """Smallest teff used by the PSPL FFT initial-value search."""
 
-    auto_init_teff_max: float = 1000.0
-    """Largest teff used when estimating single-lens initial values."""
+    auto_init_teff_max: float = 100.0
+    """Largest teff used by the PSPL FFT initial-value search."""
 
-    auto_init_teff_grid_n: int = 25
-    """Number of teff grid points used for automatic initialization."""
+    auto_init_teff_grid_n: int = 24
+    """Number of logarithmic teff templates used for PSPL initialization."""
 
     auto_init_dt0_coeff: float = 0.25
-    """t0 grid spacing coefficient used for automatic initialization."""
+    """Legacy t0 grid spacing coefficient used for non-PSPL initialization."""
 
     auto_init_max_clusters: int = 1
     """Maximum number of scan clusters used as t0/teff seeds."""
 
     auto_init_min_n_eff: float = 2.0
     """
-    Minimum effective number of contributing points required for automatic
-    single-lens initial grid clusters.
+    Minimum effective number of contributing points required by the legacy
+    non-PSPL initial grid search.
 
     This suppresses initial guesses driven by one unrealistically high-weight
     data point.
     """
 
     auto_init_u0_min: float = 1e-4
-    """Smallest allowed u0 seed after converting from teff/tE."""
+    """Smallest u0 template used by the PSPL FFT initial-value search."""
 
     auto_init_u0_max: float = 1.0
-    """Largest allowed u0 seed after converting from teff/tE."""
+    """Largest u0 template used by the PSPL FFT initial-value search."""
+
+    auto_init_u0_grid_n: int = 8
+    """Number of logarithmic u0 templates used by the PSPL FFT search."""
+
+    auto_init_fft_grid_dt: Optional[float] = 0.02
+    """Regular FFT time spacing used for PSPL initialization."""
+
+    auto_init_fft_max_grid_points: int = 500_000
+    """Maximum regular FFT grid length used for PSPL initialization."""
+
+    auto_init_fft_top_k: int = 4
+    """Number of ranked PSPL FFT seeds passed to the fitter."""
 
     auto_init_tE_min: float = 1.0
-    """Smallest tE seed used in the log grid."""
+    """Smallest legacy tE seed used for non-PSPL initialization."""
 
     auto_init_tE_max: float = 1000.0
-    """Largest tE seed used in the log grid."""
+    """Largest legacy tE seed used for non-PSPL initialization."""
 
     auto_init_tE_grid_n: int = 4
-    """Number of tE seeds used in the log grid."""
+    """Number of legacy tE seeds used for non-PSPL initialization."""
 
     auto_init_logrho: float = -7.0
     """Initial logrho used for FSPL models when x0 is omitted."""
@@ -306,13 +318,24 @@ class FinderConfig:
     # 5) Grid execution mode
     # ==================================================
     
-    grid_backend: Literal["jax", "cpp"] = "cpp"
+    grid_backend: Literal["jax", "cpp", "fft"] = "cpp"
     """
     Grid evaluation backend.
 
     - ``"cpp"`` uses the C++ for-loop backend for low-memory survey scans.
     - ``"jax"`` uses the JAX vectorized/chunked implementation.
+    - ``"fft"`` uses an oversampled regular grid and FFT correlations, then
+      exactly re-evaluates extracted representatives on the original data.
     """
+
+    fft_oversample: int = 4
+    """Number of FFT calculation-grid cells per ``t0`` grid interval."""
+
+    fft_max_grid_points: int = 1_000_000
+    """Maximum regular calculation-grid length for one FFT timescale."""
+
+    fft_singular_rtol: float = 1.0e-12
+    """Relative threshold used to reject nearly constant FFT templates."""
 
     single_fit_backend: Literal["jax", "cpp", "vbm_cpp"] = "cpp"
     """
