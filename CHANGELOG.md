@@ -6,6 +6,25 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [0.5.2] - 2026-07-29
+
+### Added
+- FFT-backed PSPL initialization and an optional FFT residual-grid backend.
+- Cached planet-routing probes, extraction timing diagnostics, and native C++
+  cluster extraction for high-throughput planet-signal searches.
+- Public Sphinx guides for the FFT backends and PSPL initialization.
+
+### Changed
+- Batched the extractor's unimodal candidate filtering to avoid repeated JAX
+  device transfers; warm full-beam extraction is substantially faster on the
+  Roman benchmark event.
+- The effect-aware workflow reuses its initial grid seed when escalating from
+  a routing probe to full beam search.
+- Documentation builds now exclude internal design notes and fail cleanly with
+  warnings treated as errors.
+
+---
+
 ## [0.5.1] - 2026-07-29
 
 ### Added

@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 project = "jacscanomaly"
 author = "Kansuke Nunota"
 
-release = "0.4.0"
+release = "0.5.2"
 version = release
 
 extensions = [
