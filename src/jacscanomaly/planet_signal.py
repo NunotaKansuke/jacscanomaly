@@ -37,6 +37,8 @@ class PlanetSignalConfig:
     mask_core_improvement_peak_frac: float = 0.05
     mask_core_pad_teff: float = 0.25
     max_mask_fraction: float = 0.5
+    max_signal_span_over_tE: float = 0.25
+    min_signal_span: float = 0.0
     max_unmasked_chi2_dof_increase: float = 0.05
     max_refined_chi2_dof_ratio: float = 1000.0
     candidate_min_points: int = 1
@@ -1194,9 +1196,21 @@ class PlanetSignalExtractor:
             point_weight = np.ones(time_np.shape, dtype=float)
             iterations = []
 
-        prior_mask = self._prior_signal_window_mask(time_np, prior_signal_windows)
-        if np.any(prior_mask & ~signal_mask):
-            signal_mask = signal_mask | prior_mask
+        prior_mask = self._prior_signal_window_mask(
+            time_np,
+            prior_signal_windows,
+            fit=current_fit,
+        )
+        combined_prior_mask = signal_mask | prior_mask
+        if (
+            np.any(prior_mask & ~signal_mask)
+            and self._mask_is_compact_for_fit(
+                time_np,
+                combined_prior_mask,
+                current_fit,
+            )
+        ):
+            signal_mask = combined_prior_mask
             point_weight = np.where(signal_mask, 0.0, point_weight)
             if not freeze_baseline:
                 candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
@@ -1207,7 +1221,17 @@ class PlanetSignalExtractor:
                     x0_j=self._raw_params_for_refit(current_fit),
                     model_kind=getattr(current_fit, "model_kind", None),
                 )
-                if not self._fit_is_catastrophically_worse(current_fit, candidate_fit):
+                if (
+                    not self._fit_is_catastrophically_worse(
+                        current_fit,
+                        candidate_fit,
+                    )
+                    and self._mask_is_compact_for_fit(
+                        time_np,
+                        signal_mask,
+                        candidate_fit,
+                    )
+                ):
                     current_fit = candidate_fit
 
         flat_diagnostic = self._flat_baseline_diagnostic(current_fit, signal_mask)
@@ -1249,19 +1273,144 @@ class PlanetSignalExtractor:
             ),
         )
 
-    @staticmethod
     def _prior_signal_window_mask(
+        self,
         time: np.ndarray,
         prior_signal_windows: tuple[tuple[float, float], ...],
+        *,
+        fit: SingleLensFitResult,
     ) -> np.ndarray:
         mask = np.zeros(np.asarray(time).shape, dtype=bool)
+        cap = self._signal_half_width_cap(fit)
+        residual = np.asarray(jax.device_get(fit.residual), dtype=float)
+        ferr = np.maximum(np.asarray(fit.ferr, dtype=float), 1e-12)
+        abs_z = np.abs(residual / ferr)
         for center, half_width in tuple(prior_signal_windows):
             center_f = float(center)
-            half_width_f = max(float(half_width), 0.0)
+            half_width_f = min(max(float(half_width), 0.0), cap)
             if not (np.isfinite(center_f) and np.isfinite(half_width_f)):
                 continue
-            mask |= np.abs(np.asarray(time, dtype=float) - center_f) <= half_width_f
+            window = np.abs(np.asarray(time, dtype=float) - center_f) <= half_width_f
+            mask |= self._coherent_residual_core_mask(
+                time=np.asarray(time, dtype=float),
+                abs_z=abs_z,
+                window=window,
+                pad=min(
+                    float(self.config.mask_core_pad_teff) * half_width_f,
+                    cap,
+                ),
+            )
         return mask
+
+    def _signal_half_width_cap(self, fit: SingleLensFitResult) -> float:
+        """Maximum half-width of one planet interval.
+
+        A planet residual must remain compact relative to the adopted
+        single-lens event. Broad peak/wing structure belongs to the baseline
+        model comparison (FSPL/parallax), not to the planet mask.
+        """
+        params = np.asarray(fit.params, dtype=float).reshape(-1)
+        if params.size < 2 or not np.isfinite(params[1]):
+            return float("inf")
+        fraction = float(self.config.max_signal_span_over_tE)
+        if not np.isfinite(fraction) or fraction <= 0.0:
+            return float("inf")
+        minimum_span = max(float(self.config.min_signal_span), 0.0)
+        return max(0.5 * fraction * abs(float(params[1])), 0.5 * minimum_span)
+
+    def _cap_signal_interval(
+        self,
+        time: np.ndarray,
+        mask: np.ndarray,
+        *,
+        center: float,
+        fit: SingleLensFitResult,
+    ) -> np.ndarray:
+        cap = self._signal_half_width_cap(fit)
+        if not np.isfinite(cap):
+            return np.asarray(mask, dtype=bool)
+        return (
+            np.asarray(mask, dtype=bool)
+            & (np.abs(np.asarray(time, dtype=float) - float(center)) <= cap)
+        )
+
+    def _coherent_residual_core_mask(
+        self,
+        *,
+        time: np.ndarray,
+        abs_z: np.ndarray,
+        window: np.ndarray,
+        pad: float,
+    ) -> np.ndarray:
+        """Trim a proposal to one coherent high-significance residual lobe."""
+        time = np.asarray(time, dtype=float)
+        values = np.asarray(abs_z, dtype=float)
+        window = np.asarray(window, dtype=bool)
+        out = np.zeros(window.shape, dtype=bool)
+        indices = np.flatnonzero(window & np.isfinite(values))
+        if indices.size == 0:
+            return out
+
+        peak_index = int(indices[np.argmax(values[indices])])
+        peak = float(values[peak_index])
+        threshold = max(
+            float(self.config.beam_grow_min_abs_z),
+            float(self.config.mask_core_peak_frac) * peak,
+        )
+        active = np.flatnonzero(window & (values >= threshold))
+        if active.size == 0:
+            return out
+
+        # Permit two sub-threshold cadence samples inside one lobe, but do not
+        # bridge separate peaks or a broad single-lens mismatch.
+        breaks = np.flatnonzero(np.diff(active) > 3)
+        starts = np.r_[0, breaks + 1]
+        ends = np.r_[breaks + 1, active.size]
+        group = None
+        for start, end in zip(starts, ends):
+            candidate = active[int(start) : int(end)]
+            if candidate[0] <= peak_index <= candidate[-1]:
+                group = candidate
+                break
+        if group is None:
+            group = np.asarray([peak_index], dtype=int)
+
+        positive_dt = np.diff(time)
+        positive_dt = positive_dt[positive_dt > 0.0]
+        cadence = float(np.median(positive_dt)) if positive_dt.size else 0.0
+        padding = max(float(pad), cadence)
+        lo = float(time[int(group[0])]) - padding
+        hi = float(time[int(group[-1])]) + padding
+        out = window & (time >= lo) & (time <= hi)
+        return out
+
+    def _mask_is_compact_for_fit(
+        self,
+        time: np.ndarray,
+        mask: np.ndarray,
+        fit: SingleLensFitResult,
+    ) -> bool:
+        """Reject a mask that becomes broad under the resulting fit's tE."""
+        mask = np.asarray(mask, dtype=bool)
+        if not np.any(mask):
+            return True
+        max_span = 2.0 * self._signal_half_width_cap(fit)
+        if not np.isfinite(max_span):
+            return True
+        indices = np.flatnonzero(mask)
+        breaks = np.flatnonzero(np.diff(indices) > 1)
+        starts = np.r_[indices[0], indices[breaks + 1]]
+        ends = np.r_[indices[breaks], indices[-1]]
+        time = np.asarray(time, dtype=float)
+        tolerance = 16.0 * np.finfo(float).eps * max(
+            1.0,
+            float(np.max(np.abs(time[indices]))),
+        )
+        return all(
+            float(time[int(end)] - time[int(start)])
+            <= max_span + tolerance
+            for start, end in zip(starts, ends)
+        )
 
     def _run_mask_baseline(
         self,
@@ -1290,6 +1439,7 @@ class PlanetSignalExtractor:
                 float(self.config.mask_teff_coeff) * float(seed.teff),
                 float(self.config.mask_min_half_width),
             )
+            half_width = min(half_width, self._signal_half_width_cap(current_fit))
             seed_window = np.abs(time_np - float(seed.t0)) <= half_width
             new_mask = self._template_improvement_mask_from_seed(
                 time_np=time_np,
@@ -1320,6 +1470,12 @@ class PlanetSignalExtractor:
                 model_kind=getattr(current_fit, "model_kind", None),
             )
             new_unmasked_chi2_dof = self._masked_chi2_dof(candidate_fit, ~combined)
+            if not self._mask_is_compact_for_fit(
+                time_np,
+                combined,
+                candidate_fit,
+            ):
+                break
             allowed = current_unmasked_chi2_dof * (1.0 + float(self.config.max_unmasked_chi2_dof_increase))
             if np.isfinite(current_unmasked_chi2_dof) and new_unmasked_chi2_dof > allowed:
                 signal_mask = combined
@@ -1377,6 +1533,7 @@ class PlanetSignalExtractor:
                 float(self.config.mask_teff_coeff) * float(seed.teff),
                 float(self.config.mask_min_half_width),
             )
+            half_width = min(half_width, self._signal_half_width_cap(initial_fit))
             seed_window = np.abs(time_np - float(seed.t0)) <= half_width
             new_mask = self._template_improvement_mask_from_seed(
                 time_np=time_np,
@@ -1575,6 +1732,12 @@ class PlanetSignalExtractor:
                         continue
                     if self._fit_is_catastrophically_worse(branch.fit, candidate_fit):
                         continue
+                    if not self._mask_is_compact_for_fit(
+                        time_np,
+                        combined,
+                        candidate_fit,
+                    ):
+                        continue
 
                     added = int(np.sum(combined) - np.sum(branch.mask))
                     score = self._beam_score(candidate_fit, combined)
@@ -1647,12 +1810,17 @@ class PlanetSignalExtractor:
                 abs(float(factor)) * abs(float(seed.teff)),
                 float(self.config.beam_min_half_width),
             )
+            half_width = min(half_width, self._signal_half_width_cap(fit))
             masks.append(np.abs(time_np - float(seed.t0)) <= half_width)
 
         max_factor = max([abs(float(v)) for v in tuple(self.config.beam_teff_factors)] + [1.0])
         search_half_width = max(
             max_factor * abs(float(seed.teff)),
             float(self.config.beam_min_half_width),
+        )
+        search_half_width = min(
+            search_half_width,
+            self._signal_half_width_cap(fit),
         )
         search = (~current_mask) & (np.abs(time_np - float(seed.t0)) <= search_half_width)
         core = search & (abs_z >= float(self.config.beam_grow_min_abs_z))
@@ -1677,7 +1845,20 @@ class PlanetSignalExtractor:
         unique: list[np.ndarray] = []
         seen: set[bytes] = set()
         for mask in masks:
-            mask = np.asarray(mask, dtype=bool) & (~current_mask)
+            mask = self._cap_signal_interval(
+                time_np,
+                mask,
+                center=float(seed.t0),
+                fit=fit,
+            )
+            mask = self._coherent_residual_core_mask(
+                time=time_np,
+                abs_z=abs_z,
+                window=mask,
+                pad=float(self.config.mask_core_pad_teff)
+                * abs(float(seed.teff)),
+            )
+            mask &= ~current_mask
             if not np.any(mask):
                 continue
             key = np.packbits(mask).tobytes()

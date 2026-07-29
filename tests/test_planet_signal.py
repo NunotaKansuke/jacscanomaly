@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -211,7 +213,7 @@ def test_planet_signal_extractor_robust_mode_downweights_connected_structure():
     assert np.any(result.signal_mask[bridge_core])
 
 
-def test_planet_signal_extractor_beam_interval_selects_connected_interval():
+def test_planet_signal_extractor_keeps_beam_intervals_compact_relative_to_tE():
     time = np.linspace(0.0, 20.0, 360)
     params = np.array([10.0, 4.0, 0.25])
     flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.05
@@ -250,9 +252,51 @@ def test_planet_signal_extractor_beam_interval_selects_connected_interval():
     result = extractor.run(time, flux, ferr, x0=params, refit=False)
 
     assert result.best is not None
-    assert result.best.t_start < 9.0
-    assert result.best.t_end > 10.9
-    assert np.all(result.signal_mask[(time > 9.4) & (time < 10.4)])
+    assert result.best.t_start < 10.9 < result.best.t_end
+    assert all(
+        candidate.t_end - candidate.t_start
+        <= 0.25 * abs(float(result.refined_fit.params[1]))
+        for candidate in result.candidates
+    )
+    assert not np.all(result.signal_mask[(time > 9.4) & (time < 10.4)])
+
+
+def test_prior_signal_window_is_capped_relative_to_adopted_tE(monkeypatch):
+    time = np.linspace(0.0, 20.0, 401)
+    params = np.array([10.0, 4.0, 0.2])
+    baseline_flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
+    ferr = np.full_like(time, 0.02)
+    finder = Finder(FinderConfig(grid_backend="jax"))
+    fit = finder.fit_single_lens(time, baseline_flux, ferr, x0=params)
+    flux = baseline_flux + 0.4 * np.exp(-0.5 * ((time - 10.0) / 2.0) ** 2)
+    residual = flux - np.asarray(fit.model_flux)
+    fit = replace(
+        fit,
+        flux=flux,
+        residual=residual,
+        chi2=np.asarray(np.sum(np.square(residual / ferr))),
+    )
+    extractor = PlanetSignalExtractor(
+        finder,
+        PlanetSignalConfig.fast(
+            beam_max_iter=0,
+            max_signal_span_over_tE=0.25,
+        ),
+    )
+
+    result = extractor.run(
+        time,
+        flux,
+        ferr,
+        initial_fit=fit,
+        refit=False,
+        freeze_baseline=True,
+        prior_signal_windows=((10.0, 8.0),),
+    )
+
+    masked_time = time[result.signal_mask]
+    assert masked_time.size > 0
+    assert masked_time[-1] - masked_time[0] <= 0.25 * abs(float(fit.params[1]))
 
 
 def test_beam_interval_stops_after_first_weak_scan(monkeypatch):
