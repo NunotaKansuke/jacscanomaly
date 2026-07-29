@@ -6,7 +6,6 @@ from typing import Tuple, Optional, Callable, Any
 
 import numpy as np
 import jax.numpy as jnp
-from jaxopt import LevenbergMarquardt
 
 from .photometry import solve_fs_fb
 from .plot import SingleLensPlotter
@@ -14,6 +13,7 @@ from .objective import residual_norm_from_A, chi2_from_res
 from .singlelens_model import (
     A_pspl_func,
     A_fspl_logrho_func,
+    A_fspl_logrho_peak_func,
     A_pspl_parallax_func,
     A_fspl_parallax_logrho_func,
     A_fspl_parallax_logrho_peak_func,
@@ -21,8 +21,18 @@ from .singlelens_model import (
     A_fspl_space_parallax_logrho_func,
     A_cv_asymexp_logtau_func,
 )
-from .magnification import _get_fspl_disk
+from .magnification import A_pspl_from_u, _get_fspl_disk
 from .trajectory import make_parallax_projector, make_space_parallax_projector
+from .parallax_backend import (
+    NativePSPLAnnualParallaxFitter,
+    NativeFSPLAnnualParallaxFitter,
+    NativePSPLSpaceParallaxFitter,
+    NativeFSPLSpaceParallaxFitter,
+    Ephemeris,
+    TimeSpec,
+    default_earth_ephemeris,
+    load_vbm_satellite_ephemeris,
+)
 
 try:
     from . import _cpp_grid
@@ -102,6 +112,9 @@ class SingleLensFitResult:
     # Optional: raw optimizer parameters (e.g. logrho), if different from `params`.
     raw_params: Optional[jnp.ndarray] = None
     parallax_projector: Optional[Any] = None
+    optimizer_success: Optional[bool] = None
+    optimizer_status: Optional[str] = None
+    diagnostics: Optional[Any] = None
 
 
 def _fit_single_lens(
@@ -120,11 +133,14 @@ def _fit_single_lens(
     min_points: int = 4,
     store_raw_params: bool = False,
     parallax_projector: Optional[Any] = None,
+    optimizer_scale: Optional[jnp.ndarray] = None,
+    positive_scale_indices: Tuple[int, ...] = (),
 ) -> SingleLensFitResult:
     """
     Shared fitting routine used by all single-lens fitters.
 
-    This optimizes nonlinear parameters using Levenberg–Marquardt, while solving
+    This optimizes nonlinear parameters using SciPy's trust-region least
+    squares solver, while solving
     linear flux parameters (fs, fb) analytically at each evaluation via
     weighted linear regression.
 
@@ -140,21 +156,64 @@ def _fit_single_lens(
 
     eps = 1e-12
     ferr = jnp.maximum(ferr, eps)
-    data = (time, flux, ferr)
+    if least_squares is None:
+        raise ImportError("scipy is required for single-lens fitting.")
 
-    def residual_fun(x, data):
-        t, f, fe = data
-        A = build_A(x, t)
-        return residual_norm_from_A(A, f, fe)
+    def physical_residual_fun(x):
+        A = build_A(jnp.asarray(x), time)
+        return np.asarray(residual_norm_from_A(A, flux, ferr), dtype=float)
 
-    solver = LevenbergMarquardt(
-        residual_fun=residual_fun,
-        maxiter=maxiter,
-        damping_parameter=damping_parameter,
-        tol=tol,
-    )
-    sol = solver.run(x0, data=data)
-    x = sol.params
+    locally_scaled = optimizer_scale is not None
+    if locally_scaled:
+        center = np.asarray(x0, dtype=float)
+        scale = np.asarray(optimizer_scale, dtype=float)
+        if scale.shape != center.shape or bool(np.any(scale <= 0.0)):
+            raise ValueError("optimizer_scale must be positive and match x0.")
+        positive_indices = tuple(int(index) for index in positive_scale_indices)
+        if any(index < 0 or index >= center.size for index in positive_indices):
+            raise ValueError("positive_scale_indices contains an invalid parameter index.")
+        if any(float(center[index]) <= 0.0 for index in positive_indices):
+            raise ValueError("Exponentially scaled parameters must start positive.")
+
+        def unpack(z):
+            value = center + scale * z
+            for index in positive_indices:
+                value[index] = center[index] * np.exp(z[index])
+            return value
+
+        def residual_fun(z):
+            return physical_residual_fun(unpack(np.asarray(z, dtype=float)))
+
+        result = least_squares(
+            residual_fun,
+            np.zeros_like(center),
+            method="trf",
+            jac="2-point",
+            x_scale="jac",
+            max_nfev=int(maxiter),
+            xtol=float(tol),
+            ftol=float(tol),
+            gtol=float(tol),
+        )
+        x_np = unpack(np.asarray(result.x, dtype=float))
+        optimizer_detail = "scaled_trf"
+    else:
+        result = least_squares(
+            physical_residual_fun,
+            np.asarray(x0, dtype=float),
+            method="trf",
+            jac="2-point",
+            x_scale="jac",
+            max_nfev=int(maxiter),
+            xtol=float(tol),
+            ftol=float(tol),
+            gtol=float(tol),
+        )
+        x_np = np.asarray(result.x, dtype=float)
+        optimizer_detail = "raw_trf"
+
+    optimizer_success = bool(result.success and np.all(np.isfinite(x_np)))
+    x = jnp.asarray(x_np, dtype=time.dtype)
 
     A = build_A(x, time)
     fs, fb = solve_fs_fb(A, flux, ferr)
@@ -182,6 +241,12 @@ def _fit_single_lens(
         residual=residual,
         raw_params=raw,
         parallax_projector=parallax_projector,
+        optimizer_success=optimizer_success,
+        optimizer_status=(
+            f"scipy_trf:status={int(result.status)};"
+            f"nfev={int(result.nfev)};max_nfev={int(maxiter)};"
+            f"{optimizer_detail};message={result.message}"
+        ),
     )
 
 
@@ -239,6 +304,8 @@ def evaluate_single_lens_fixed(
         residual=residual,
         raw_params=raw,
         parallax_projector=parallax_projector,
+        optimizer_success=True,
+        optimizer_status="fixed_parameters",
     )
 
 
@@ -371,6 +438,8 @@ class FSPLFitter:
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
+    profile_peak_only: bool = False
+    N_fft: int = 1024
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
@@ -380,13 +449,46 @@ class FSPLFitter:
         """Fit FSPL to a light curve (uses logrho parameterization)."""
         _get_fspl_disk()
 
-        def build_A(q, t):
-            return A_fspl_logrho_func(q, t)
+        if self.profile_peak_only:
+            q0_np = np.asarray(q0, dtype=float)
+            rho0 = float(np.exp(np.clip(q0_np[3], -50.0, 10.0)))
+            width = max(
+                6.0 * rho0 * abs(float(q0_np[1])),
+                2.0 * abs(float(q0_np[2])) * abs(float(q0_np[1])),
+                0.5,
+            )
+            peak_indices = jnp.asarray(
+                np.flatnonzero(np.abs(np.asarray(time, dtype=float) - q0_np[0]) <= width),
+                dtype=jnp.int32,
+            )
+            if peak_indices.size == 0:
+                peak_indices = jnp.asarray([int(np.argmin(np.abs(np.asarray(time, dtype=float) - q0_np[0])))])
+
+            def build_A(q, t):
+                return A_fspl_logrho_peak_func(q, t, peak_indices, N_fft=self.N_fft)
+        else:
+            def build_A(q, t):
+                return A_fspl_logrho_func(q, t)
 
         def q_to_params(q):
             t0, tE, u0, logrho = q
             rho = jnp.exp(logrho)
             return jnp.array([t0, tE, u0, rho])
+
+        q0_array = jnp.asarray(q0)
+        optimizer_scale = jnp.asarray(
+            [
+                max(abs(float(np.asarray(q0_array[1]))), 1.0),
+                1.0,
+                max(
+                    abs(float(np.asarray(q0_array[2]))),
+                    float(np.exp(np.clip(float(np.asarray(q0_array[3])), -50.0, 10.0))),
+                    1.0e-2,
+                ),
+                1.0,
+            ],
+            dtype=q0_array.dtype,
+        )
 
         fit = _fit_single_lens(
             time=time, flux=flux, ferr=ferr, x0=q0,
@@ -399,6 +501,8 @@ class FSPLFitter:
             tol=self.tol,
             min_points=4,
             store_raw_params=True,
+            optimizer_scale=optimizer_scale,
+            positive_scale_indices=(1,),
         )
         self._last_fit = fit
         return fit
@@ -411,6 +515,102 @@ class FSPLFitter:
 
     def plot_residual(self, **kwargs):
         """Plot residuals from the last fit."""
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class CPPVBMFSPLFitter:
+    """Native C++ non-parallax FSPL fitter.
+
+    VBM is used only for finite-source magnification; its parallax coordinate
+    conventions do not enter this model.
+    """
+
+    espl_table_path: Optional[str] = None
+    maxiter: int = 300
+    damping_parameter: float = 1.0e-4
+    tol: float = 1.0e-5
+    vbm_tol: float = 1.0e-4
+    vbm_reltol: float = 1.0e-4
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._last_fit: Optional[SingleLensFitResult] = None
+        if _vbm_cpp is None or not hasattr(_vbm_cpp, "fit_fspl"):
+            raise ImportError(
+                "CPPVBMFSPLFitter requires the native jacscanomaly._vbm_cpp "
+                "extension with non-parallax FSPL support."
+            )
+        if VBMicrolensing is None:
+            raise ImportError("CPPVBMFSPLFitter requires VBMicrolensing.")
+        if self.espl_table_path is None:
+            package_dir = Path(VBMicrolensing.__file__).resolve().parent
+            self.espl_table_path = str(package_dir / "data" / "ESPL.tbl")
+
+    def fit(
+        self,
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        ferr: jnp.ndarray,
+        q0: jnp.ndarray,
+    ) -> SingleLensFitResult:
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+        q0_np = np.asarray(q0, dtype=float)
+        if q0_np.shape != (4,):
+            raise ValueError("q0 must be (t0, tE, u0, logrho).")
+        (
+            raw_params,
+            fs,
+            fb,
+            chi2,
+            model_flux,
+            residual,
+            converged,
+            iterations,
+        ) = _vbm_cpp.fit_fspl(
+            time_np,
+            flux_np,
+            ferr_np,
+            q0_np,
+            espl_table=str(self.espl_table_path),
+            maxiter=int(self.maxiter),
+            damping_parameter=float(self.damping_parameter),
+            tol=float(self.tol),
+            vbm_tol=float(self.vbm_tol),
+            vbm_reltol=float(self.vbm_reltol),
+        )
+        raw = np.asarray(raw_params, dtype=float)
+        params = np.asarray([raw[0], raw[1], raw[2], np.exp(raw[3])], dtype=float)
+        n = int(time_np.size)
+        fit = SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=jnp.asarray(params),
+            param_names=("t0", "tE", "u0", "rho"),
+            chi2=jnp.asarray(float(chi2)),
+            chi2_dof=jnp.asarray(float(chi2) / max(n - 4, 1)),
+            fs=jnp.asarray(float(fs)),
+            fb=jnp.asarray(float(fb)),
+            model_flux=jnp.asarray(model_flux),
+            residual=jnp.asarray(residual),
+            raw_params=jnp.asarray(raw),
+            optimizer_success=bool(converged),
+            optimizer_status=f"native_vbm_lm:iterations={int(iterations)}",
+        )
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
         if self._last_fit is None:
             raise RuntimeError("No fit has been run yet.")
         return self.plotter.plot_residual(self._last_fit, **kwargs)
@@ -515,6 +715,8 @@ class VBMFiniteDiffFSPLFitter:
             model_flux=jnp.asarray(model),
             residual=jnp.asarray(residual),
             raw_params=jnp.asarray(q),
+            optimizer_success=bool(result.success),
+            optimizer_status=str(result.message),
         )
         self._last_fit = fit
         return fit
@@ -771,6 +973,7 @@ class PSPLSpaceParallaxFitter:
     maxiter: int = 1000
     damping_parameter: float = 1e-6
     tol: float = 1e-3
+    max_piE: float = 1.0
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
@@ -783,20 +986,55 @@ class PSPLSpaceParallaxFitter:
 
     def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, p0: jnp.ndarray) -> SingleLensFitResult:
         P = self._P
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+        p0_np = np.asarray(p0, dtype=float)
 
-        def build_A(p, t):
-            return A_pspl_space_parallax_func(p, t, P)
+        def model_and_residual(p):
+            A = np.asarray(A_pspl_space_parallax_func(jnp.asarray(p), jnp.asarray(time_np), P), dtype=float)
+            fs, fb = _solve_fs_fb_numpy(A, flux_np, ferr_np)
+            residual = flux_np - (fs * A + fb)
+            return residual / ferr_np, A, fs, fb
 
-        fit = _fit_single_lens(
-            time=time, flux=flux, ferr=ferr, x0=p0,
-            build_A=build_A,
-            dof=5,
+        if least_squares is None:
+            raise RuntimeError("PSPLSpaceParallaxFitter requires scipy for bounded parallax fitting.")
+        lower = np.full(5, -np.inf, dtype=float)
+        upper = np.full(5, np.inf, dtype=float)
+        lower[1] = 1.0e-6
+        if np.isfinite(float(self.max_piE)) and float(self.max_piE) > 0.0:
+            lower[3:5] = -float(self.max_piE)
+            upper[3:5] = float(self.max_piE)
+        result = least_squares(
+            lambda p: model_and_residual(p)[0],
+            p0_np,
+            jac="2-point",
+            method="trf",
+            bounds=(lower, upper),
+            max_nfev=int(self.maxiter),
+            xtol=float(self.tol),
+            ftol=float(self.tol),
+            gtol=float(self.tol),
+        )
+        p = np.asarray(result.x, dtype=float)
+        residual_norm, A, fs, fb = model_and_residual(p)
+        residual = flux_np - (fs * A + fb)
+        chi2 = float(np.sum(residual_norm * residual_norm))
+        fit = SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=jnp.asarray(p),
             param_names=("t0", "tE", "u0", "piEN", "piEE"),
-            maxiter=self.maxiter,
-            damping_parameter=self.damping_parameter,
-            tol=self.tol,
-            min_points=6,
+            chi2=jnp.asarray(chi2),
+            chi2_dof=jnp.asarray(chi2 / max(time_np.size - 5, 1)),
+            fs=jnp.asarray(fs),
+            fb=jnp.asarray(fb),
+            model_flux=jnp.asarray(fs * A + fb),
+            residual=jnp.asarray(residual),
             parallax_projector=P,
+            optimizer_success=bool(result.success),
+            optimizer_status=str(result.message),
         )
         self._last_fit = fit
         return fit
@@ -1028,6 +1266,8 @@ class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
             residual=jnp.asarray(residual),
             raw_params=jnp.asarray(q),
             parallax_projector=self._P,
+            optimizer_success=bool(result.success),
+            optimizer_status=str(result.message),
         )
         self._last_fit = fit
         return fit
@@ -1041,7 +1281,7 @@ class VBMFiniteDiffGullsFSPLSpaceParallaxFitter:
 @dataclass
 class BICSingleLensFitter:
     """
-    Select PSPL, FSPL, or GULLS FSPL space-parallax by BIC.
+    Select PSPL, FSPL, or native FSPL space-parallax by BIC.
     """
 
     RA: float
@@ -1052,6 +1292,10 @@ class BICSingleLensFitter:
     piE_prior_weight: float = 0.0
     piE_prior_eps: float = 1.0e-3
     include_space_parallax: bool = False
+    observer_convention: str = "earth_geocentric_offset"
+    time_scale: str = "jd"
+    time_offset: float = 0.0
+    ephemeris_extrapolation: str = "reject"
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
@@ -1109,17 +1353,43 @@ class BICSingleLensFitter:
                 ("fspl_vbm_fd", VBMFiniteDiffFSPLFitter(), q_fspl),
             ]
         if bool(self.include_space_parallax) and q0_size != 4:
+            time_spec = TimeSpec(scale=self.time_scale, offset=float(self.time_offset))
+            earth = default_earth_ephemeris(time_spec=time_spec)
+            satellite = load_vbm_satellite_ephemeris(
+                self.satellite_ephemeris_path,
+                time_spec=time_spec,
+                extrapolation=self.ephemeris_extrapolation,
+            )
+            observer = satellite
+            reference = None
+            if self.observer_convention != "earth_geocentric_offset":
+                earth_r = np.column_stack(
+                    [
+                        np.interp(satellite.time, earth.time, earth.position_au[:, axis])
+                        for axis in range(3)
+                    ]
+                )
+                observer = Ephemeris(
+                    satellite.time,
+                    earth_r + satellite.position_au,
+                    origin="explicit_reference",
+                    time_spec=time_spec,
+                    extrapolation=self.ephemeris_extrapolation,
+                )
+                reference = earth
             candidates.append(
                 (
-                    "fspl_space_parallax_gulls_vbm_fd",
-                    VBMFiniteDiffGullsFSPLSpaceParallaxFitter(
-                        RA=float(self.RA),
-                        Dec=float(self.Dec),
-                        tref=float(self.tref),
-                        satellite_ephemeris_path=str(self.satellite_ephemeris_path),
+                    "fspl_space_parallax",
+                    NativeFSPLSpaceParallaxFitter(
+                        float(self.RA),
+                        float(self.Dec),
+                        float(self.tref),
+                        observer,
+                        convention=self.observer_convention,
+                        time_spec=time_spec,
+                        earth_ephemeris=earth,
+                        reference_ephemeris=reference,
                         max_piE=float(self.max_piE),
-                        piE_prior_weight=float(self.piE_prior_weight),
-                        piE_prior_eps=float(self.piE_prior_eps),
                     ),
                     q_space,
                 )
@@ -1249,6 +1519,108 @@ class BICSingleLensFitter:
             "errors": errors,
         }
         fit = self._annotate_fit(fit, model_kind=model_kind, bic=bic, model_selection=selection)
+        self._last_fit = fit
+        return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class VBMFiniteDiffGullsPSPLSpaceParallaxFitter:
+    """Bounded GULLS-convention PSPL space-parallax fitter.
+
+    This is the point-source counterpart of the VBM finite-difference FSPL
+    fitter.  It shares the GULLS observer-frame trajectory but avoids the
+    unconstrained JAX LM path, which can otherwise run to a high-parallax
+    degenerate basin on contaminated light curves.
+    """
+
+    RA: float
+    Dec: float
+    tref: float
+    satellite_ephemeris_path: str
+    maxiter: int = 500
+    tol: float = 1.0e-6
+    max_piE: float = 1.0
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._P = make_space_parallax_projector(
+            self.RA, self.Dec, self.tref, self.satellite_ephemeris_path,
+            use_HJD=False, convention="gulls",
+        )
+        self._last_fit: Optional[SingleLensFitResult] = None
+
+    def _gulls_u_numpy(self, time: np.ndarray, p: np.ndarray) -> np.ndarray:
+        t0, tE, u0, piEN, piEE = p
+        P = self._P
+        t = np.asarray(time, dtype=float) + float(np.asarray(P.time_add))
+        t_grid = np.asarray(P.t, dtype=float)
+        r_grid = np.asarray(P.r, dtype=float)
+        r_t = np.column_stack([np.interp(t, t_grid, r_grid[:, j]) for j in range(3)])
+        north = np.asarray(P.sky_north, dtype=float)
+        east = np.asarray(P.sky_east, dtype=float)
+        ne_t = np.column_stack([r_t @ north, r_t @ east])
+        d_ne = (
+            ne_t
+            - np.asarray(P.NE_ref, dtype=float)[None, :]
+            - (t - float(np.asarray(P.tref)))[:, None] * np.asarray(P.NE_vref, dtype=float)[None, :]
+        )
+        d_n, d_e = d_ne[:, 0], d_ne[:, 1]
+        tau = (time - t0) / max(abs(float(tE)), 1.0e-12) - piEN * d_n - piEE * d_e
+        beta = u0 + piEE * d_n - piEN * d_e
+        return np.sqrt(tau * tau + beta * beta)
+
+    def fit(self, time: jnp.ndarray, flux: jnp.ndarray, ferr: jnp.ndarray, p0: jnp.ndarray) -> SingleLensFitResult:
+        if least_squares is None:
+            raise RuntimeError("VBMFiniteDiffGullsPSPLSpaceParallaxFitter requires scipy.")
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+
+        def model_and_residual(p):
+            u = self._gulls_u_numpy(time_np, p)
+            A = np.asarray(A_pspl_from_u(jnp.asarray(u)), dtype=float)
+            fs, fb = _solve_fs_fb_numpy(A, flux_np, ferr_np)
+            residual = flux_np - (fs * A + fb)
+            return residual / ferr_np, A, fs, fb
+
+        lower = np.full(5, -np.inf, dtype=float)
+        upper = np.full(5, np.inf, dtype=float)
+        lower[1] = 1.0e-6
+        if np.isfinite(float(self.max_piE)) and float(self.max_piE) > 0.0:
+            lower[3:5] = -float(self.max_piE)
+            upper[3:5] = float(self.max_piE)
+        result = least_squares(
+            lambda p: model_and_residual(p)[0], np.asarray(p0, dtype=float),
+            jac="2-point", method="trf", bounds=(lower, upper),
+            max_nfev=int(self.maxiter), xtol=float(self.tol),
+            ftol=float(self.tol), gtol=float(self.tol),
+        )
+        p = np.asarray(result.x, dtype=float)
+        residual_norm, A, fs, fb = model_and_residual(p)
+        residual = flux_np - (fs * A + fb)
+        chi2 = float(np.sum(residual_norm * residual_norm))
+        fit = SingleLensFitResult(
+            time=time_np, flux=flux_np, ferr=ferr_np,
+            params=jnp.asarray(p),
+            param_names=("t0", "tE", "u0", "piEN", "piEE"),
+            chi2=jnp.asarray(chi2),
+            chi2_dof=jnp.asarray(chi2 / max(time_np.size - 5, 1)),
+            fs=jnp.asarray(fs), fb=jnp.asarray(fb),
+            model_flux=jnp.asarray(fs * A + fb), residual=jnp.asarray(residual),
+            parallax_projector=self._P,
+            optimizer_success=bool(result.success),
+            optimizer_status=str(result.message),
+        )
         self._last_fit = fit
         return fit
 

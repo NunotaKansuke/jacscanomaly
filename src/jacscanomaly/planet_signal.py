@@ -369,7 +369,7 @@ class PlanetSignalResult:
             "pspl": "refined PSPL",
             "fspl": "refined FSPL",
             "fspl_vbm_fd": "refined FSPL",
-            "fspl_space_parallax_gulls_vbm_fd": "refined FSPL+parallax",
+            "fspl_space_parallax": "refined FSPL+parallax",
         }.get(model_kind, "refined single-lens")
         ax_peak.plot(t_peak_model, f_peak_model, c="k", lw=2.0, label=model_label, zorder=1)
         ax_peak.set_xlim(peak_xlim)
@@ -1032,6 +1032,7 @@ class PlanetSignalExtractor:
         refit: bool = True,
         verbose: bool = False,
         prior_signal_windows: tuple[tuple[float, float], ...] = (),
+        initial_fit: Optional[SingleLensFitResult] = None,
     ) -> PlanetSignalResult:
         """
         Separate localized residual signal while refining a baseline fit.
@@ -1075,10 +1076,11 @@ class PlanetSignalExtractor:
         )
         self.finder._ensure_fitter(float(np.median(time_np)))
 
-        if refit:
-            initial_fit = self.finder.fit_single_lens(time_np, flux_np, ferr_np, x0)
-        else:
-            initial_fit = self.finder._fixed_single_lens_from_x0(time_j, flux_j, ferr_j, x0_j)
+        if initial_fit is None:
+            if refit:
+                initial_fit = self.finder.fit_single_lens(time_np, flux_np, ferr_np, x0)
+            else:
+                initial_fit = self.finder._fixed_single_lens_from_x0(time_j, flux_j, ferr_j, x0_j)
 
         mode = str(self.config.baseline_mode).lower()
         if mode == "mask":

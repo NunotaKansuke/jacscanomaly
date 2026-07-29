@@ -51,11 +51,10 @@ Single-lens fitting
    jacscanomaly.PSPLFitter
    jacscanomaly.CPPPSPLFitter
    jacscanomaly.FSPLFitter
-   jacscanomaly.PSPLParallaxFitter
-   jacscanomaly.FSPLParallaxFitter
-   jacscanomaly.PSPLSpaceParallaxFitter
-   jacscanomaly.FSPLSpaceParallaxFitter
-   jacscanomaly.VBMFiniteDiffGullsFSPLSpaceParallaxFitter
+   jacscanomaly.NativePSPLAnnualParallaxFitter
+   jacscanomaly.NativeFSPLAnnualParallaxFitter
+   jacscanomaly.NativePSPLSpaceParallaxFitter
+   jacscanomaly.NativeFSPLSpaceParallaxFitter
    jacscanomaly.BICSingleLensFitter
    jacscanomaly.CVFitter
    jacscanomaly.SingleLensFitResult

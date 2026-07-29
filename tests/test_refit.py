@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from jacscanomaly import CandidateCriteria, Finder, FinderConfig
+from jacscanomaly import CandidateCriteria, CPPVBMFSPLFitter, Finder, FinderConfig
 from jacscanomaly.singlelens_model import A_pspl_func
 
 
@@ -39,3 +40,30 @@ def test_run_refit_false_requires_x0():
         assert "requires x0" in str(exc)
     else:
         raise AssertionError("Expected ValueError.")
+
+
+def test_native_cpp_fspl_fitter_converges_without_parallax_coordinates():
+    vbm_module = pytest.importorskip("VBMicrolensing")
+    try:
+        fitter = CPPVBMFSPLFitter()
+    except ImportError:
+        pytest.skip("Native VBM extension is not available.")
+
+    time = np.linspace(90.0, 110.0, 300)
+    truth = np.asarray([np.log(0.15), np.log(4.0), 100.0, np.log(0.08)])
+    vbm = vbm_module.VBMicrolensing()
+    magnification = np.asarray(vbm.ESPLLightCurve(truth, time.tolist())[0])
+    flux = 1.7 * magnification + 0.2
+    ferr = np.full_like(time, 0.01)
+
+    fit = fitter.fit(
+        time,
+        flux,
+        ferr,
+        np.asarray([100.2, 3.5, 0.18, np.log(0.1)]),
+    )
+
+    assert fit.optimizer_success
+    assert fit.optimizer_status.startswith("native_vbm_lm")
+    np.testing.assert_allclose(np.abs(np.asarray(fit.params)[2]), 0.15, atol=1.0e-4)
+    np.testing.assert_allclose(np.asarray(fit.params)[3], 0.08, atol=1.0e-4)

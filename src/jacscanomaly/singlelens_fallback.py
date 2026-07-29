@@ -1,0 +1,897 @@
+"""Detector-seeded, contamination-aware single-lens fallback fitting."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Iterable, Optional, Sequence
+
+import numpy as np
+
+from .contamination import (
+    ContaminationConfig,
+    RobustFitResult,
+    protected_support_mask,
+    robust_refine_with_fitter,
+    scaled_parameter_distance,
+)
+from .effect_detection import EffectCandidate
+
+
+@dataclass(frozen=True)
+class FallbackConfig:
+    """Controls structured multistart and robust fallback effort."""
+
+    tE_factors: tuple[float, ...] = (0.75, 1.0, 1.5)
+    u0_sign_flip: bool = True
+    parallax_radii: tuple[float, ...] = (0.0, 0.05, 0.2, 0.5)
+    parallax_angle_steps: int = 8
+    max_seeds: int = 24
+    contamination: ContaminationConfig = ContaminationConfig()
+    max_point_parameter_change: float = 10.0
+    max_basin_distance: float = 0.5
+    parameter_dimension: Optional[int] = None
+    default_logrho: float = -3.0
+    u0_factors: tuple[float, ...] = (0.7, 1.0, 1.4)
+    rho_over_u0: tuple[float, ...] = (0.35, 0.75, 1.5, 3.0)
+    t_star_factors: tuple[float, ...] = (0.6, 1.0, 1.6)
+    t0_offsets: tuple[float, ...] = (-0.25, 0.0, 0.25)
+    max_piE: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class FallbackAttempt:
+    """One detector seed and its robust fit result."""
+
+    seed: np.ndarray
+    result: RobustFitResult
+    objective: float
+    stable: bool
+    original_chi2: float = float("inf")
+    robust_objective: float = float("inf")
+    contamination_penalty: float = float("inf")
+    parameter_distance: float = float("inf")
+    optimizer_success: bool = False
+    parameter_at_bound: bool = False
+    segmentation_stable: bool = False
+
+
+@dataclass(frozen=True)
+class FallbackResult:
+    """Best robust fallback and all attempted seeds."""
+
+    fit: object
+    initial_fit: object
+    effect: str
+    attempts: tuple[FallbackAttempt, ...]
+    selected_seed: np.ndarray
+    success: bool
+    reason_codes: tuple[str, ...]
+    baseline_original_chi2: float = float("inf")
+    selected_original_chi2: float = float("inf")
+    selected_robust_objective: float = float("inf")
+    baseline_effect_score: Optional[float] = None
+    selected_effect_score: Optional[float] = None
+    model_spec: Optional[dict[str, object]] = None
+    stage_results: tuple["FallbackResult", ...] = ()
+
+
+@dataclass(frozen=True)
+class EffectFitterSpec:
+    """Effect-specific fitter and its raw parameter contract."""
+
+    effect: str
+    fitter: object
+    parameter_dimension: int
+    parameter_names: tuple[str, ...]
+    raw_parameter_names: tuple[str, ...]
+    backend: str
+    convention: str
+
+
+def _require_parallax_config(config, effect: str, tref: float) -> tuple[float, float, float]:
+    if config.ra_deg is None or config.dec_deg is None:
+        raise ValueError(f"{effect} fallback requires ra_deg and dec_deg.")
+    resolved_tref = float(config.tref if config.tref is not None else tref)
+    return float(config.ra_deg), float(config.dec_deg), resolved_tref
+
+
+def make_effect_fitter(config, effect: str, tref: float) -> EffectFitterSpec:
+    """Construct the fallback model specified by an effect candidate.
+
+    This is intentionally separate from the baseline fitter stored on
+    ``Finder``.  It validates sky/ephemeris metadata and exposes the parameter
+    dimension before any fit call is attempted.
+    """
+    from .singlelens_fit import CPPVBMFSPLFitter, FSPLFitter
+    from .parallax_backend import (
+        Ephemeris,
+        NativeFSPLAnnualParallaxFitter,
+        NativeFSPLSpaceParallaxFitter,
+        NativePSPLAnnualParallaxFitter,
+        NativePSPLSpaceParallaxFitter,
+        TimeSpec,
+        default_earth_ephemeris,
+        load_vbm_satellite_ephemeris,
+    )
+
+    effect = str(effect)
+    if effect == "mixed":
+        raise ValueError("mixed requires an explicit resolved effect before fitter construction.")
+    backend = str(getattr(config, "single_fit_backend", "jax"))
+    convention = str(getattr(config, "parallax_observer_convention", "earth_geocentric_offset"))
+    if convention not in {
+        "earth_geocentric_offset",
+        "heliocentric_observer",
+        "gulls",
+    }:
+        raise ValueError(f"Unsupported parallax_observer_convention={convention!r}.")
+    time_spec = TimeSpec(
+        scale=str(getattr(config, "parallax_time_scale", "jd")),
+        offset=float(getattr(config, "parallax_time_offset", 0.0)),
+    )
+    extrapolation = str(getattr(config, "parallax_extrapolation", "reject"))
+    earth = getattr(config, "parallax_earth_ephemeris", None)
+    if earth is None:
+        earth = default_earth_ephemeris(time_spec=time_spec)
+    if getattr(earth, "extrapolation", extrapolation) != extrapolation:
+        earth = replace(earth, extrapolation=extrapolation)
+
+    def native_space_inputs():
+        path = getattr(config, "satellite_ephemeris_path", None)
+        if path is None:
+            raise ValueError("space parallax fallback requires satellite_ephemeris_path.")
+        satellite = load_vbm_satellite_ephemeris(
+            path,
+            time_spec=time_spec,
+            extrapolation=extrapolation,
+        )
+        if convention == "earth_geocentric_offset":
+            return earth, satellite, None
+        observer = getattr(config, "parallax_observer_ephemeris", None)
+        reference = getattr(config, "parallax_reference_ephemeris", None)
+        if observer is None:
+            # RTModel/GULLS satellite tables are Earth-relative perturbations.
+            # Build a complete observer orbit explicitly at the table times.
+            earth_r = np.column_stack([np.interp(satellite.time, earth.time, earth.position_au[:, j]) for j in range(3)])
+            observer = Ephemeris(satellite.time, earth_r + satellite.position_au, origin="explicit_reference", time_spec=time_spec)
+        if reference is None:
+            reference = earth
+        return earth, observer, reference
+
+    if effect == "fspl":
+        # The detector/exact-probe may profile only the peak, but the fallback
+        # must refit the full light curve so the local profile window cannot
+        # freeze the optimizer into a false convergence.
+        if backend in {"cpp", "vbm_cpp"}:
+            try:
+                fitter = CPPVBMFSPLFitter()
+                resolved_backend = "native_vbm"
+            except ImportError:
+                fitter = FSPLFitter(profile_peak_only=False)
+                resolved_backend = "jax"
+        else:
+            fitter = FSPLFitter(profile_peak_only=False)
+            resolved_backend = "jax"
+        return EffectFitterSpec(effect, fitter, 4, ("t0", "tE", "u0", "rho"), ("t0", "tE", "u0", "logrho"), resolved_backend, convention)
+
+    if effect == "annual_parallax":
+        ra, dec, resolved_tref = _require_parallax_config(config, effect, tref)
+        fitter = NativePSPLAnnualParallaxFitter(
+            ra, dec, resolved_tref, time_spec=time_spec, earth_ephemeris=earth,
+            maxiter=int(getattr(config, "vbm_cpp_maxiter", 300)), max_piE=float(config.max_piE),
+        )
+        return EffectFitterSpec(effect, fitter, 5, ("t0", "tE", "u0", "piEN", "piEE"), ("t0", "log_tE", "u0", "piEN", "piEE"), "native_cpp_scipy_trf", convention)
+
+    if effect == "space_parallax":
+        ra, dec, resolved_tref = _require_parallax_config(config, effect, tref)
+        earth_input, observer_input, reference_input = native_space_inputs()
+        fitter = NativePSPLSpaceParallaxFitter(
+            ra, dec, resolved_tref, observer_input, convention=convention,
+            time_spec=time_spec, earth_ephemeris=earth_input, reference_ephemeris=reference_input,
+            maxiter=int(getattr(config, "vbm_cpp_maxiter", 300)), max_piE=float(config.max_piE),
+        )
+        return EffectFitterSpec(effect, fitter, 5, ("t0", "tE", "u0", "piEN", "piEE"), ("t0", "log_tE", "u0", "piEN", "piEE"), "native_cpp_scipy_trf", convention)
+
+    if effect == "fspl_parallax":
+        ra, dec, resolved_tref = _require_parallax_config(config, effect, tref)
+        fitter = NativeFSPLAnnualParallaxFitter(
+            ra, dec, resolved_tref, time_spec=time_spec, earth_ephemeris=earth,
+            maxiter=int(getattr(config, "vbm_cpp_maxiter", 300)), max_piE=float(config.max_piE),
+        )
+        return EffectFitterSpec(effect, fitter, 6, ("t0", "tE", "u0", "rho", "piEN", "piEE"), ("t0", "log_tE", "u0", "log_rho", "piEN", "piEE"), "native_cpp_scipy_trf", convention)
+
+    if effect == "fspl_space_parallax":
+        ra, dec, resolved_tref = _require_parallax_config(config, effect, tref)
+        earth_input, observer_input, reference_input = native_space_inputs()
+        fitter = NativeFSPLSpaceParallaxFitter(
+            ra, dec, resolved_tref, observer_input, convention=convention,
+            time_spec=time_spec, earth_ephemeris=earth_input, reference_ephemeris=reference_input,
+            maxiter=int(getattr(config, "vbm_cpp_maxiter", 300)), max_piE=float(config.max_piE),
+        )
+        return EffectFitterSpec(effect, fitter, 6, ("t0", "tE", "u0", "rho", "piEN", "piEE"), ("t0", "log_tE", "u0", "log_rho", "piEN", "piEE"), "native_cpp_scipy_trf", convention)
+    raise ValueError(f"Unknown fallback effect '{effect}'.")
+
+
+def _normalise_seed(seed: Sequence[float]) -> np.ndarray:
+    value = np.asarray(seed, dtype=float).reshape(-1).copy()
+    if value.size < 3:
+        raise ValueError("A fallback seed must contain at least (t0, tE, u0).")
+    if value[1] <= 0.0 or not np.all(np.isfinite(value)):
+        raise ValueError("Fallback seeds must be finite and have positive tE.")
+    return value
+
+
+def _coerce_seed_dimension(seed: Sequence[float], dimension: Optional[int], default_logrho: float) -> np.ndarray:
+    """Convert a physical/raw seed to exactly one fitter parameter dimension."""
+    value = _normalise_seed(seed)
+    if dimension is None or value.size == int(dimension):
+        return value
+    dimension = int(dimension)
+    if value.size == 3 and dimension == 4:
+        return np.r_[value, float(default_logrho)]
+    if value.size == 3 and dimension == 5:
+        return np.r_[value, 0.0, 0.0]
+    if value.size == 3 and dimension == 6:
+        return np.r_[value, float(default_logrho), 0.0, 0.0]
+    if value.size == 4 and dimension == 5:
+        return np.r_[value[:3], 0.0, 0.0]
+    if value.size == 4 and dimension == 6:
+        return np.r_[value, 0.0, 0.0]
+    if value.size == 5 and dimension == 6:
+        return np.r_[value[:3], float(default_logrho), value[3:]]
+    raise ValueError(
+        f"Cannot coerce seed with dimension {value.size} to required fitter dimension {dimension}."
+    )
+
+
+def detector_seed_parameters(
+    base_seed: Sequence[float],
+    candidates: Iterable[EffectCandidate] = (),
+    *,
+    config: FallbackConfig = FallbackConfig(),
+) -> tuple[np.ndarray, ...]:
+    """Expand detector outputs into a bounded structured multistart set."""
+    base = _coerce_seed_dimension(base_seed, config.parameter_dimension, config.default_logrho)
+    dimension = config.parameter_dimension or base.size
+    seeds: list[np.ndarray] = [base]
+    fspl_anchors: list[np.ndarray] = []
+    parallax_anchors: list[np.ndarray] = []
+    detector_anchors: list[np.ndarray] = []
+    for effect in candidates:
+        if effect.seed_parameters is None:
+            continue
+        detector_seed = np.asarray(effect.seed_parameters, dtype=float).reshape(-1)
+        if detector_seed.size < 3 or not np.all(np.isfinite(detector_seed[:3])):
+            raise ValueError("Detector seed must contain finite (t0, tE, u0).")
+        if "parallax" in effect.effect and detector_seed.size == 3:
+            direction = np.asarray(effect.best_template_or_direction, dtype=float).reshape(-1)
+            if direction.size < 2 or not np.all(np.isfinite(direction[:2])):
+                direction = np.zeros(2, dtype=float)
+            norm = max(float(np.linalg.norm(direction[:2])), 1.0e-30)
+            direction = direction[:2] / norm
+            angles = np.linspace(0.0, 2.0 * np.pi, max(1, int(config.parallax_angle_steps)), endpoint=False)
+            for radius in config.parallax_radii:
+                for angle in angles:
+                    rotated = np.asarray(
+                        [
+                            direction[0] * np.cos(angle) - direction[1] * np.sin(angle),
+                            direction[0] * np.sin(angle) + direction[1] * np.cos(angle),
+                        ],
+                        dtype=float,
+                    )
+                    parallax_seed = _coerce_seed_dimension(
+                        np.r_[detector_seed[:3], float(radius) * rotated],
+                        config.parameter_dimension,
+                        config.default_logrho,
+                    )
+                    seeds.append(parallax_seed)
+                    detector_anchors.append(parallax_seed)
+                    if dimension == 6:
+                        parallax_anchors.append(parallax_seed)
+        else:
+            physical_seed = _coerce_seed_dimension(
+                detector_seed,
+                config.parameter_dimension,
+                config.default_logrho,
+            )
+            seeds.append(physical_seed)
+            detector_anchors.append(physical_seed)
+            if dimension == 6 and effect.effect == "fspl":
+                fspl_anchors.append(physical_seed)
+            if effect.effect == "fspl" and dimension in (4, 6):
+                # Independent starts near the exact-probe basin must appear
+                # before the broad PSPL atlas; otherwise a small seed budget
+                # contains one good FSPL seed and cannot reproduce its basin.
+                local_variants: list[np.ndarray] = []
+                for factor in sorted(
+                    config.tE_factors,
+                    key=lambda value: abs(np.log(max(float(value), 1.0e-12))),
+                ):
+                    if np.isclose(float(factor), 1.0):
+                        continue
+                    variant = physical_seed.copy()
+                    variant[1] *= float(factor)
+                    local_variants.append(variant)
+                    break
+                for factor in sorted(
+                    config.u0_factors,
+                    key=lambda value: abs(np.log(max(float(value), 1.0e-12))),
+                ):
+                    if np.isclose(float(factor), 1.0):
+                        continue
+                    variant = physical_seed.copy()
+                    variant[2] *= float(factor)
+                    local_variants.append(variant)
+                    break
+                for delta_logrho in (-0.25, 0.25):
+                    variant = physical_seed.copy()
+                    variant[3] += delta_logrho
+                    local_variants.append(variant)
+                seeds.extend(local_variants)
+
+    if dimension == 6 and fspl_anchors and parallax_anchors:
+        combined = [
+            np.r_[fspl[:3], fspl[3], parallax[4:6]]
+            for fspl in fspl_anchors
+            for parallax in parallax_anchors
+            if np.linalg.norm(parallax[4:6]) > 0.0
+        ]
+        # Joint seeds must survive a small seed budget; place them immediately
+        # after the null baseline and before the single-effect atlas.
+        seeds[1:1] = combined
+
+    # Baseline perturbations are appended after detector-derived seeds so the
+    # seed budget cannot discard the physical detector's best basin.
+    for factor in config.tE_factors:
+        for u0_factor in config.u0_factors:
+            candidate = base.copy()
+            candidate[1] *= float(factor)
+            candidate[2] *= float(u0_factor)
+            seeds.append(candidate)
+            if config.u0_sign_flip:
+                flipped = candidate.copy()
+                flipped[2] *= -1.0
+                seeds.append(flipped)
+            if dimension in (4, 6):
+                tstar0 = max(abs(base[1]) * np.exp(base[3]), 1.0e-8)
+                for tstar_factor in config.t_star_factors:
+                    for ratio in config.rho_over_u0:
+                        fspl_seed = candidate.copy()
+                        rho_ratio = max(float(ratio) * abs(fspl_seed[2]), 1.0e-6)
+                        rho_tstar = max(
+                            float(tstar_factor) * tstar0 / max(abs(fspl_seed[1]), 1.0e-8),
+                            1.0e-6,
+                        )
+                        fspl_seed[3] = np.log(np.sqrt(rho_ratio * rho_tstar))
+                        for offset in config.t0_offsets:
+                            shifted = fspl_seed.copy()
+                            shifted[0] += float(offset) * max(abs(float(candidate[1] * candidate[2])), 1.0e-6)
+                            seeds.append(shifted)
+
+    # Re-centre the same degeneracy families on each physical detector seed.
+    # This is important for FSPL: perturbing only the PSPL baseline can spend
+    # the entire seed budget in the wrong rho basin, leaving the detector's
+    # good 4-D seed without an independent basin check.
+    for anchor in tuple(detector_anchors):
+        for factor in config.tE_factors:
+            for u0_factor in config.u0_factors:
+                candidate = anchor.copy()
+                candidate[1] *= float(factor)
+                candidate[2] *= float(u0_factor)
+                seeds.append(candidate)
+                if config.u0_sign_flip:
+                    flipped = candidate.copy()
+                    flipped[2] *= -1.0
+                    seeds.append(flipped)
+                if dimension in (4, 6):
+                    tstar0 = max(abs(anchor[1]) * np.exp(anchor[3]), 1.0e-8)
+                    for tstar_factor in config.t_star_factors:
+                        for ratio in config.rho_over_u0:
+                            fspl_seed = candidate.copy()
+                            rho_ratio = max(
+                                float(ratio) * abs(fspl_seed[2]),
+                                1.0e-6,
+                            )
+                            rho_tstar = max(
+                                float(tstar_factor) * tstar0
+                                / max(abs(fspl_seed[1]), 1.0e-8),
+                                1.0e-6,
+                            )
+                            fspl_seed[3] = np.log(
+                                np.sqrt(rho_ratio * rho_tstar)
+                            )
+                            for offset in config.t0_offsets:
+                                shifted = fspl_seed.copy()
+                                shifted[0] += float(offset) * max(
+                                    abs(float(candidate[1] * candidate[2])), 1.0e-6
+                                )
+                                seeds.append(shifted)
+
+    unique: list[np.ndarray] = []
+    for seed in seeds:
+        value = _coerce_seed_dimension(seed, config.parameter_dimension, config.default_logrho)
+        if not any(value.shape == other.shape and np.allclose(value, other, rtol=0.0, atol=1.0e-12) for other in unique):
+            unique.append(value)
+        if len(unique) >= max(1, int(config.max_seeds)):
+            break
+    return tuple(unique)
+
+
+def _parameter_at_bound(parameters: np.ndarray, config: FallbackConfig) -> bool:
+    """Detect a solution that is only held in place by a configured bound."""
+    value = np.asarray(parameters, dtype=float).reshape(-1)
+    if not np.all(np.isfinite(value)):
+        return True
+    if config.max_piE is not None and value.size >= 5:
+        max_pi_e = abs(float(config.max_piE))
+        if max_pi_e > 0.0 and np.any(np.abs(value[-2:]) >= max_pi_e * (1.0 - 1.0e-3)):
+            return True
+    if value.size in (4, 6) and (value[3] <= -40.0 or value[3] >= 10.0):
+        return True
+    return False
+
+
+def _fit_raw_parameters(fit: object) -> np.ndarray:
+    # Keep the fallback seed contract physical (tE and rho), even when the
+    # optimizer stores log_tE/log_rho internally.  The native evaluator makes
+    # that conversion exactly once at its optimizer boundary.
+    value = np.asarray(getattr(fit, "params"), dtype=float).reshape(-1).copy()
+    names = tuple(getattr(fit, "param_names", ()))
+    if value.size in (4, 6) and "rho" in names:
+        value[3] = np.log(max(abs(float(value[3])), 1e-12))
+    return value
+
+
+def _stage_basin_parameters(
+    result: FallbackResult,
+    *,
+    dimension: int,
+    limit: int = 3,
+) -> tuple[np.ndarray, ...]:
+    """Collect distinct fitted basins from one single-effect stage."""
+    values = [_fit_raw_parameters(result.fit)]
+    values.extend(_fit_raw_parameters(attempt.result.fit) for attempt in result.attempts)
+    unique: list[np.ndarray] = []
+    for value in values:
+        value = np.asarray(value, dtype=float).reshape(-1)
+        if value.size != dimension or not np.all(np.isfinite(value)):
+            continue
+        if not any(np.allclose(value, other, rtol=0.0, atol=1.0e-10) for other in unique):
+            unique.append(value)
+        if len(unique) >= max(1, int(limit)):
+            break
+    return tuple(unique)
+
+
+def _compose_joint_stage_seeds(
+    fspl_seeds: Sequence[np.ndarray],
+    parallax_seeds: Sequence[np.ndarray],
+) -> tuple[np.ndarray, ...]:
+    """Compose FSPL rho and parallax vectors into genuine 6-D joint seeds."""
+    composed: list[np.ndarray] = []
+    for fspl_seed in fspl_seeds:
+        fspl = np.asarray(fspl_seed, dtype=float).reshape(-1)
+        if fspl.size != 4:
+            continue
+        for parallax_seed in parallax_seeds:
+            parallax = np.asarray(parallax_seed, dtype=float).reshape(-1)
+            if parallax.size != 5:
+                continue
+            shared_candidates = (
+                fspl[:3],
+                parallax[:3],
+                np.asarray(
+                    [
+                        0.5 * (fspl[0] + parallax[0]),
+                        np.sqrt(max(fspl[1], 1.0e-12) * max(parallax[1], 1.0e-12)),
+                        0.5 * (fspl[2] + parallax[2]),
+                    ],
+                    dtype=float,
+                ),
+            )
+            for shared in shared_candidates:
+                value = np.r_[shared, fspl[3], parallax[3:5]]
+                if not any(
+                    np.allclose(value, other, rtol=0.0, atol=1.0e-10)
+                    for other in composed
+                ):
+                    composed.append(value)
+    return tuple(composed)
+
+
+def run_robust_fallback(
+    fitter,
+    time,
+    flux,
+    ferr,
+    base_seed: Sequence[float],
+    *,
+    candidates: Iterable[EffectCandidate] = (),
+    extra_seeds: Iterable[Sequence[float]] = (),
+    effect: str = "mixed",
+    config: FallbackConfig = FallbackConfig(),
+    protected_mask: Optional[np.ndarray] = None,
+    protected_masks: Optional[Sequence[np.ndarray]] = None,
+    known_anomaly_mask: Optional[np.ndarray] = None,
+    baseline_fit: Optional[object] = None,
+    effect_score_fn=None,
+    model_spec: Optional[EffectFitterSpec] = None,
+) -> FallbackResult:
+    """Run robust alternating fits from detector and degeneracy seeds."""
+    candidate_tuple = tuple(candidates)
+    generated_seeds = detector_seed_parameters(base_seed, candidate_tuple, config=config)
+    seeds: list[np.ndarray] = []
+    for seed in tuple(extra_seeds) + generated_seeds:
+        value = _coerce_seed_dimension(seed, config.parameter_dimension, config.default_logrho)
+        if not any(np.allclose(value, other, rtol=0.0, atol=1.0e-12) for other in seeds):
+            seeds.append(value)
+        if len(seeds) >= max(1, int(config.max_seeds)):
+            break
+    t = np.asarray(time, dtype=float)
+    f = np.asarray(flux, dtype=float)
+    fe = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+    attempts: list[FallbackAttempt] = []
+    errors: list[str] = []
+    initial_standardized_residual = None
+    if baseline_fit is not None and hasattr(baseline_fit, "residual"):
+        baseline_residual = np.asarray(baseline_fit.residual, dtype=float).reshape(-1)
+        if baseline_residual.size == t.size and np.all(np.isfinite(baseline_residual)):
+            initial_standardized_residual = baseline_residual / fe
+    compact_masks = [
+        np.asarray(candidate.compact_block_mask, dtype=bool)
+        for candidate in candidate_tuple
+        if "parallax" in candidate.effect
+        and candidate.compact_block_mask is not None
+        and np.asarray(candidate.compact_block_mask).size == t.size
+    ]
+    initial_anomaly_mask = (
+        np.logical_or.reduce(compact_masks) if compact_masks else None
+    )
+    if known_anomaly_mask is not None:
+        known = np.asarray(known_anomaly_mask, dtype=bool).reshape(-1)
+        if known.size != t.size:
+            raise ValueError("known_anomaly_mask must match the light curve.")
+        initial_anomaly_mask = (
+            known.copy()
+            if initial_anomaly_mask is None
+            else np.asarray(initial_anomaly_mask, dtype=bool) | known
+        )
+    if "parallax" not in effect:
+        # A compact FSPL peak is itself the physical signal; do not pre-mask it.
+        initial_standardized_residual = None
+    for seed in seeds:
+        if protected_mask is None and protected_masks is None:
+            masks = tuple(
+                protected_support_mask(t, candidate.effect, candidate.seed_parameters)
+                for candidate in candidate_tuple
+                if candidate.seed_parameters is not None
+                and (
+                    candidate.effect == effect
+                    or candidate.effect in effect
+                    or effect == "mixed"
+                )
+            )
+        else:
+            masks = protected_masks
+            if protected_mask is not None:
+                masks = (np.asarray(protected_mask, dtype=bool),)
+        try:
+            result = robust_refine_with_fitter(
+                fitter,
+                t,
+                f,
+                fe,
+                seed,
+                config=config.contamination,
+                protected_masks=masks,
+                initial_standardized_residual=initial_standardized_residual,
+                initial_anomaly_mask=initial_anomaly_mask,
+                forced_anomaly_mask=known_anomaly_mask,
+            )
+            original_chi2 = float(np.asarray(result.fit.chi2))
+            robust_objective = float(result.segmentation.objective)
+            contamination_penalty = float(result.segmentation.contamination_penalty)
+            initial = np.asarray(seed, dtype=float)
+            final = _fit_raw_parameters(result.fit)
+            parameter_distance = scaled_parameter_distance(initial, final)
+            parameter_at_bound = _parameter_at_bound(final, config)
+            optimizer_success_value = getattr(result.fit, "optimizer_success", None)
+            optimizer_success = bool(
+                np.all(np.isfinite(final))
+                and optimizer_success_value is not None
+                and optimizer_success_value
+            )
+            stable = bool(
+                optimizer_success
+                and parameter_distance <= config.max_point_parameter_change
+            )
+            attempts.append(
+                FallbackAttempt(
+                    seed=seed.copy(),
+                    result=result,
+                    objective=robust_objective,
+                    stable=stable,
+                    original_chi2=original_chi2,
+                    robust_objective=robust_objective,
+                    contamination_penalty=contamination_penalty,
+                    parameter_distance=parameter_distance,
+                    optimizer_success=optimizer_success,
+                    parameter_at_bound=parameter_at_bound,
+                    segmentation_stable=bool(result.segmentation_stable),
+                )
+            )
+        except Exception as exc:  # keep another basin alive
+            errors.append(f"{type(exc).__name__}: {exc}")
+    if not attempts:
+        detail = errors[0] if errors else "no valid seeds"
+        raise RuntimeError(f"All robust fallback seeds failed: {detail}")
+    attempts.sort(key=lambda attempt: (not attempt.stable, attempt.robust_objective, attempt.original_chi2))
+    converged = [
+        attempt for attempt in attempts
+        if (
+            attempt.stable
+            and attempt.result.converged
+            and attempt.result.segmentation_stable
+            and not attempt.parameter_at_bound
+            and np.isfinite(attempt.robust_objective)
+        )
+    ]
+    ranked = converged if converged else attempts
+    ranked.sort(key=lambda attempt: (attempt.robust_objective, attempt.original_chi2))
+    best = ranked[0]
+    reasons = ["robust_fallback_completed"]
+    if not best.stable:
+        reasons.append("parameter_change_large")
+    if not best.result.converged:
+        reasons.append("alternating_not_converged")
+    if not best.optimizer_success:
+        reasons.append("optimizer_failed")
+    if len(converged) < 2:
+        reasons.append("single_seed_only")
+    if best.parameter_at_bound:
+        reasons.append("parameter_at_bound")
+    if not best.result.segmentation_stable:
+        reasons.append("contamination_sensitive")
+    minimum_retained = 1.0 - float(
+        config.contamination.max_protected_anomaly_fraction
+    )
+    component_identifiable = all(
+        retained >= minimum_retained
+        for retained in best.result.segmentation.protected_component_retained_fractions
+    )
+    support_identifiable = bool(component_identifiable)
+    if not support_identifiable:
+        reasons.append("insufficient_identifiability")
+    if best.result.segmentation.diagnostics:
+        reasons.extend(best.result.segmentation.diagnostics)
+    if baseline_fit is not None:
+        baseline_original_chi2 = float(np.asarray(getattr(baseline_fit, "chi2", np.inf)))
+    else:
+        baseline_original_chi2 = min(
+            float(attempt.result.initial_fit.chi2) for attempt in attempts
+            if np.isfinite(float(np.asarray(attempt.result.initial_fit.chi2)))
+        ) if any(np.isfinite(float(np.asarray(attempt.result.initial_fit.chi2))) for attempt in attempts) else float("inf")
+
+    baseline_score = None
+    selected_score = None
+    if effect_score_fn is not None:
+        try:
+            if baseline_fit is not None:
+                try:
+                    baseline_score = float(effect_score_fn(baseline_fit, effect))
+                except TypeError:
+                    baseline_score = float(effect_score_fn(baseline_fit))
+            else:
+                baseline_score = baseline_original_chi2
+            try:
+                selected_score = float(effect_score_fn(best.result.fit, effect))
+            except TypeError:
+                selected_score = float(effect_score_fn(best.result.fit))
+        except Exception as exc:
+            reasons.append(f"effect_score_evaluation_failed:{type(exc).__name__}")
+    else:
+        reasons.append("effect_score_not_checked")
+    score_reduced = bool(
+        baseline_score is not None and selected_score is not None
+        and np.isfinite(baseline_score) and np.isfinite(selected_score)
+        and selected_score < baseline_score
+    )
+
+    if baseline_score is not None and not score_reduced:
+        reasons.append("effect_score_not_reduced")
+        reasons.append("objective_not_improved")
+
+    independent = [attempt for attempt in converged if attempt is not best]
+    basin_reproduced = any(
+        scaled_parameter_distance(
+            _fit_raw_parameters(best.result.fit),
+            _fit_raw_parameters(attempt.result.fit),
+        )
+        <= config.max_basin_distance
+        for attempt in independent
+    )
+    if not basin_reproduced:
+        reasons.append("basin_not_reproduced")
+    success = bool(
+        best.stable
+        and best.result.converged
+        and best.optimizer_success
+        and len(converged) >= 2
+        and best.result.segmentation_stable
+        and not best.parameter_at_bound
+        and support_identifiable
+        and score_reduced
+        and basin_reproduced
+    )
+    if not success:
+        reasons.append("fallback_acceptance_failed")
+    return FallbackResult(
+        fit=best.result.fit,
+        initial_fit=best.result.initial_fit,
+        effect=str(effect),
+        attempts=tuple(attempts),
+        selected_seed=best.seed.copy(),
+        success=success,
+        reason_codes=tuple(dict.fromkeys(reasons)),
+        baseline_original_chi2=baseline_original_chi2,
+        selected_original_chi2=best.original_chi2,
+        selected_robust_objective=best.robust_objective,
+        baseline_effect_score=baseline_score,
+        selected_effect_score=selected_score,
+        model_spec=None if model_spec is None else {
+            "effect": model_spec.effect,
+            "parameter_dimension": model_spec.parameter_dimension,
+            "parameter_names": list(model_spec.parameter_names),
+            "raw_parameter_names": list(model_spec.raw_parameter_names),
+            "backend": model_spec.backend,
+            "convention": model_spec.convention,
+        },
+    )
+
+
+def run_staged_joint_fallback(
+    config,
+    time,
+    flux,
+    ferr,
+    base_seed: Sequence[float],
+    *,
+    candidates: Iterable[EffectCandidate] = (),
+    effect: str = "fspl_space_parallax",
+    fallback_config: FallbackConfig = FallbackConfig(),
+    protected_mask: Optional[np.ndarray] = None,
+    protected_masks: Optional[Sequence[np.ndarray]] = None,
+    known_anomaly_mask: Optional[np.ndarray] = None,
+    baseline_fit: Optional[object] = None,
+    effect_score_fn=None,
+) -> FallbackResult:
+    """Fit single effects first and use their basins in the joint fit."""
+    candidate_tuple = tuple(candidates)
+    stage_results: list[FallbackResult] = []
+    stage_seeds: dict[str, tuple[np.ndarray, ...]] = {}
+    stage_errors: list[str] = []
+    score_fn = effect_score_fn
+    for stage_effect in ("fspl", "annual_parallax", "space_parallax"):
+        if not any(candidate.effect == stage_effect for candidate in candidate_tuple):
+            continue
+        try:
+            stage_spec = make_effect_fitter(config, stage_effect, float(np.median(time)))
+            stage_cfg = replace(fallback_config, parameter_dimension=stage_spec.parameter_dimension)
+            stage_result = run_robust_fallback(
+                stage_spec.fitter, time, flux, ferr, base_seed,
+                candidates=tuple(candidate for candidate in candidate_tuple if candidate.effect == stage_effect),
+                effect=stage_effect, config=stage_cfg, protected_mask=protected_mask,
+                protected_masks=protected_masks,
+                known_anomaly_mask=known_anomaly_mask,
+                baseline_fit=baseline_fit, effect_score_fn=score_fn, model_spec=stage_spec,
+            )
+            stage_results.append(stage_result)
+            stage_seeds[stage_effect] = _stage_basin_parameters(
+                stage_result,
+                dimension=stage_spec.parameter_dimension,
+            )
+        except Exception as exc:
+            stage_errors.append(
+                f"{stage_effect}:{type(exc).__name__}:{exc}"
+            )
+            continue
+
+    joint_spec = make_effect_fitter(config, effect, float(np.median(time)))
+    joint_cfg = replace(fallback_config, parameter_dimension=joint_spec.parameter_dimension)
+    parallax_effect = (
+        "space_parallax" if "space_parallax" in stage_seeds else "annual_parallax"
+    )
+    composed_seeds = _compose_joint_stage_seeds(
+        stage_seeds.get("fspl", ()),
+        stage_seeds.get(parallax_effect, ()),
+    )
+    if composed_seeds:
+        seed = composed_seeds[0]
+    else:
+        seed = _coerce_seed_dimension(
+            base_seed,
+            joint_spec.parameter_dimension,
+            joint_cfg.default_logrho,
+        )
+    bridged_stage_seeds = tuple(
+        seed_value
+        for values in stage_seeds.values()
+        for seed_value in values
+    )
+    try:
+        joint_result = run_robust_fallback(
+            joint_spec.fitter, time, flux, ferr, seed,
+            candidates=candidate_tuple,
+            extra_seeds=composed_seeds + bridged_stage_seeds,
+            effect=effect,
+            config=joint_cfg,
+            protected_mask=protected_mask,
+            protected_masks=protected_masks,
+            baseline_fit=baseline_fit,
+            known_anomaly_mask=known_anomaly_mask,
+            effect_score_fn=score_fn,
+            model_spec=joint_spec,
+        )
+    except Exception:
+        joint_result = None
+    if joint_result is not None and joint_result.success:
+        return replace(joint_result, stage_results=tuple(stage_results))
+
+    # A mixed detector decision does not prove that both effects are present.
+    # If the joint model is unstable, retain the strongest independently
+    # accepted physical stage instead of rejecting a valid parallax/FSPL
+    # correction or letting the extra component absorb a planet block.
+    successful_stages = [result for result in stage_results if result.success]
+    if successful_stages:
+        selected_stage = min(
+            successful_stages,
+            key=lambda result: (
+                result.selected_original_chi2,
+                result.selected_robust_objective,
+            ),
+        )
+        reasons = tuple(
+            dict.fromkeys(
+                (
+                    *selected_stage.reason_codes,
+                    "joint_fallback_rejected",
+                    "accepted_single_effect_stage",
+                )
+            )
+        )
+        return replace(
+            selected_stage,
+            reason_codes=reasons,
+            stage_results=tuple(stage_results),
+        )
+    if joint_result is None:
+        detail = stage_errors[0] if stage_errors else "no accepted stage"
+        raise RuntimeError(
+            f"Joint fallback failed and no single-effect stage was accepted: {detail}"
+        )
+    if stage_errors:
+        return replace(
+            joint_result,
+            stage_results=tuple(stage_results),
+            reason_codes=tuple(
+                dict.fromkeys(
+                    (
+                        *joint_result.reason_codes,
+                        *(f"stage_failed:{error}" for error in stage_errors),
+                    )
+                )
+            ),
+        )
+    return replace(joint_result, stage_results=tuple(stage_results))
+
+
+__all__ = [
+    "FallbackAttempt",
+    "FallbackConfig",
+    "FallbackResult",
+    "EffectFitterSpec",
+    "detector_seed_parameters",
+    "make_effect_fitter",
+    "run_robust_fallback",
+    "run_staged_joint_fallback",
+]

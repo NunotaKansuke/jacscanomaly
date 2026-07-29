@@ -13,10 +13,18 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
   during masked and robust refits.
 - Deep closed troughs in a `bump--dip--bump` pattern are retained as dip
   features, while one-sided negative wings remain suppressed.
+- Added the native C++ parallax evaluator family.  It owns ephemeris
+  interpolation, North/East projection, strict observer conventions, VBM
+  PSPL/ESPL magnification, profiled fluxes, and SciPy bounded TRF fitting.
+- Added `Finder.run_effect_aware()` with before/after planet extraction and
+  candidate provenance.  The existing `Finder.run()` behavior is unchanged.
 
 ### Changed
 - FSPL fitting retries a small set of guarded initial seeds when the first
   finite-source solution is a poor local fit.
+- Native GULLS mode now requires an explicit reference ephemeris and uses the
+  strict observer/reference subtraction.  The former self-reference behavior
+  is not used by the native fallback path.
 - Refined-fit plots label the selected single-lens model family.
 - Version bumped to `0.5.1` because PyPI already contains an independent
   `0.5.0` release.

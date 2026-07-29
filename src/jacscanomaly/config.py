@@ -61,7 +61,6 @@ class FinderConfig:
         "fspl_parallax",
         "pspl_space_parallax",
         "fspl_space_parallax",
-        "fspl_space_parallax_gulls_vbm_fd",
         "bic_single_lens",
     ] = "pspl"
     """
@@ -84,9 +83,6 @@ class FinderConfig:
         PSPL with annual parallax plus a spacecraft ephemeris.
     - ``"fspl_space_parallax"`` :
         FSPL with annual parallax plus a spacecraft ephemeris.
-    - ``"fspl_space_parallax_gulls_vbm_fd"`` :
-        GULLS-convention FSPL space-parallax fitter using VBMicrolensing ESPL
-        magnification and finite-difference SciPy least squares.
     - ``"bic_single_lens"`` :
         Select the lowest-BIC fit among PSPL and finite-difference FSPL, with
         an optional GULLS FSPL space-parallax trial.
@@ -110,31 +106,11 @@ class FinderConfig:
     Path to the spacecraft/observer ephemeris table used by space-parallax
     models.
 
-    Required for ``"pspl_space_parallax"``, ``"fspl_space_parallax"``,
-    ``"fspl_space_parallax_gulls_vbm_fd"``, and ``"bic_single_lens"`` when
+    Required for ``"pspl_space_parallax"``, ``"fspl_space_parallax"``, and
+    ``"bic_single_lens"`` when
     ``bic_include_space_parallax`` is enabled. Expected columns are
-    ``JD RA_deg Dec_deg distance_AU``. The interpretation of the position is
-    controlled by ``space_parallax_convention``.
-    """
-
-    space_parallax_convention: Literal["vbm", "gulls"] = "vbm"
-    """
-    Convention used for ``"*_space_parallax"`` models.
-
-    - ``"vbm"`` interprets ``satellite_ephemeris_path`` as a geocentric
-      VBMicrolensing/RTModel satellite table and adds it to the annual Earth
-      parallax displacement.
-    - ``"gulls"`` interprets ``satellite_ephemeris_path`` as a heliocentric
-      GULLS observer ephemeris and uses the GULLS reference-frame subtraction
-      ``x(t) - x(tref) - v(tref) * (t - tref)``.
-    """
-
-    parallax_use_HJD: bool = True
-    """
-    If True, input times for parallax models are treated as HJD-style times.
-    If False, input times are treated as JD-style times and the observer
-    light-travel correction is included in the source trajectory, matching
-    VBMicrolensing's ``t_in_HJD=0`` convention.
+    ``JD RA_deg Dec_deg distance_AU``. It is Earth-relative in the default
+    ``earth_geocentric_offset`` convention.
     """
 
     max_piE: float = 1.0
@@ -369,6 +345,38 @@ class FinderConfig:
 
     vbm_cpp_tol: float = 1.0e-5
     """C++ LM convergence tolerance for the native VBM backend."""
+
+    # ==================================================
+    # 0c) Native parallax backend
+    # ==================================================
+    parallax_fit_backend: Literal["native_cpp"] = "native_cpp"
+    """Backend used by the effect-aware parallax fallback."""
+
+    parallax_optimizer: Literal["scipy_trf", "native_lm_polish"] = "scipy_trf"
+    """Primary optimizer for native parallax fitting."""
+
+    parallax_observer_convention: Literal[
+        "earth_geocentric_offset", "heliocentric_observer", "gulls"
+    ] = "earth_geocentric_offset"
+    """Canonical observer convention for native parallax fitting."""
+
+    parallax_time_scale: Literal["jd", "hjd"] = "jd"
+    """Explicit scale for times passed to the native parallax fitter."""
+
+    parallax_time_offset: float = 0.0
+    """Explicit additive offset used to normalize relative input times."""
+
+    parallax_extrapolation: Literal["reject", "linear"] = "reject"
+    """Whether native ephemerides may be linearly extrapolated."""
+
+    parallax_earth_ephemeris: object = None
+    """Optional validated ``parallax_backend.Ephemeris`` for annual parallax."""
+
+    parallax_observer_ephemeris: object = None
+    """Optional complete observer ephemeris for heliocentric/GULLS mode."""
+
+    parallax_reference_ephemeris: object = None
+    """Optional explicit reference ephemeris for heliocentric/GULLS mode."""
 
     grid_chunked: bool = False
     """

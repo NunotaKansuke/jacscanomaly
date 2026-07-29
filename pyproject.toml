@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel", "numpy"]
+requires = ["setuptools>=69", "wheel", "numpy", "VBMicrolensing>=5.5"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,12 +8,13 @@ version = "0.5.1"
 description = "JAX-based scan anomaly detection for time-series residuals"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Kansuke Nunota" }]
 dependencies = [
   "numpy",
   "jax",
-  "jaxopt",
+  "scipy",
+  "VBMicrolensing>=5.5",
   "matplotlib",
 ]
 
@@ -27,10 +28,7 @@ test = [
   "pytest>=7",
   "coverage[toml]>=7",
 ]
-vbm = [
-  "scipy",
-  "VBMicrolensing",
-]
+vbm = []
 dev = [
   "jacscanomaly[docs,test,vbm]",
 ]

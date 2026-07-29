@@ -26,6 +26,21 @@ def _single_lens_model_flux(fit, time) -> np.ndarray:
     Evaluate the fitted single-lens model at arbitrary times.
     """
     names = tuple(getattr(fit, "param_names", ()))
+    projector = getattr(fit, "parallax_projector", None)
+    raw_params = getattr(fit, "raw_params", None)
+    if (
+        projector is not None
+        and hasattr(projector, "magnification_at")
+        and raw_params is not None
+    ):
+        magnification = projector.magnification_at(
+            np.asarray(time, dtype=float),
+            np.asarray(raw_params, dtype=float),
+        )
+        return (
+            float(np.asarray(fit.fs)) * magnification
+            + float(np.asarray(fit.fb))
+        )
     params = jnp.asarray(fit.params)
     time_j = jnp.asarray(time)
 
