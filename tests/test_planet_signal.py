@@ -120,6 +120,48 @@ def test_planet_signal_extractor_masks_local_unexplained_signal():
     assert result.best.max_abs_z > 5.0
 
 
+def test_planet_signal_extractor_frozen_baseline_never_refits(monkeypatch):
+    time = np.linspace(0.0, 20.0, 240)
+    params = np.array([10.0, 5.0, 0.2])
+    ferr = np.full_like(time, 0.02)
+    flux = 2.0 * np.asarray(A_pspl_func(params, time)) + 0.1
+    flux += 0.3 * np.exp(-0.5 * ((time - 9.0) / 0.12) ** 2)
+    finder = Finder(
+        FinderConfig(
+            grid_backend="jax",
+            single_fit_backend="jax",
+            teff_init=0.08,
+            common_ratio=1.5,
+            teff_grid_n=6,
+            dt0_coeff=0.5,
+            min_pts_in_window=3,
+        )
+    )
+    initial_fit = finder.fit_single_lens(time, flux, ferr, x0=params)
+    extractor = PlanetSignalExtractor(
+        finder,
+        PlanetSignalConfig(max_iter=2, seed_min_dchi2=20.0, candidate_min_points=2),
+    )
+
+    def fail_refit(**_kwargs):
+        raise AssertionError("a frozen adopted model must not be refit")
+
+    monkeypatch.setattr(extractor, "_fit_masked_single_lens_and_evaluate_full", fail_refit)
+    result = extractor.run(
+        time,
+        flux,
+        ferr,
+        initial_fit=initial_fit,
+        refit=False,
+        freeze_baseline=True,
+        prior_signal_windows=((9.0, 0.25),),
+    )
+
+    assert result.refined_fit is initial_fit
+    assert result.signal_mask.any()
+    assert result.best is not None
+
+
 def test_planet_signal_extractor_robust_mode_downweights_connected_structure():
     time = np.linspace(0.0, 20.0, 360)
     params = np.array([10.0, 4.0, 0.25])

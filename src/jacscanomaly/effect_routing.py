@@ -27,6 +27,9 @@ class RoutingThresholds:
     max_point_influence: float = 0.50
     max_block_influence: float = 0.75
     min_subset_stability: float = 0.25
+    min_planet_mask_retention: float = 0.50
+    max_planet_overlap: float = 0.35
+    min_parallax_fallback_tE: float = 20.0
     allow_rank_deficient_exact_probe: bool = True
     exact_probe_available: bool = False
 
@@ -51,6 +54,19 @@ def route_candidate(
         and candidate.max_block_influence <= thresholds.max_block_influence
         and candidate.subset_stability >= thresholds.min_subset_stability
     )
+    if candidate.effect == "fspl" and candidate.morphology in {
+        "fspl_even_peak",
+        "fspl_flattened_peak",
+    }:
+        # FSPL is intrinsically compact and its PSPL nuisance basis is often
+        # ill-conditioned near high magnification. Its discriminating quality
+        # test is the even central morphology, not parallax-style wing
+        # conditioning.
+        quality_ok = (
+            candidate.coverage >= 0.02
+            and candidate.max_point_influence <= thresholds.max_point_influence
+            and candidate.subset_stability >= thresholds.min_subset_stability
+        )
     hard_geometry_failure = (
         candidate.coverage < thresholds.min_coverage
         or not np.isfinite(candidate.condition_number)
@@ -58,24 +74,99 @@ def route_candidate(
     )
 
     compact_dominated = "compact_block_dominated" in candidate.reason_codes
-    robust_score = min(score, float(candidate.score_without_compact_blocks))
-    if score < thresholds.exact_probe_score and robust_score < thresholds.exact_probe_score:
+    score_without_planet = (
+        float(candidate.score_without_planet)
+        if np.isfinite(candidate.score_without_planet)
+        else float(candidate.score_without_compact_blocks)
+    )
+    robust_score = min(
+        score,
+        float(candidate.score_without_compact_blocks),
+        score_without_planet,
+    )
+    clear_physical_morphology = candidate.morphology in {
+        "fspl_even_peak",
+        "fspl_flattened_peak",
+        "parallax_coherent_wings",
+    }
+    ambiguous_mixed = candidate.morphology in {
+        "mixed_or_planet",
+        "fspl_partial_peak",
+    }
+    planet_mask_conflict = bool(
+        "planet_morphology_dominated" in candidate.reason_codes
+        or candidate.planet_overlap > thresholds.max_planet_overlap
+        or (
+            score > 0.0
+            and score_without_planet / score
+            < thresholds.min_planet_mask_retention
+        )
+    )
+    parallax_planet_conflict = bool(
+        "parallax" in candidate.effect and planet_mask_conflict
+    )
+    planet_dominated = (
+        candidate.morphology == "planet_like"
+        or (
+            not clear_physical_morphology
+            and not ambiguous_mixed
+            and planet_mask_conflict
+        )
+    )
+    morphology_uncertain = (
+        "non_fspl_peak_shape" in candidate.reason_codes
+        or "parallax_wings_incoherent" in candidate.reason_codes
+        or "parallax_too_local" in candidate.reason_codes
+        or candidate.morphology == "mixed_or_planet"
+        or candidate.morphology == "fspl_partial_peak"
+        or parallax_planet_conflict
+    )
+    parallax_tE = (
+        abs(float(np.asarray(candidate.seed_parameters).reshape(-1)[1]))
+        if (
+            "parallax" in candidate.effect
+            and candidate.seed_parameters is not None
+            and np.asarray(candidate.seed_parameters).size >= 2
+        )
+        else float("nan")
+    )
+    short_parallax_event = bool(
+        np.isfinite(parallax_tE)
+        and parallax_tE < thresholds.min_parallax_fallback_tE
+    )
+    if planet_dominated:
+        decision = "planet"
+        reasons.append("routed_as_planet_anomaly")
+    elif score < thresholds.exact_probe_score and robust_score < thresholds.exact_probe_score:
         decision = "skip"
         reasons.append("score_below_exact_probe")
-    elif compact_dominated and candidate.score_without_compact_blocks < thresholds.fallback_score:
+    elif (
+        compact_dominated
+        and not clear_physical_morphology
+        and candidate.score_without_compact_blocks < thresholds.fallback_score
+    ):
         decision = "exact_probe"
         reasons.append("compact_block_only")
         if not thresholds.exact_probe_available:
             reasons.append("exact_probe_unavailable")
-    elif robust_score >= thresholds.fallback_score and not quality_ok and not thresholds.exact_probe_available:
-        # Fail open for a strong physical signal while the exact-probe executor
-        # is unavailable.  Raw subset score differences alone must not create
-        # a dead end; compact-only candidates were handled above.
-        decision = "fallback"
-        reasons.append("fallback_after_probe_unavailable")
-    elif score < thresholds.fallback_score or not quality_ok:
+    elif (
+        morphology_uncertain
+        or short_parallax_event
+        or score < thresholds.fallback_score
+        or not quality_ok
+    ):
         decision = "exact_probe"
-        reasons.append("boundary_score" if score < thresholds.fallback_score else "diagnostic_uncertainty")
+        reasons.append(
+            "parallax_planet_conflict_requires_model_comparison"
+            if parallax_planet_conflict
+            else "morphology_requires_model_comparison"
+            if morphology_uncertain
+            else "short_event_parallax_requires_model_comparison"
+            if short_parallax_event
+            else "boundary_score"
+            if score < thresholds.fallback_score
+            else "diagnostic_uncertainty"
+        )
         if hard_geometry_failure:
             reasons.append("geometry_requires_exact_probe")
         if not thresholds.exact_probe_available:

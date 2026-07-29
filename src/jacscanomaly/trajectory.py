@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 from jax import jit
+from functools import lru_cache
 from importlib import resources
 
 import jacscanomaly.parallax as parallax
@@ -49,8 +50,7 @@ def make_space_parallax_projector(
     use_HJD: bool = True,
     convention: str = "vbm",
 ):
-    sat_table = parallax.load_vbm_satellite_file(satellite_ephemeris_path)
-    sat = parallax.SatelliteEphemeris.from_radec_distance_table(sat_table)
+    sat = _cached_satellite_ephemeris(str(satellite_ephemeris_path))
     if convention == "gulls":
         # GULLS builds each observer orbit by adding its satellite
         # perturbation to the reference (Earth) orbit.  The RTModel-style
@@ -59,22 +59,38 @@ def make_space_parallax_projector(
         # Treating the table as the complete orbit suppresses the annual
         # displacement by roughly two orders of magnitude and drives piE to
         # its configured bound.
-        earth = get_heliocentric_ephemeris()
-        earth_r = parallax.interp_uniform_linear(
-            sat.t,
-            earth.t[0],
-            earth.t[1] - earth.t[0],
-            earth.r,
-        )
-        observer_r = earth_r + sat.r
-        observer_v = jnp.gradient(observer_r, sat.t, axis=0)
-        observer = parallax.SatelliteEphemeris(sat.t, observer_r, observer_v)
+        observer = _cached_gulls_observer(str(satellite_ephemeris_path))
         return parallax.GullsSpaceParallaxProjector(observer, RA, Dec, tref)
     if convention != "vbm":
         raise ValueError("space parallax convention must be 'vbm' or 'gulls'.")
     eph = get_heliocentric_ephemeris()
     earth = parallax.EarthOrbitalParallaxProjector(eph, RA, Dec, tref, use_HJD=use_HJD)
     return parallax.SpaceOrbitalParallaxProjector(earth, sat)
+
+
+@lru_cache(maxsize=8)
+def _cached_satellite_ephemeris(path: str):
+    """Load and convert an observer table once per process."""
+    table = parallax.load_vbm_satellite_file(path)
+    return parallax.SatelliteEphemeris.from_radec_distance_table(table)
+
+
+@lru_cache(maxsize=8)
+def _cached_gulls_observer(path: str):
+    """Return the full GULLS observer orbit cached by ephemeris path."""
+    satellite = _cached_satellite_ephemeris(path)
+    earth = get_heliocentric_ephemeris()
+    earth_r = parallax.interp_uniform_linear(
+        satellite.t,
+        earth.t[0],
+        earth.t[1] - earth.t[0],
+        earth.r,
+    )
+    observer_r = earth_r + satellite.r
+    observer_v = jnp.gradient(observer_r, satellite.t, axis=0)
+    return parallax.SatelliteEphemeris(
+        satellite.t, observer_r, observer_v
+    )
 
 
 def u_parallax_tau_beta(t, t0, tE, u0, piEN, piEE, P):

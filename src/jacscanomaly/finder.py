@@ -321,6 +321,7 @@ class Finder:
         routing_thresholds: Optional[RoutingThresholds] = None,
         include_fspl: bool = True,
         execute_exact_probe: bool = True,
+        planet_mask=None,
         **fspl_kwargs,
     ):
         """Run the physical detector in shadow mode on a PSPL fit.
@@ -372,6 +373,7 @@ class Finder:
             parallax_projector=parallax_projector,
             space_parallax_projector=space_parallax_projector,
             include_fspl=include_fspl,
+            planet_mask=planet_mask,
             **fspl_kwargs,
         )
         if not route:
@@ -389,21 +391,11 @@ class Finder:
             try:
                 probe = run_exact_probe(fit, projector, candidate, **fspl_kwargs)
                 promoted = probe.promoted_candidate
-                if (
-                    probe.decision == "skip"
-                    and candidate.score_without_compact_blocks >= thresholds.fallback_score
-                ):
-                    # An inconclusive cheap probe must not turn a robust,
-                    # broad physical score into a dead-end skip.
-                    promoted = candidate.with_decision(
-                        "fallback",
-                        ("exact_probe_not_promoted", "fallback_after_probe_inconclusive"),
-                    )
                 probed.append(promoted)
             except Exception as exc:
                 probed.append(
                     candidate.with_decision(
-                        "fallback" if candidate.score_without_compact_blocks >= thresholds.fallback_score else "skip",
+                        "exact_probe",
                         ("exact_probe_failed", type(exc).__name__),
                     )
                 )
@@ -452,8 +444,25 @@ class Finder:
                 "robust_fallback could not resolve an effect-specific fitter; "
                 "provide candidates or an explicit effect."
             )
-        spec = make_effect_fitter(self.config, resolved_effect, float(np.median(time_np)))
-        if base_seed is not None and np.asarray(base_seed).size not in (3, spec.parameter_dimension):
+        spec = None
+        try:
+            spec = make_effect_fitter(
+                self.config, resolved_effect, float(np.median(time_np))
+            )
+        except ValueError:
+            # A joint space-parallax backend can be unavailable when the
+            # observer ephemeris does not cover this event. Mixed fallback
+            # must still run its independently viable FSPL/annual stages.
+            if not (
+                effect == "mixed"
+                and resolved_effect in {"fspl_parallax", "fspl_space_parallax"}
+            ):
+                raise
+        if (
+            spec is not None
+            and base_seed is not None
+            and np.asarray(base_seed).size not in (3, spec.parameter_dimension)
+        ):
             raise ValueError(
                 f"Base seed dimension {np.asarray(base_seed).size} does not match "
                 f"{resolved_effect} fitter dimension {spec.parameter_dimension}."
@@ -467,7 +476,9 @@ class Finder:
             contamination=config.contamination,
             max_point_parameter_change=config.max_point_parameter_change,
             max_basin_distance=config.max_basin_distance,
-            parameter_dimension=spec.parameter_dimension,
+            parameter_dimension=(
+                None if spec is None else spec.parameter_dimension
+            ),
             default_logrho=config.default_logrho,
             u0_factors=config.u0_factors,
             rho_over_u0=config.rho_over_u0,
@@ -478,10 +489,30 @@ class Finder:
                 if config.max_piE is not None
                 else float(self.config.max_piE)
             ),
+            min_bic_improvement=config.min_bic_improvement,
         )
-        projector = getattr(spec.fitter, "_P", None)
+        projector = None if spec is None else getattr(spec.fitter, "_P", None)
 
         def physical_effect_score(value, score_effect: Optional[str] = None) -> float:
+            def candidate_score(candidate, detected=None) -> float:
+                measured = candidate if detected is None else detected
+                if (
+                    candidate.effect == "fspl"
+                    and candidate.morphology in {
+                        "fspl_even_peak",
+                        "fspl_flattened_peak",
+                    }
+                ):
+                    # The compact peak is the finite-source signal itself.
+                    # Removing it makes the baseline look artificially clean
+                    # and can reject a fit that eliminates the full FSPL
+                    # topology by orders of magnitude.
+                    return max(float(measured.score), 0.0)
+                return max(
+                    float(measured.score_without_compact_blocks),
+                    0.0,
+                )
+
             def relevant(candidate) -> bool:
                 if score_effect is None or score_effect == "mixed":
                     return True
@@ -494,7 +525,7 @@ class Finder:
             if value is fit:
                 return float(
                     sum(
-                        max(float(candidate.score_without_compact_blocks), 0.0)
+                        candidate_score(candidate)
                         for candidate in candidate_tuple
                         if relevant(candidate)
                     )
@@ -506,9 +537,7 @@ class Finder:
                     continue
                 if candidate.effect == "fspl":
                     detected = detect_fspl_from_pspl_fit(value)
-                    scores.append(
-                        max(float(detected.score_without_compact_blocks), 0.0)
-                    )
+                    scores.append(candidate_score(candidate, detected))
                 elif candidate.effect in {"annual_parallax", "space_parallax"}:
                     native_evaluator = getattr(value, "parallax_projector", None)
                     if native_evaluator is not None and hasattr(
@@ -558,6 +587,10 @@ class Finder:
                 known_anomaly_mask=known_anomaly_mask,
                 baseline_fit=fit,
                 effect_score_fn=effect_score_fn,
+            )
+        if spec is None:  # defensive: only mixed staged fallback may omit it
+            raise RuntimeError(
+                f"No fitter is available for resolved effect {resolved_effect}."
             )
         return run_robust_fallback(
             spec.fitter,

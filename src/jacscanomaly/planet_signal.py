@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from time import perf_counter
 from typing import Optional, Tuple
@@ -1079,6 +1079,7 @@ class PlanetSignalExtractor:
         prior_signal_windows: tuple[tuple[float, float], ...] = (),
         initial_fit: Optional[SingleLensFitResult] = None,
         initial_seed: Optional[BestCandidate] = None,
+        freeze_baseline: bool = False,
     ) -> PlanetSignalResult:
         """
         Separate localized residual signal while refining a baseline fit.
@@ -1102,6 +1103,11 @@ class PlanetSignalExtractor:
             Cached first grid-scan result for this exact initial fit and input
             data.  Supplying it lets a full beam pass continue after a fast
             pass without repeating the initial grid scan.
+        freeze_baseline : bool, optional
+            Keep ``initial_fit`` fixed while discovering and measuring
+            residual intervals.  This is used after a physical fallback has
+            selected FSPL or parallax: the anomaly search must not silently
+            refit or reselect the single-lens model family.
 
         Returns
         -------
@@ -1136,7 +1142,17 @@ class PlanetSignalExtractor:
                 initial_fit = self.finder._fixed_single_lens_from_x0(time_j, flux_j, ferr_j, x0_j)
 
         mode = str(self.config.baseline_mode).lower()
-        if mode == "mask":
+        if freeze_baseline:
+            current_fit, signal_mask, point_weight, iterations = self._run_frozen_baseline(
+                initial_fit=initial_fit,
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                time_np=time_np,
+                verbose=verbose,
+            )
+            observed_initial_seed = None
+        elif mode == "mask":
             current_fit, signal_mask, point_weight, iterations = self._run_mask_baseline(
                 initial_fit=initial_fit,
                 time_j=time_j,
@@ -1169,7 +1185,7 @@ class PlanetSignalExtractor:
                 "PlanetSignalConfig.baseline_mode must be 'mask', 'robust', or 'beam_interval'."
             )
 
-        if mode != "beam_interval":
+        if not freeze_baseline and mode != "beam_interval":
             observed_initial_seed = None
 
         if self._fit_is_catastrophically_worse(initial_fit, current_fit):
@@ -1182,19 +1198,22 @@ class PlanetSignalExtractor:
         if np.any(prior_mask & ~signal_mask):
             signal_mask = signal_mask | prior_mask
             point_weight = np.where(signal_mask, 0.0, point_weight)
-            candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
-                time_j=time_j,
-                flux_j=flux_j,
-                ferr_j=ferr_j,
-                keep_mask_np=~signal_mask,
-                x0_j=self._raw_params_for_refit(current_fit),
-                model_kind=getattr(current_fit, "model_kind", None),
-            )
-            if not self._fit_is_catastrophically_worse(current_fit, candidate_fit):
-                current_fit = candidate_fit
+            if not freeze_baseline:
+                candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
+                    time_j=time_j,
+                    flux_j=flux_j,
+                    ferr_j=ferr_j,
+                    keep_mask_np=~signal_mask,
+                    x0_j=self._raw_params_for_refit(current_fit),
+                    model_kind=getattr(current_fit, "model_kind", None),
+                )
+                if not self._fit_is_catastrophically_worse(current_fit, candidate_fit):
+                    current_fit = candidate_fit
 
         flat_diagnostic = self._flat_baseline_diagnostic(current_fit, signal_mask)
-        if flat_diagnostic.use_flat_baseline:
+        if freeze_baseline and flat_diagnostic.use_flat_baseline:
+            flat_diagnostic = replace(flat_diagnostic, use_flat_baseline=False)
+        elif flat_diagnostic.use_flat_baseline:
             current_fit = self._fit_flat_baseline_and_evaluate_full(
                 time_j=time_j,
                 flux_j=flux_j,
@@ -1333,6 +1352,64 @@ class PlanetSignalExtractor:
 
         point_weight = np.where(signal_mask, 0.0, 1.0)
         return current_fit, signal_mask, point_weight, iterations
+
+    def _run_frozen_baseline(
+        self,
+        *,
+        initial_fit: SingleLensFitResult,
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        time_np: np.ndarray,
+        verbose: bool,
+    ) -> tuple[SingleLensFitResult, np.ndarray, np.ndarray, list[PlanetSignalIteration]]:
+        """Find residual intervals without changing the adopted baseline fit."""
+        residual_j = initial_fit.residual
+        signal_mask = np.zeros(time_np.shape, dtype=bool)
+        iterations: list[PlanetSignalIteration] = []
+
+        for iteration in range(max(0, int(self.config.max_iter))):
+            residual_for_seed = self._suppress_masked_residual(residual_j, signal_mask)
+            seed = self._scan_best(time_j, residual_for_seed, ferr_j, time_np, verbose=verbose)
+            if seed is None or not np.isfinite(seed.dchi2) or seed.dchi2 < float(self.config.seed_min_dchi2):
+                break
+            half_width = max(
+                float(self.config.mask_teff_coeff) * float(seed.teff),
+                float(self.config.mask_min_half_width),
+            )
+            seed_window = np.abs(time_np - float(seed.t0)) <= half_width
+            new_mask = self._template_improvement_mask_from_seed(
+                time_np=time_np,
+                time_j=time_j,
+                residual_j=residual_j,
+                ferr_j=ferr_j,
+                seed_window=seed_window,
+                seed_t0=float(seed.t0),
+                seed_teff=float(seed.teff),
+            )
+            combined = signal_mask | new_mask
+            added = int(np.sum(combined) - np.sum(signal_mask))
+            if added <= 0 or np.mean(combined) > float(self.config.max_mask_fraction):
+                break
+            before = int(np.sum(signal_mask))
+            signal_mask = combined
+            iterations.append(
+                PlanetSignalIteration(
+                    iteration=iteration,
+                    seed=seed,
+                    n_masked_before=before,
+                    n_masked_after=int(np.sum(signal_mask)),
+                    added_points=added,
+                    fit=initial_fit,
+                )
+            )
+
+        return (
+            initial_fit,
+            signal_mask,
+            np.where(signal_mask, 0.0, 1.0),
+            iterations,
+        )
 
     def _run_robust_baseline(
         self,

@@ -406,8 +406,6 @@ class NativeParallaxFitter:
         return lower, upper
 
     def fit(self, time, flux, ferr, q0):
-        if least_squares is None:
-            raise ImportError("Native parallax fitting requires scipy.optimize.least_squares.")
         time = np.asarray(time, dtype=float); flux = np.asarray(flux, dtype=float); ferr = np.asarray(ferr, dtype=float)
         if time.ndim != 1 or not (time.shape == flux.shape == ferr.shape) or np.any(ferr <= 0) or not np.all(np.isfinite(time)):
             raise ValueError("time, flux, and ferr must be finite one-dimensional arrays with positive ferr.")
@@ -421,7 +419,23 @@ class NativeParallaxFitter:
         raw0 = self._raw_seed(np.asarray(q0, dtype=float))
         lower, upper = self._bounds(time)
         raw0 = np.minimum(np.maximum(raw0, lower + 1e-10), upper - 1e-10)
-        result = least_squares(evaluator.residual, raw0, jac=evaluator.jacobian, method="trf", bounds=(lower, upper), x_scale="jac", loss="linear", max_nfev=self.maxiter, xtol=self.tol, ftol=self.tol, gtol=self.tol)
+        if least_squares is None:
+            raise ImportError(
+                "Native parallax fitting requires scipy.optimize.least_squares."
+            )
+        result = least_squares(
+            evaluator.residual,
+            raw0,
+            jac=evaluator.jacobian,
+            method="trf",
+            bounds=(lower, upper),
+            x_scale="jac",
+            loss="linear",
+            max_nfev=self.maxiter,
+            xtol=self.tol,
+            ftol=self.tol,
+            gtol=self.tol,
+        )
         raw = np.asarray(result.x, dtype=float)
         mags = evaluator.magnification(raw)
         model = evaluator.evaluate(raw)
@@ -445,13 +459,33 @@ class NativeParallaxFitter:
             rank, condition = 0, float("inf")
         at_bound = bool(np.any(np.isclose(raw, lower, rtol=0.0, atol=1e-7)) or np.any(np.isclose(raw, upper, rtol=0.0, atol=1e-7)))
         diagnostics = NativeParallaxDiagnostics(
-            optimizer_success=bool(result.success), optimizer_status=str(result.message),
-            nfev=int(getattr(result, "nfev", 0)), njev=int(getattr(result, "njev", 0)), chi2=chi2,
+            optimizer_success=bool(result.success),
+            optimizer_status=str(result.message),
+            nfev=int(getattr(result, "nfev", 0)),
+            njev=int(getattr(result, "njev", 0)),
+            chi2=chi2,
             rank=rank, jacobian_condition=condition, parameter_at_bound=at_bound,
             ephemeris_extrapolated=any(eph is not None and not eph.contains(time + self.time_spec.offset) for eph in (self.earth_ephemeris, self.satellite_or_observer_ephemeris, self.reference_ephemeris)),
             nonfinite_evaluations=0, observer_convention=self.observer_convention,
         )
-        fit = SingleLensFitResult(time=time, flux=flux, ferr=ferr, params=params, param_names=tuple(names), chi2=chi2, chi2_dof=chi2 / max(time.size - self.parameter_dimension, 1), fs=fs, fb=fb, model_flux=model, residual=residual, raw_params=raw, parallax_projector=evaluator, optimizer_success=bool(result.success), optimizer_status=f"native_cpp_scipy_trf:{result.message}", diagnostics=diagnostics)
+        fit = SingleLensFitResult(
+            time=time,
+            flux=flux,
+            ferr=ferr,
+            params=params,
+            param_names=tuple(names),
+            chi2=chi2,
+            chi2_dof=chi2 / max(time.size - self.parameter_dimension, 1),
+            fs=fs,
+            fb=fb,
+            model_flux=model,
+            residual=residual,
+            raw_params=raw,
+            parallax_projector=evaluator,
+            optimizer_success=bool(result.success),
+            optimizer_status=f"native_cpp_scipy_trf:{result.message}",
+            diagnostics=diagnostics,
+        )
         self._last_fit = fit
         return fit
 

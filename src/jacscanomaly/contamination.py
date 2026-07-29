@@ -185,14 +185,17 @@ def contamination_objective(
     )
     value = float(np.sum(np.where(s, _student_nll(z, config.anomaly_scale, config.student_dof) + occupancy, _student_nll(z, config.baseline_scale, config.student_dof))))
     value += float(np.sum(s.astype(float) * support_strength * support_penalty))
-    for i in range(1, s.size):
-        gap = float(t[i] - t[i - 1])
-        if gap > float(config.season_gap):
-            continue
-        if s[i] != s[i - 1]:
-            value += float(config.transition_penalty)
-        if s[i] and s[i - 1]:
-            value += float(config.span_penalty) * max(gap, 0.0)
+    if s.size > 1:
+        gaps = np.diff(t)
+        connected = gaps <= float(config.season_gap)
+        transitions = connected & (s[1:] != s[:-1])
+        anomaly_spans = connected & s[1:] & s[:-1]
+        value += float(config.transition_penalty) * float(
+            np.count_nonzero(transitions)
+        )
+        value += float(config.span_penalty) * float(
+            np.sum(np.maximum(gaps[anomaly_spans], 0.0))
+        )
     return float(value)
 
 
