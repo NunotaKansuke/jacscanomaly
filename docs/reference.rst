@@ -15,6 +15,8 @@ Finder
 
 .. automethod:: jacscanomaly.Finder.run
 
+.. automethod:: jacscanomaly.Finder.run_effect_aware
+
 .. automethod:: jacscanomaly.Finder.run_template_free
 
 ``Finder.run`` is the standard template-grid detector. Its returned
@@ -60,6 +62,28 @@ The extractor returns both ``initial_fit`` and ``refined_fit``. Use
 ``signal_mask`` to identify excluded points, ``point_weight`` to inspect the
 fit weighting, and ``iterations`` to audit accepted refinement steps. See
 :doc:`planet_features` for the three baseline modes and their controls.
+
+``timing`` records the extractor wall-clock total, time spent in residual-grid
+scans, and the number of scans.  In effect-aware runs, the default routing
+probe exposes a cached initial seed and a later full beam pass reuses that
+seed rather than repeating the first scan.
+
+.. autoclass:: jacscanomaly.PlanetSignalTiming
+   :no-index:
+
+FFT initialization API
+----------------------
+
+.. autoclass:: jacscanomaly.PSPLFFTScanner
+   :no-index:
+
+.. automethod:: jacscanomaly.PSPLFFTScanner.search
+
+.. autoclass:: jacscanomaly.PSPLFFTSearchResult
+   :no-index:
+
+The FFT initializer is documented conceptually in :doc:`pspl_fft`; the
+residual-grid FFT backend is documented in :doc:`fft_backend`.
 
 Peak and dip measurement API
 ----------------------------

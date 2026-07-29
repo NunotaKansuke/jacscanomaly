@@ -55,6 +55,8 @@ If you are using the package for the first time:
    examples
    method
    configuration
+   fft_backend
+   pspl_fft
    results
    planet_features
 

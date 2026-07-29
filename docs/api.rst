@@ -17,11 +17,23 @@ Main workflow
    jacscanomaly.PlanetSignalExtractor
    jacscanomaly.PlanetSignalConfig
    jacscanomaly.PlanetSignalResult
+   jacscanomaly.PlanetSignalTiming
    jacscanomaly.PlanetFeatureConfig
    jacscanomaly.PlanetFeatureResult
    jacscanomaly.TemplateFreeScanner
    jacscanomaly.TemplateFreeSearchConfig
    jacscanomaly.TemplateFreeSearchResult
+
+FFT search backends
+-------------------
+
+.. autosummary::
+   :toctree: generated
+
+   jacscanomaly.PSPLFFTScanner
+   jacscanomaly.PSPLFFTSearchResult
+   jacscanomaly.PSPLFFTCandidate
+   jacscanomaly.PSPLFFTProfile
 
 Result containers
 -----------------

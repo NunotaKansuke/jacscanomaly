@@ -218,6 +218,7 @@ def test_high_score_with_unstable_subsets_fails_open_to_fallback():
 
 
 def test_fspl_exact_probe_promotes_an_exact_template():
+    pytest.importorskip("microjax")
     from types import SimpleNamespace
 
     time = np.linspace(-2.0, 2.0, 81)
