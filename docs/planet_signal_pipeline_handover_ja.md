@@ -1,7 +1,9 @@
 # Roman planet-signal パイプライン／HTML公開 引き継ぎ
 
 最終更新: 2026-07-31  
-現行コード: `jacscanomaly` commit `9143a7e`（保存済みFSPL解の `rho` 復元修正）
+現行コード: `jacscanomaly` commit `938f1cc`。主要変更は、保存済みFSPL解の `rho`
+復元（`9143a7e`）、惑星抽出からbinned残差を完全に除外（`fccf85b`）、
+一峰性惑星候補判定のC++化（`938f1cc`）。
 
 ## 目的
 
@@ -15,6 +17,10 @@
 - fit後の採否は数値的有効性・境界解・BICで決める。形態診断は警告であり、単独では棄却しない。
 - 最終的なFSPL/parallaxモデルの残差で惑星探索をやり直し、局所マスク後に同じモデル族をwarm-start LMで最大3回だけ再フィットする。
 - post-physical fitが親の物理解より悪化したら、親の物理解へ戻す。
+- **惑星候補の抽出・局所mask判定にbinned残差は使わない。** binnedはsingle-lensの
+  初期化・安定化を検討するためだけの補助であり、peak/dipの強度、幅、mask点は必ず
+  最終モデルに対するraw residualから求める。これにより、明瞭なdip/compact causticを
+  binned処理で消す問題を防ぐ。
 
 ## 処理フロー
 
@@ -51,6 +57,23 @@
   - 低コストのFSPL/parallax診断とexact-probe routing。
   - 長時間でcoherentなparallax候補を低scoreでも救済する。
 
+- `src/jacscanomaly/planet_signal.py`
+  - 惑星候補・局所maskはraw residualだけで構成する。binned系列は候補選別、maskの拡大・
+    縮小、peak/dipの報告には渡さない。
+  - compactな候補を守りつつ、幅広く滑らかな成分を惑星候補としてmaskし過ぎないよう、
+    template seed・raw残差の連続性・局所一峰性を使う。
+  - 一峰性のone-lobe判定は、利用可能なら `_cpp_grid.unimodal_mask` を使う。拡張未build時
+    だけ旧JAX実装へフォールバックする。
+
+- `src/jacscanomaly/_cpp_grid.cpp`
+  - 上記の候補ごとの一峰性判定をC++で実装。実測では `0_46_2422` の512候補で、JAX初回
+    約0.33秒に対してC++約0.003秒、選択結果は一致した。
+  - 拡張を更新した後はリポジトリ直下で `python setup.py build_ext --inplace` を実行する。
+
+高次効果のhot pathもJAX必須ではない。FSPL評価はnative VBM C++、parallaxはnative
+evaluator/JacobianとSciPy TRFを使用する。JAXは互換用・可視化・旧経路に残るが、通常の
+router→physical fallbackのボトルネックではない。
+
 ### `roman_simu/tool`
 
 - `run_planet_signal_full_refresh.py`
@@ -65,18 +88,26 @@
 - `make_html.py`
   - 既存公開URLの生成器。
   - `ROMAN_ADOPTED_MODEL_SITE=1` のとき、`anomaly_finder_model_result/events/*.html` と一覧を出力する。
-  - デフォルト入力は最新tagの
-    `planet_signal_binned_local_hierarchical_bic_full_{scan,post_physical}_data`。
+  - デフォルト入力は最新tagのscan/post-physical結果。`ROMAN_ADOPTED_MODEL_SITE=1`時は
+    旧 `planet_feature_data` を混在させず、最終採用モデルの残差・mask・候補だけを描く。
   - ページ右上にbuild versionを表示する。
 
-## 現行生成物（tag = `binned_local_hierarchical_bic_full`）
+## 最新の全件生成物
+
+直近の正常完了runは tag = `cpp_raw_mask_hierarchical_bic_full_v20260731`。
+
+- scan: 2371/2371 完了
+- router: error 0
+- physical fallback: 対象217件中、採用181件・棄却36件
+- post-physical refinement: 181/181 完了
+- HTML生成・Ragan同期: 完了。公開ページのbuild versionは `v2026.07.31.0310`
 
 ```text
 /rogue1_8/nunota/roman_simu/anomaly_finder_result/
-  planet_signal_binned_local_hierarchical_bic_full_scan_data/
-  planet_effect_route_binned_local_hierarchical_bic_full.json
-  planet_signal_binned_local_hierarchical_bic_full_physical_data/
-  planet_signal_binned_local_hierarchical_bic_full_post_physical_data/
+  planet_signal_cpp_raw_mask_hierarchical_bic_full_v20260731_scan_data/
+  planet_effect_route_cpp_raw_mask_hierarchical_bic_full_v20260731.json
+  planet_signal_cpp_raw_mask_hierarchical_bic_full_v20260731_physical_data/
+  planet_signal_cpp_raw_mask_hierarchical_bic_full_v20260731_post_physical_data/
 
 /rogue1_8/nunota/roman_simu/html_portal/
   anomaly_finder_model_result/index.html
@@ -96,17 +127,38 @@ http://133.1.160.32/ou-moa/public/roman_simu/anomaly_finder_model_result/events/
 
 ```bash
 cd /rogue1_8/nunota/roman_simu
-PYTHONPATH=/rogue1_8/nunota/jacscanomaly/src \
-python tool/run_planet_signal_full_refresh.py \
-  --jobs 2 \
-  --tag binned_local_hierarchical_bic_full \
-  --max-refits 3
+env PYTHONPATH=/rogue1_8/nunota/jacscanomaly/src \
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
+  XLA_FLAGS='--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1' \
+  nice -n 10 python -u tool/run_planet_signal_full_refresh.py \
+    --jobs 12 \
+    --tag cpp_raw_mask_hierarchical_bic_full_vYYYYMMDD \
+    --event-timeout 600 \
+    --post-event-timeout 300 \
+    --max-refits 3
 ```
 
 成功時、`make_html.py` が既存modelページを更新し、
 `/rogue1_8/nunota/html_portal/tool/request_sync.sh` が同期要求トークンを書き込む。
 
 ローカル生成だけをしたい場合は `--no-request-sync` を使う。
+
+このrunnerはイベントごとに最後まで流すのではなく、survey全体で
+`scan → router → physical → post-physical → HTML → sync` の順にstageを完了する。
+従ってphysicalの進捗はscan完了後に現れる。`--jobs` は他の利用者のCPUを優先して設定し、
+上記の12は空きCPUが十分あるときの低優先度実行例である。
+
+進捗確認（`.rejected.json` を成功数に混ぜないこと）:
+
+```bash
+base=/rogue1_8/nunota/roman_simu/anomaly_finder_result
+tag=cpp_raw_mask_hierarchical_bic_full_v20260731
+find "$base/planet_signal_${tag}_scan_data" -name 'planet_signal_result_*.json' | wc -l
+wc -l < "$base/planet_effect_route_${tag}.indices.txt"
+find "$base/planet_signal_${tag}_physical_data" -name 'planet_signal_result_*.json' ! -name '*.rejected.json' | wc -l
+find "$base/planet_signal_${tag}_physical_data" -name '*.rejected.json' | wc -l
+find "$base/planet_signal_${tag}_post_physical_data" -name 'planet_signal_result_*.json' | wc -l
+```
 
 ## HTMLだけ再生成する場合
 
@@ -153,7 +205,7 @@ HTMLの値とJSONの一致も確認する。
 
 ```bash
 jq '.fit.model_kind, .fit.chi2_dof, .pipeline.stage' \
-  anomaly_finder_result/planet_signal_binned_local_hierarchical_bic_full_post_physical_data/planet_signal_result_1129_1199.json
+  anomaly_finder_result/planet_signal_cpp_raw_mask_hierarchical_bic_full_v20260731_post_physical_data/planet_signal_result_1129_1199.json
 ```
 
 ## 判断の読み方: 0_922_1199
@@ -165,4 +217,3 @@ jq '.fit.model_kind, .fit.chi2_dof, .pipeline.stage' \
 - 一方でrouterには `parallax_wings_incoherent`、`subset_unstable`、`non_fspl_peak_shape` の警告が残る。
 
 従って、これは「手作業で無理に通した解」ではないが、形態がきれいに支持した確定解でもない。表示・運用上は **BIC採用・要レビューのFSPL+space-parallax候補** と扱う。
-
