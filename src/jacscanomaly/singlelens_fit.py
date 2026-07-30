@@ -397,20 +397,49 @@ class CPPPSPLFitter:
             min_t0_support_points=int(self.min_t0_support_points),
             t0_support_tE_coeff=float(self.t0_support_tE_coeff),
         )
+        params_np = np.asarray(params, dtype=float)
+        model_np = np.asarray(model_flux, dtype=float)
+        residual_np = np.asarray(residual, dtype=float)
+        t0, tE, u0 = params_np[:3]
+        support = int(np.count_nonzero(
+            np.abs(time_np - t0)
+            <= float(self.t0_support_tE_coeff) * max(abs(tE), 1e-12)
+        ))
+        # ``fit_pspl`` uses an all-1e100 residual internally when a trial
+        # violates its support guard.  Older versions of the binding returned
+        # that sentinel as an ordinary fit (with fs=fb=0), which let a failed
+        # model corrupt downstream windows and plots.  Do not manufacture a
+        # fit result from that sentinel.
+        invalid_reason = None
+        if params_np.shape != (3,) or not np.all(np.isfinite(params_np)):
+            invalid_reason = "non-finite native parameters"
+        elif not np.isfinite(chi2) or float(chi2) / max(time_np.size, 1) >= 1e150:
+            invalid_reason = "native residual sentinel"
+        elif abs(float(u0)) < float(self.u0_min):
+            invalid_reason = "u0 below configured lower bound"
+        elif support < int(self.min_t0_support_points):
+            invalid_reason = (
+                f"only {support} points within "
+                f"{self.t0_support_tE_coeff:g} tE of t0"
+            )
+        elif not (np.all(np.isfinite(model_np)) and np.all(np.isfinite(residual_np))):
+            invalid_reason = "non-finite native model or residual"
+        if invalid_reason is not None:
+            raise RuntimeError(f"CPP PSPL fit rejected: {invalid_reason}")
         n = int(time_np.shape[0])
         chi2_dof = float(chi2) / max(n - 3, 1)
         fit = SingleLensFitResult(
             time=time_np,
             flux=flux_np,
             ferr=ferr_np,
-            params=np.asarray(params, dtype=float),
+            params=params_np,
             param_names=("t0", "tE", "u0"),
             chi2=float(chi2),
             chi2_dof=chi2_dof,
             fs=float(fs),
             fb=float(fb),
-            model_flux=np.asarray(model_flux, dtype=float),
-            residual=np.asarray(residual, dtype=float),
+            model_flux=model_np,
+            residual=residual_np,
             optimizer_success=True,
             optimizer_status="native_cpp_lm",
         )
