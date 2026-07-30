@@ -607,6 +607,55 @@ class CPPVBMFSPLFitter:
         self._last_fit = fit
         return fit
 
+    def evaluate_fixed(
+        self,
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        ferr: jnp.ndarray,
+        q0: jnp.ndarray,
+    ) -> SingleLensFitResult:
+        """Evaluate a saved FSPL solution without another nonlinear fit."""
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+        q0_np = np.asarray(q0, dtype=float)
+        if q0_np.shape != (4,):
+            raise ValueError("q0 must be (t0, tE, u0, logrho).")
+        t0, tE, u0, logrho = map(float, q0_np)
+        tE_safe = max(abs(tE), 1.0e-12)
+        u = np.sqrt(((time_np - t0) / tE_safe) ** 2 + u0 * u0)
+        vbm = _make_vbm_magnifier(self.vbm_tol, self.vbm_reltol)
+        if self.espl_table_path is not None:
+            vbm.LoadESPLTable(str(self.espl_table_path))
+        rho = float(np.exp(np.clip(logrho, -50.0, 10.0)))
+        magnification = _vbm_espl_magnification(vbm, u, rho)
+        fs, fb = _solve_fs_fb_numpy(
+            magnification,
+            flux_np,
+            ferr_np,
+        )
+        model_flux = fs * magnification + fb
+        residual = flux_np - model_flux
+        chi2 = float(np.sum((residual / ferr_np) ** 2))
+        fit = SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=np.asarray([t0, tE, u0, rho], dtype=float),
+            param_names=("t0", "tE", "u0", "rho"),
+            chi2=chi2,
+            chi2_dof=chi2 / max(time_np.size - 4, 1),
+            fs=float(fs),
+            fb=float(fb),
+            model_flux=model_flux,
+            residual=residual,
+            raw_params=q0_np.copy(),
+            optimizer_success=True,
+            optimizer_status="native_vbm_fixed_evaluation",
+        )
+        self._last_fit = fit
+        return fit
+
     def plot_lc(self, **kwargs):
         if self._last_fit is None:
             raise RuntimeError("No fit has been run yet.")

@@ -750,6 +750,7 @@ class Finder:
         run_planet_after: bool = True,
         planet_config: Optional["PlanetSignalConfig"] = None,
         planet_fast_mode: bool = True,
+        post_physical_max_refits: int = 3,
         routing_thresholds: Optional[RoutingThresholds] = None,
         fallback_config: FallbackConfig = FallbackConfig(),
         verbose: bool = False,
@@ -1001,61 +1002,17 @@ class Finder:
         planet_after = None
         accepted = bool(fallback_result is not None and fallback_result.success)
         if accepted and run_planet_after:
-            from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
-            prior_windows = tuple(
-                (
-                    float(candidate.peak_time),
-                    max(
-                        0.5 * max(
-                            float(candidate.t_end) - float(candidate.t_start),
-                            0.0,
-                        ),
-                        float(np.median(np.diff(np.sort(time_np))))
-                        if time_np.size > 1
-                        else 0.0,
-                    ),
-                )
-                for candidate in (() if planet_before is None else planet_before.candidates)
-            )
-            resolved_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
-            if planet_fast_mode:
-                resolved_planet_config = replace(
-                    resolved_planet_config,
-                    baseline_mode="beam_interval",
-                    beam_max_iter=1,
-                    beam_width=1,
-                    beam_candidates_per_iter=1,
-                    beam_probe_only=True,
-                )
-            planet_after = PlanetSignalExtractor(self, resolved_planet_config).run(
+            planet_after = self.refine_planet_after_physical(
                 time_np,
                 flux_np,
                 ferr_np,
-                initial_fit=selected_fit,
-                refit=False,
+                selected_fit=selected_fit,
+                effect=str(fallback_result.effect),
+                planet_config=planet_config,
+                max_refits=post_physical_max_refits,
                 verbose=verbose,
-                prior_signal_windows=prior_windows,
             )
-            if planet_fast_mode and (
-                bool(
-                    planet_after.initial_seed is not None
-                    and np.isfinite(planet_after.initial_seed.dchi2)
-                    and planet_after.initial_seed.dchi2 >= float(resolved_planet_config.seed_min_dchi2)
-                )
-                or bool(fallback_candidates)
-            ):
-                full_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
-                planet_after = PlanetSignalExtractor(self, full_planet_config).run(
-                    time_np,
-                    flux_np,
-                    ferr_np,
-                    initial_fit=selected_fit,
-                    initial_seed=planet_after.initial_seed,
-                    refit=False,
-                    verbose=verbose,
-                    prior_signal_windows=prior_windows,
-                )
-                reason_codes.append("planet_scan_after_escalated")
+            reason_codes.append("planet_after_fixed_family_warm_start")
             reason_codes.append("planet_scan_after_completed")
         elif not accepted:
             reason_codes.append("planet_after_not_needed")
@@ -1088,6 +1045,138 @@ class Finder:
             reason_codes=tuple(reason_codes),
             diagnostics=diagnostics,
         )
+
+    @staticmethod
+    def _physical_model_kind(effect: str) -> str:
+        return {
+            "fspl": "fspl",
+            "annual_parallax": "pspl_parallax",
+            "space_parallax": "pspl_space_parallax",
+            "fspl_parallax": "fspl_parallax",
+            "fspl_space_parallax": "fspl_space_parallax",
+        }.get(str(effect), str(effect))
+
+    def refine_planet_after_physical(
+        self,
+        time,
+        flux,
+        ferr,
+        *,
+        selected_fit: SingleLensFitResult,
+        effect: str,
+        planet_config: Optional["PlanetSignalConfig"] = None,
+        max_refits: int = 3,
+        verbose: bool = False,
+    ):
+        """Re-detect a planet and locally polish one accepted model family.
+
+        The fallback's multistart search is not repeated.  A fresh
+        effect-specific fitter starts from the accepted solution, the regular
+        planet scanner proposes a localized mask, and one continuation fit is
+        allowed per pass.  No pre-fallback PSPL window is forced into the
+        post-physical result.
+        """
+        from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
+
+        max_refits = max(0, int(max_refits))
+        resolved = PlanetSignalConfig() if planet_config is None else planet_config
+        post_config = replace(
+            resolved,
+            baseline_mode="beam_interval",
+            beam_max_iter=max_refits,
+            beam_width=1,
+            beam_candidates_per_iter=1,
+            beam_probe_only=False,
+            flat_baseline_on_masked_peak=False,
+        )
+        time_np = np.asarray(time, dtype=float)
+        spec = make_effect_fitter(
+            self.config,
+            str(effect),
+            float(np.median(time_np)),
+        )
+        if not hasattr(selected_fit, "model_kind"):
+            object.__setattr__(
+                selected_fit,
+                "model_kind",
+                self._physical_model_kind(str(effect)),
+            )
+        return PlanetSignalExtractor(self, post_config).run(
+            time_np,
+            np.asarray(flux, dtype=float),
+            np.asarray(ferr, dtype=float),
+            initial_fit=selected_fit,
+            refit=False,
+            verbose=verbose,
+            prior_signal_windows=(),
+            freeze_baseline=False,
+            baseline_refit_fitter=spec.fitter,
+        )
+
+    def evaluate_saved_physical_solution(
+        self,
+        time,
+        flux,
+        ferr,
+        *,
+        effect: str,
+        params,
+        fs: Optional[float] = None,
+        fb: Optional[float] = None,
+    ) -> SingleLensFitResult:
+        """Reconstruct an accepted physical model without optimizing it."""
+        time_np = np.asarray(time, dtype=float)
+        spec = make_effect_fitter(
+            self.config,
+            str(effect),
+            float(np.median(time_np)),
+        )
+        if not hasattr(spec.fitter, "evaluate_fixed"):
+            raise TypeError(
+                f"The {effect} fitter cannot evaluate saved parameters."
+            )
+        seed = np.asarray(params, dtype=float).reshape(-1).copy()
+        if "logrho" in tuple(spec.raw_parameter_names):
+            rho_index = tuple(spec.raw_parameter_names).index("logrho")
+            seed[rho_index] = np.log(
+                max(abs(float(seed[rho_index])), 1.0e-12)
+            )
+        fit = spec.fitter.evaluate_fixed(
+            time_np,
+            np.asarray(flux, dtype=float),
+            np.asarray(ferr, dtype=float),
+            seed,
+        )
+        if fs is not None and fb is not None:
+            fitted_fs = float(np.asarray(fit.fs))
+            fitted_fb = float(np.asarray(fit.fb))
+            if not np.isfinite(fitted_fs) or abs(fitted_fs) <= 1.0e-30:
+                raise ValueError("Cannot reconstruct magnification from zero fs.")
+            magnification = (
+                np.asarray(fit.model_flux, dtype=float) - fitted_fb
+            ) / fitted_fs
+            model_flux = float(fs) * magnification + float(fb)
+            residual = np.asarray(flux, dtype=float) - model_flux
+            ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+            chi2 = float(np.sum((residual / ferr_np) ** 2))
+            fit = replace(
+                fit,
+                fs=float(fs),
+                fb=float(fb),
+                model_flux=model_flux,
+                residual=residual,
+                chi2=chi2,
+                chi2_dof=chi2 / max(
+                    time_np.size - int(spec.parameter_dimension),
+                    1,
+                ),
+            )
+        object.__setattr__(
+            fit,
+            "model_kind",
+            self._physical_model_kind(str(effect)),
+        )
+        return fit
 
     def run_template_free(
         self,

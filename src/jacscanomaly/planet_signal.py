@@ -121,6 +121,29 @@ class PlanetSignalConfig:
         values.update(overrides)
         return cls.fast(**values)
 
+    @classmethod
+    def post_physical(cls, *, max_refits: int = 3, **overrides) -> "PlanetSignalConfig":
+        """Return the bounded warm-start pass used after physical selection.
+
+        The expensive fallback has already selected a model family and a
+        viable nonlinear basin.  This pass therefore keeps one branch, masks
+        only the strongest localized residual component, and performs at most
+        ``max_refits`` continuation fits from the immediately preceding
+        physical solution.
+        """
+        values = {
+            "baseline_mode": "beam_interval",
+            "beam_max_iter": max(0, int(max_refits)),
+            "beam_width": 1,
+            "beam_candidates_per_iter": 1,
+            "beam_probe_only": False,
+            # A selected physical model must never be replaced by the
+            # extractor's emergency flat-baseline path.
+            "flat_baseline_on_masked_peak": False,
+        }
+        values.update(overrides)
+        return cls(**values)
+
 
 @dataclass(frozen=True)
 class PlanetSignalCandidate:
@@ -1102,6 +1125,7 @@ class PlanetSignalExtractor:
         initial_seed: Optional[BestCandidate] = None,
         freeze_baseline: bool = False,
         mask_protection: Optional[np.ndarray] = None,
+        baseline_refit_fitter=None,
     ) -> PlanetSignalResult:
         """
         Separate localized residual signal while refining a baseline fit.
@@ -1134,6 +1158,11 @@ class PlanetSignalExtractor:
             Samples that a cheap physical-effect diagnostic requires the
             single-lens-family fit to retain. These points cannot enter the
             planet mask, but remain present in the final residual search.
+        baseline_refit_fitter : object, optional
+            Explicit fitter for masked continuation fits. Physical fallback
+            uses this to preserve the accepted FSPL/parallax model family
+            instead of accidentally returning to the finder's original PSPL
+            fitter.
 
         Returns
         -------
@@ -1160,6 +1189,7 @@ class PlanetSignalExtractor:
             time, flux, ferr, x0
         )
         self.finder._ensure_fitter(float(np.median(time_np)))
+        self._baseline_refit_fitter = baseline_refit_fitter
         if mask_protection is None:
             self._mask_protection = None
         else:
@@ -1249,7 +1279,7 @@ class PlanetSignalExtractor:
                     flux_j=flux_j,
                     ferr_j=ferr_j,
                     keep_mask_np=~signal_mask,
-                    x0_j=self._raw_params_for_refit(current_fit),
+                    x0_j=self._seed_for_refit(current_fit),
                     model_kind=getattr(current_fit, "model_kind", None),
                 )
                 if (
@@ -1574,7 +1604,7 @@ class PlanetSignalExtractor:
                 flux_j=flux_j,
                 ferr_j=ferr_j,
                 keep_mask_np=~combined,
-                x0_j=self._raw_params_for_refit(current_fit),
+                x0_j=self._seed_for_refit(current_fit),
                 model_kind=getattr(current_fit, "model_kind", None),
             )
             new_unmasked_chi2_dof = self._masked_chi2_dof(candidate_fit, ~combined)
@@ -1731,7 +1761,7 @@ class PlanetSignalExtractor:
                 flux_j=flux_j,
                 ferr_j=ferr_j,
                 point_weight=point_weight,
-                x0_j=self._raw_params_for_refit(current_fit),
+                x0_j=self._seed_for_refit(current_fit),
                 model_kind=getattr(current_fit, "model_kind", None),
             )
             current_fit = candidate_fit
@@ -1842,10 +1872,12 @@ class PlanetSignalExtractor:
                             flux_j=flux_j,
                             ferr_j=ferr_j,
                             keep_mask_np=~combined,
-                            x0_j=self._raw_params_for_refit(branch.fit),
+                            x0_j=self._seed_for_refit(branch.fit),
                             model_kind=getattr(branch.fit, "model_kind", None),
                         )
                     except ValueError:
+                        continue
+                    if not self._continuation_fit_is_usable(candidate_fit):
                         continue
                     old_unmasked = self._masked_chi2_dof(branch.fit, ~combined)
                     new_unmasked = self._masked_chi2_dof(candidate_fit, ~combined)
@@ -1975,6 +2007,20 @@ class PlanetSignalExtractor:
         if not (np.isfinite(reference) and np.isfinite(candidate)):
             return False
         return candidate > max(reference * ratio, reference + 1.0)
+
+    @staticmethod
+    def _continuation_fit_is_usable(fit: SingleLensFitResult) -> bool:
+        """Reject a failed or boundary-hitting post-mask continuation fit."""
+        success = getattr(fit, "optimizer_success", None)
+        if success is False:
+            return False
+        diagnostics = getattr(fit, "diagnostics", None)
+        if diagnostics is not None and bool(
+            getattr(diagnostics, "parameter_at_bound", False)
+        ):
+            return False
+        params = np.asarray(fit.params, dtype=float)
+        return bool(np.all(np.isfinite(params)))
 
     def _beam_interval_masks_from_seed(
         self,
@@ -2428,8 +2474,10 @@ class PlanetSignalExtractor:
         mask_j = jnp.asarray(mask_np)
         return jnp.where(mask_j, jnp.asarray(0.0, residual_j.dtype), residual_j)
 
-    @staticmethod
-    def _raw_params_for_refit(fit: SingleLensFitResult) -> jnp.ndarray:
+    def _seed_for_refit(self, fit: SingleLensFitResult) -> jnp.ndarray:
+        fitter = getattr(self, "_baseline_refit_fitter", None)
+        if fitter is not None and hasattr(fitter, "seed_from_fit"):
+            return jnp.asarray(fitter.seed_from_fit(fit))
         raw = fit.raw_params
         if raw is not None:
             return jnp.asarray(raw)
@@ -2449,7 +2497,11 @@ class PlanetSignalExtractor:
             raise ValueError("Not enough unmasked points to refit single-lens model.")
 
         keep_j = jnp.asarray(keep_mask_np)
-        fitter = self.finder.fitter
+        fitter = (
+            self._baseline_refit_fitter
+            if getattr(self, "_baseline_refit_fitter", None) is not None
+            else self.finder.fitter
+        )
         if model_kind is not None and hasattr(fitter, "fit_fixed_model"):
             masked_fit = fitter.fit_fixed_model(
                 time_j[keep_j],
@@ -2460,6 +2512,8 @@ class PlanetSignalExtractor:
             )
         else:
             masked_fit = fitter.fit(time_j[keep_j], flux_j[keep_j], ferr_j[keep_j], x0_j)
+        if model_kind is not None and not hasattr(masked_fit, "model_kind"):
+            object.__setattr__(masked_fit, "model_kind", model_kind)
         return self._evaluate_single_lens_fit_on_full_data(
             time_j=time_j,
             flux_j=flux_j,
@@ -2481,7 +2535,11 @@ class PlanetSignalExtractor:
     ) -> SingleLensFitResult:
         weight_j = jnp.asarray(np.clip(point_weight, float(self.config.robust_min_weight), 1.0))
         ferr_eff_j = ferr_j / jnp.sqrt(weight_j)
-        fitter = self.finder.fitter
+        fitter = (
+            self._baseline_refit_fitter
+            if getattr(self, "_baseline_refit_fitter", None) is not None
+            else self.finder.fitter
+        )
         if model_kind is not None and hasattr(fitter, "fit_fixed_model"):
             weighted_fit = fitter.fit_fixed_model(
                 time_j,
@@ -2492,6 +2550,8 @@ class PlanetSignalExtractor:
             )
         else:
             weighted_fit = fitter.fit(time_j, flux_j, ferr_eff_j, x0_j)
+        if model_kind is not None and not hasattr(weighted_fit, "model_kind"):
+            object.__setattr__(weighted_fit, "model_kind", model_kind)
         return self._evaluate_single_lens_fit_on_full_data(
             time_j=time_j,
             flux_j=flux_j,
@@ -2692,6 +2752,9 @@ class PlanetSignalExtractor:
             residual=residual,
             raw_params=jnp.asarray(fit.raw_params, dtype=time_j.dtype) if fit.raw_params is not None else None,
             parallax_projector=getattr(fit, "parallax_projector", None),
+            optimizer_success=getattr(fit, "optimizer_success", None),
+            optimizer_status=getattr(fit, "optimizer_status", None),
+            diagnostics=getattr(fit, "diagnostics", None),
         )
         return evaluated
 
