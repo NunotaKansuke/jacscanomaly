@@ -15,6 +15,11 @@ from .models import BestCandidate
 from .plot import _adaptive_single_lens_curve, _single_lens_model_flux
 from .singlelens_fit import SingleLensFitResult
 
+try:
+    from . import _cpp_grid
+except ImportError:  # pragma: no cover - source-only development fallback
+    _cpp_grid = None
+
 
 @dataclass(frozen=True)
 class PlanetSignalConfig:
@@ -2279,27 +2284,45 @@ class PlanetSignalExtractor:
         else:
             eval_idx = valid_idx
 
-        # Transfer the candidate decisions only once.  The former per-grid
-        # loop performed several device_get calls for every one of the top-N
-        # candidates, which dominated the C++ grid evaluation itself.
-        is_unimodal = np.asarray(
-            jax.device_get(
-                self._scan_grids_are_unimodal(
-                    time_j=time_j,
-                    residual_j=residual_j,
-                    ferr_j=ferr_j,
-                    t0_j=jnp.asarray(metrics[eval_idx, 0], dtype=time_j.dtype),
-                    teff_j=jnp.asarray(metrics[eval_idx, 1], dtype=time_j.dtype),
+        # Grid evaluation is native C++; keep its post-filter native too.
+        # This avoids a per-worker XLA compilation solely to judge the
+        # one-lobe topology of at most ``top_n`` already-selected candidates.
+        if _cpp_grid is not None and hasattr(_cpp_grid, "unimodal_mask"):
+            is_unimodal = np.asarray(
+                _cpp_grid.unimodal_mask(
+                    time=np.asarray(jax.device_get(time_j), dtype=float),
+                    residual=np.asarray(jax.device_get(residual_j), dtype=float),
+                    ferr=np.asarray(jax.device_get(ferr_j), dtype=float),
+                    t0=np.asarray(metrics[eval_idx, 0], dtype=float),
+                    teff=np.asarray(metrics[eval_idx, 1], dtype=float),
                     teff_coeff=float(self.finder.config.teff_coeff),
                     min_pts=int(self.finder.config.min_pts_in_window),
                     min_improvement=float(self.config.scan_unimodal_min_improvement),
                     peak_frac=float(self.config.scan_unimodal_peak_frac),
                     smooth_points=int(self.config.scan_unimodal_smooth_points),
                     max_lobes=int(self.config.scan_unimodal_max_lobes),
-                )
-            ),
-            dtype=bool,
-        )
+                ),
+                dtype=bool,
+            )
+        else:
+            is_unimodal = np.asarray(
+                jax.device_get(
+                    self._scan_grids_are_unimodal(
+                        time_j=time_j,
+                        residual_j=residual_j,
+                        ferr_j=ferr_j,
+                        t0_j=jnp.asarray(metrics[eval_idx, 0], dtype=time_j.dtype),
+                        teff_j=jnp.asarray(metrics[eval_idx, 1], dtype=time_j.dtype),
+                        teff_coeff=float(self.finder.config.teff_coeff),
+                        min_pts=int(self.finder.config.min_pts_in_window),
+                        min_improvement=float(self.config.scan_unimodal_min_improvement),
+                        peak_frac=float(self.config.scan_unimodal_peak_frac),
+                        smooth_points=int(self.config.scan_unimodal_smooth_points),
+                        max_lobes=int(self.config.scan_unimodal_max_lobes),
+                    )
+                ),
+                dtype=bool,
+            )
         keep = np.zeros(metrics.shape[0], dtype=bool)
         keep[eval_idx] = is_unimodal
 
