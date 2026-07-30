@@ -1,4 +1,5 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -325,6 +326,48 @@ def test_beam_interval_stops_after_first_weak_scan(monkeypatch):
 
     assert len(calls) == 1
     assert not result.signal_mask.any()
+
+
+def test_default_beam_uses_three_adaptive_single_branch_iterations():
+    config = PlanetSignalConfig()
+
+    assert config.beam_max_iter == 3
+    assert config.beam_width == 1
+    assert config.beam_candidates_per_iter == 1
+
+
+def test_beam_rejects_a_new_pspl_u0_boundary_solution():
+    extractor = PlanetSignalExtractor(Finder())
+    reference = SimpleNamespace(
+        params=np.asarray([100.0, 2.0, 0.0047]),
+        model_kind="pspl",
+    )
+    candidate = SimpleNamespace(
+        params=np.asarray([100.0, 2.4, -1.0e-4]),
+        model_kind="pspl",
+    )
+
+    assert extractor._continuation_hit_new_pspl_u0_bound(
+        reference,
+        candidate,
+    )
+
+
+def test_beam_keeps_a_pspl_solution_that_started_near_the_u0_bound():
+    extractor = PlanetSignalExtractor(Finder())
+    reference = SimpleNamespace(
+        params=np.asarray([100.0, 2.0, 1.5e-4]),
+        model_kind="pspl",
+    )
+    candidate = SimpleNamespace(
+        params=np.asarray([100.0, 2.1, 1.0e-4]),
+        model_kind="pspl",
+    )
+
+    assert not extractor._continuation_hit_new_pspl_u0_bound(
+        reference,
+        candidate,
+    )
 
 
 def test_beam_interval_stops_when_no_interval_is_adopted(monkeypatch):

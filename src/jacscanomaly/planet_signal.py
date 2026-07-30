@@ -48,6 +48,10 @@ class PlanetSignalConfig:
     mask_smooth_leak_fraction: float = 0.03
     mask_sharp_fraction_threshold: float = 0.03
     mask_sharp_association_teff: float = 3.0
+    mask_halo_min_abs_z: float = 5.0
+    mask_halo_peak_frac: float = 0.03
+    mask_halo_max_teff: float = 2.0
+    mask_halo_max_gap_points: int = 2
     max_mask_fraction: float = 0.5
     max_signal_span_over_tE: float = 0.25
     min_signal_span: float = 0.0
@@ -66,8 +70,12 @@ class PlanetSignalConfig:
     signal_weight_threshold: float = 0.35
     signal_min_abs_z: float = 3.0
     beam_max_iter: int = 3
-    beam_width: int = 3
-    beam_candidates_per_iter: int = 8
+    # One continuation branch is enough for the survey path: every accepted
+    # refit is warm-started from the immediately preceding model, and the next
+    # scan can discover a disconnected residual component. Wider beams
+    # multiply both full-grid scans and LM fits.
+    beam_width: int = 1
+    beam_candidates_per_iter: int = 1
     beam_probe_only: bool = False
     beam_teff_factors: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 32.0)
     beam_min_half_width: float = 0.0
@@ -1110,6 +1118,11 @@ class PlanetSignalExtractor:
         init=False,
         repr=False,
     )
+    _time_cadence: float = field(
+        default=0.0,
+        init=False,
+        repr=False,
+    )
 
     def run(
         self,
@@ -1190,6 +1203,11 @@ class PlanetSignalExtractor:
         )
         self.finder._ensure_fitter(float(np.median(time_np)))
         self._baseline_refit_fitter = baseline_refit_fitter
+        positive_dt = np.diff(np.sort(time_np))
+        positive_dt = positive_dt[positive_dt > 0.0]
+        self._time_cadence = (
+            float(np.median(positive_dt)) if positive_dt.size else 0.0
+        )
         if mask_protection is None:
             self._mask_protection = None
         else:
@@ -1476,10 +1494,7 @@ class PlanetSignalExtractor:
             peak_index = int(indices[np.argmax(values[indices])])
             groups = [np.asarray([peak_index], dtype=int)]
 
-        positive_dt = np.diff(time)
-        positive_dt = positive_dt[positive_dt > 0.0]
-        cadence = float(np.median(positive_dt)) if positive_dt.size else 0.0
-        padding = max(float(pad), cadence)
+        padding = max(float(pad), float(self._time_cadence))
         for group in groups:
             lo = float(time[int(group[0])]) - padding
             hi = float(time[int(group[-1])]) + padding
@@ -1494,6 +1509,89 @@ class PlanetSignalExtractor:
         if np.asarray(protection).size != out.size:
             raise ValueError("Internal mask protection does not match time.")
         return out & ~np.asarray(protection, dtype=bool)
+
+    def _grow_sign_coherent_halo(
+        self,
+        *,
+        time: np.ndarray,
+        z: np.ndarray,
+        core: np.ndarray,
+        window: np.ndarray,
+        max_distance: float,
+    ) -> np.ndarray:
+        """Grow confirmed sharp cores into their lower-significance wings.
+
+        Growth is local, sign coherent, and distance capped. It therefore
+        captures caustic wings that a high fractional threshold trims away
+        without turning a smooth broad single-lens mismatch into a mask.
+        """
+        t = np.asarray(time, dtype=float)
+        signed = np.asarray(z, dtype=float)
+        allowed = np.asarray(window, dtype=bool)
+        out = np.asarray(core, dtype=bool).copy()
+        indices = np.flatnonzero(out)
+        if indices.size == 0:
+            return out
+        breaks = np.flatnonzero(np.diff(indices) > 1)
+        starts = np.r_[0, breaks + 1]
+        ends = np.r_[breaks + 1, indices.size]
+        distance_cap = max(float(max_distance), float(self._time_cadence))
+        max_gaps = max(int(self.config.mask_halo_max_gap_points), 0)
+
+        for start, end in zip(starts, ends):
+            component = indices[int(start) : int(end)]
+            values = signed[component]
+            finite = np.isfinite(values)
+            if not np.any(finite):
+                continue
+            peak = float(np.max(np.abs(values[finite])))
+            minimum = float(self.config.mask_halo_min_abs_z)
+            # Only a decisively detected sharp core may seed halo growth.
+            if peak < 2.0 * minimum:
+                continue
+            direction = float(np.sign(np.sum(values[finite])))
+            if direction == 0.0:
+                continue
+            threshold = max(
+                minimum,
+                float(self.config.mask_halo_peak_frac) * peak,
+            )
+            component_lo = float(t[int(component[0])])
+            component_hi = float(t[int(component[-1])])
+
+            for step in (-1, 1):
+                cursor = int(component[0] if step < 0 else component[-1])
+                pending: list[int] = []
+                gaps = 0
+                while True:
+                    cursor += step
+                    if cursor < 0 or cursor >= t.size or not allowed[cursor]:
+                        break
+                    distance = (
+                        component_lo - float(t[cursor])
+                        if step < 0
+                        else float(t[cursor]) - component_hi
+                    )
+                    if distance > distance_cap:
+                        break
+                    value = float(signed[cursor])
+                    coherent = bool(
+                        np.isfinite(value)
+                        and direction * value > 0.0
+                        and abs(value) >= threshold
+                    )
+                    if coherent:
+                        for index in pending:
+                            out[index] = True
+                        pending.clear()
+                        out[cursor] = True
+                        gaps = 0
+                    else:
+                        pending.append(cursor)
+                        gaps += 1
+                        if gaps > max_gaps:
+                            break
+        return self._exclude_mask_protection(out)
 
     def _binned_mask_structure(
         self,
@@ -1879,6 +1977,11 @@ class PlanetSignalExtractor:
                         continue
                     if not self._continuation_fit_is_usable(candidate_fit):
                         continue
+                    if self._continuation_hit_new_pspl_u0_bound(
+                        branch.fit,
+                        candidate_fit,
+                    ):
+                        continue
                     old_unmasked = self._masked_chi2_dof(branch.fit, ~combined)
                     new_unmasked = self._masked_chi2_dof(candidate_fit, ~combined)
                     allowed = old_unmasked * (1.0 + float(self.config.max_unmasked_chi2_dof_increase))
@@ -2022,6 +2125,32 @@ class PlanetSignalExtractor:
         params = np.asarray(fit.params, dtype=float)
         return bool(np.all(np.isfinite(params)))
 
+    def _continuation_hit_new_pspl_u0_bound(
+        self,
+        reference_fit: SingleLensFitResult,
+        candidate_fit: SingleLensFitResult,
+    ) -> bool:
+        """Reject a mask-induced jump onto the PSPL ``u0`` lower bound.
+
+        A genuinely extreme high-magnification solution can start at the
+        bound and is left alone. The dangerous case begins well inside the
+        domain, removes peak samples, and then collapses onto the bound.
+        """
+        if str(getattr(candidate_fit, "model_kind", "pspl")).lower() != "pspl":
+            return False
+        reference = np.asarray(reference_fit.params, dtype=float).reshape(-1)
+        candidate = np.asarray(candidate_fit.params, dtype=float).reshape(-1)
+        if reference.size < 3 or candidate.size < 3:
+            return False
+        lower = max(
+            float(getattr(self.finder.config, "pspl_fit_u0_min", 1.0e-4)),
+            1.0e-12,
+        )
+        return bool(
+            abs(float(reference[2])) > 2.0 * lower
+            and abs(float(candidate[2])) <= lower * (1.0 + 1.0e-6)
+        )
+
     def _beam_interval_masks_from_seed(
         self,
         *,
@@ -2111,7 +2240,7 @@ class PlanetSignalExtractor:
         unique: list[np.ndarray] = []
         seen: set[bytes] = set()
         for mask in masks:
-            mask = self._cap_signal_interval(
+            proposal = self._cap_signal_interval(
                 time_np,
                 mask,
                 center=float(seed.t0),
@@ -2120,7 +2249,7 @@ class PlanetSignalExtractor:
             mask = self._coherent_residual_core_mask(
                 time=time_np,
                 abs_z=abs_z,
-                window=mask,
+                window=proposal,
                 pad=min(
                     float(self.config.mask_core_pad_teff)
                     * abs(float(seed.teff)),
@@ -2130,6 +2259,17 @@ class PlanetSignalExtractor:
                 ),
                 structure_abs_z=structure_abs_z,
             )
+            if structure_abs_z is not None and np.any(mask):
+                mask = self._grow_sign_coherent_halo(
+                    time=time_np,
+                    z=z,
+                    core=mask,
+                    window=proposal,
+                    max_distance=(
+                        float(self.config.mask_halo_max_teff)
+                        * abs(float(seed.teff))
+                    ),
+                )
             mask &= ~current_mask
             if not np.any(mask):
                 continue

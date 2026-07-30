@@ -92,3 +92,30 @@ def test_physical_diagnostic_support_cannot_enter_planet_mask():
     )
 
     assert not np.any(mask & protection)
+
+
+def test_sign_coherent_halo_recovers_caustic_wings_without_crossing_sign():
+    time = np.linspace(-0.2, 0.2, 81)
+    z = 40.0 * np.exp(-0.5 * (time / 0.045) ** 2)
+    z[time > 0.11] = -12.0
+    core = np.abs(time) <= 0.015
+    extractor = PlanetSignalExtractor(
+        Finder(FinderConfig()),
+        PlanetSignalConfig(
+            mask_halo_min_abs_z=5.0,
+            mask_halo_peak_frac=0.1,
+            mask_halo_max_gap_points=1,
+        ),
+    )
+    extractor._time_cadence = float(np.median(np.diff(time)))
+
+    grown = extractor._grow_sign_coherent_halo(
+        time=time,
+        z=z,
+        core=core,
+        window=np.ones(time.size, dtype=bool),
+        max_distance=0.15,
+    )
+
+    assert np.any(grown & (np.abs(time) > 0.05))
+    assert not np.any(grown & (time > 0.11))

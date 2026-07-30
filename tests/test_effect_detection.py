@@ -6,6 +6,7 @@ import json
 
 from jacscanomaly.effect_detection import (
     EffectCandidate,
+    _fspl_sparse_high_snr_topology,
     _fspl_signed_topology,
     _pspl_nuisance_and_parallax_jacobians,
     _projected_score,
@@ -540,6 +541,40 @@ def test_fspl_topology_does_not_accept_a_compact_planet_dip():
 
     assert not topology["valid"]
     assert not topology["partial"]
+
+
+def test_sparse_high_snr_fspl_topology_accepts_two_symmetric_samples_per_region():
+    topology = {
+        "core_mean_z": -1032.0,
+        "left_shoulder_mean_z": 48.0,
+        "right_shoulder_mean_z": 36.0,
+        "core_points": 2,
+        "left_shoulder_points": 2,
+        "right_shoulder_points": 2,
+    }
+
+    assert _fspl_sparse_high_snr_topology(
+        topology,
+        symmetry=0.9503,
+        template_explained_fraction=0.327,
+    )
+
+
+def test_sparse_high_snr_fspl_topology_rejects_a_one_sign_compact_dip():
+    topology = {
+        "core_mean_z": -100.0,
+        "left_shoulder_mean_z": 8.0,
+        "right_shoulder_mean_z": -4.0,
+        "core_points": 2,
+        "left_shoulder_points": 2,
+        "right_shoulder_points": 2,
+    }
+
+    assert not _fspl_sparse_high_snr_topology(
+        topology,
+        symmetry=0.99,
+        template_explained_fraction=0.8,
+    )
 
 
 def test_fspl_topology_marks_one_sided_observation_for_exact_comparison():

@@ -569,6 +569,32 @@ def _fspl_signed_topology(
     }
 
 
+def _fspl_sparse_high_snr_topology(
+    topology: dict[str, float | int | bool],
+    *,
+    symmetry: float,
+    template_explained_fraction: float,
+) -> bool:
+    """Accept a sparsely sampled but unambiguous signed FSPL peak."""
+    shoulder_values = np.asarray(
+        [
+            topology.get("left_shoulder_mean_z", np.nan),
+            topology.get("right_shoulder_mean_z", np.nan),
+        ],
+        dtype=float,
+    )
+    return bool(
+        symmetry >= 0.95
+        and template_explained_fraction >= 0.20
+        and int(topology.get("core_points", 0)) >= 2
+        and int(topology.get("left_shoulder_points", 0)) >= 2
+        and int(topology.get("right_shoulder_points", 0)) >= 2
+        and float(topology.get("core_mean_z", 0.0)) <= -5.0
+        and np.all(np.isfinite(shoulder_values))
+        and np.all(shoulder_values >= 3.0)
+    )
+
+
 def _candidate_from_template(
     *,
     effect: str,
@@ -671,17 +697,28 @@ def _candidate_from_template(
             full.score
             / max(full.score + full.unmatched_energy, 1.0e-30)
         )
-        fspl_shape_ok = bool(
-            symmetry >= 0.95
-            and template_explained_fraction >= 0.20
-            and topology["valid"]
-        )
         shoulder_values = np.asarray(
             [
                 topology.get("left_shoulder_mean_z", np.nan),
                 topology.get("right_shoulder_mean_z", np.nan),
             ],
             dtype=float,
+        )
+        # Roman can resolve an extremely narrow finite-source crossing with
+        # only two samples in each signed region. Requiring four samples then
+        # turns the canonical central-dip/two-positive-shoulder topology into
+        # a compact "planet" block. Keep this exception deliberately strict:
+        # both shoulders must be independently significant, the central dip
+        # strong, and the full peak highly symmetric.
+        sparse_high_snr_topology = _fspl_sparse_high_snr_topology(
+            topology,
+            symmetry=symmetry,
+            template_explained_fraction=template_explained_fraction,
+        )
+        fspl_shape_ok = bool(
+            symmetry >= 0.95
+            and template_explained_fraction >= 0.20
+            and (topology["valid"] or sparse_high_snr_topology)
         )
         fspl_flattened_peak = bool(
             symmetry >= 0.95
@@ -705,8 +742,11 @@ def _candidate_from_template(
                 "signed_template_coefficient": float(full.coefficient),
                 **topology,
                 "valid": fspl_shape_ok or fspl_flattened_peak,
+                "sparse_high_snr": sparse_high_snr_topology,
                 "reason": (
-                    "central_dip_with_two_shoulders"
+                    "sparse_high_snr_central_dip_with_two_shoulders"
+                    if sparse_high_snr_topology
+                    else "central_dip_with_two_shoulders"
                     if fspl_shape_ok
                     else "symmetric_flattened_peak"
                     if fspl_flattened_peak
