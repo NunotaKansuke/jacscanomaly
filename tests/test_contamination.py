@@ -217,7 +217,7 @@ def test_fallback_rejects_fit_that_only_improves_the_planet_interval(monkeypatch
     assert "non_planet_region_bic_not_improved" in result.reason_codes
 
 
-def test_partial_fspl_signed_topology_can_override_clean_region_guard(monkeypatch):
+def test_partial_fspl_signed_topology_cannot_override_clean_region_bic(monkeypatch):
     import jacscanomaly.singlelens_fallback as fallback_module
 
     time = np.arange(20.0)
@@ -293,9 +293,9 @@ def test_partial_fspl_signed_topology_can_override_clean_region_guard(monkeypatc
         effect_score_fn=lambda fit, *_: 100.0 if fit is baseline else 1.0,
     )
 
-    assert result.success
+    assert not result.success
     assert "non_planet_region_bic_not_improved" in result.reason_codes
-    assert "partial_fspl_topology_overrides_clean_region_guard" in result.reason_codes
+    assert "fallback_acceptance_failed" in result.reason_codes
 
 
 def test_clear_fspl_topology_can_override_segmenter_oscillation(monkeypatch):
@@ -423,7 +423,7 @@ def test_overwhelming_reproduced_parallax_can_override_support_guard(monkeypatch
     assert "overwhelming_parallax_evidence_overrides_support_guard" in result.reason_codes
 
 
-def test_fallback_rejects_small_fractional_gain_on_globally_bad_fit(monkeypatch):
+def test_fallback_accepts_bic_gain_even_when_global_reduced_chi2_is_bad(monkeypatch):
     import jacscanomaly.singlelens_fallback as fallback_module
 
     time = np.arange(200.0)
@@ -476,8 +476,9 @@ def test_fallback_rejects_small_fractional_gain_on_globally_bad_fit(monkeypatch)
         ),
     )
 
-    assert not result.success
+    assert result.success
     assert "global_fit_improvement_insufficient" in result.reason_codes
+    assert "accepted_by_postfit_validity_and_bic" in result.reason_codes
 
 
 def test_protected_support_is_soft_and_keeps_regularization_finite():
@@ -926,6 +927,88 @@ def test_staged_fallback_keeps_viable_stage_when_joint_ephemeris_is_unavailable(
     assert result.success
     assert result.effect == "fspl"
     assert "accepted_single_effect_stage" in result.reason_codes
+
+
+def test_staged_fallback_selects_lower_order_model_when_joint_bic_is_worse(
+    monkeypatch,
+):
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    dimensions = {
+        "fspl": 4,
+        "annual_parallax": 5,
+        "space_parallax": 5,
+        "fspl_space_parallax": 6,
+    }
+    selected_bics = {
+        "fspl": 71_550.0,
+        "annual_parallax": 40_357.0,
+        "space_parallax": 40_341.0,
+        "fspl_space_parallax": 40_350.0,
+    }
+
+    def fake_factory(config, effect, tref):
+        dimension = dimensions[effect]
+        return EffectFitterSpec(
+            effect=effect,
+            fitter=object(),
+            parameter_dimension=dimension,
+            parameter_names=tuple(f"p{i}" for i in range(dimension)),
+            raw_parameter_names=tuple(f"p{i}" for i in range(dimension)),
+            backend="synthetic",
+            convention="synthetic",
+        )
+
+    def fake_run(*args, **kwargs):
+        effect = kwargs["effect"]
+        dimension = dimensions[effect]
+        fit = SimpleNamespace(
+            params=np.zeros(dimension),
+            chi2=selected_bics[effect],
+        )
+        return FallbackResult(
+            fit=fit,
+            initial_fit=fit,
+            effect=effect,
+            attempts=(),
+            selected_seed=np.zeros(dimension),
+            success=True,
+            reason_codes=("accepted_by_postfit_validity_and_bic",),
+            selected_original_chi2=selected_bics[effect],
+            selected_bic=selected_bics[effect],
+            numerically_valid=True,
+        )
+
+    monkeypatch.setattr(fallback_module, "make_effect_fitter", fake_factory)
+    monkeypatch.setattr(fallback_module, "run_robust_fallback", fake_run)
+    candidates = tuple(
+        EffectCandidate(
+            effect=effect,
+            score=100.0,
+            score_without_compact_blocks=100.0,
+            effective_rank=1,
+            condition_number=1.0,
+            coverage=1.0,
+            max_point_influence=0.0,
+            max_block_influence=0.0,
+            subset_stability=1.0,
+        )
+        for effect in ("fspl", "annual_parallax", "space_parallax")
+    )
+
+    result = run_staged_joint_fallback(
+        FinderConfig(),
+        np.arange(20.0),
+        np.ones(20),
+        np.ones(20),
+        [0.0, 10.0, 0.1],
+        candidates=candidates,
+        effect="fspl_space_parallax",
+    )
+
+    assert result.effect == "space_parallax"
+    assert "selected_by_hierarchical_bic" in result.reason_codes
+    assert "accepted_lower_order_model" in result.reason_codes
 
 
 def test_staged_joint_synthetic_regression_preserves_each_stage_seed(monkeypatch):

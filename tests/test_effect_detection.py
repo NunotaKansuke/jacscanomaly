@@ -434,6 +434,32 @@ def test_short_event_parallax_needs_exact_comparison_even_with_coherent_wings():
     assert "short_event_parallax_requires_model_comparison" in routed.reason_codes
 
 
+def test_low_score_coherent_long_parallax_gets_a_bounded_fit_rescue():
+    candidate = EffectCandidate(
+        effect="annual_parallax",
+        score=5.2,
+        score_without_compact_blocks=4.1,
+        effective_rank=2,
+        condition_number=10.0,
+        coverage=0.8,
+        max_point_influence=0.1,
+        max_block_influence=0.2,
+        subset_stability=0.1,
+        seed_parameters=np.asarray([0.0, 22.7, 0.02]),
+        morphology="parallax_coherent_wings",
+        score_without_planet=0.8,
+        reason_codes=("planet_morphology_dominated",),
+    )
+
+    routed = route_candidate(candidate)
+
+    assert routed.decision == "exact_probe"
+    assert (
+        "coherent_long_parallax_low_score_rescue"
+        in routed.reason_codes
+    )
+
+
 def test_coherent_parallax_wings_cannot_bypass_planet_mask_conflict():
     candidate = EffectCandidate(
         effect="annual_parallax",

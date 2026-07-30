@@ -36,7 +36,7 @@ class FallbackConfig:
     t_star_factors: tuple[float, ...] = (0.6, 1.0, 1.6)
     t0_offsets: tuple[float, ...] = (-0.25, 0.0, 0.25)
     max_piE: Optional[float] = None
-    min_bic_improvement: float = 10.0
+    min_bic_improvement: float = 0.0
     min_coherent_parallax_tE: float = 20.0
 
 
@@ -73,6 +73,10 @@ class FallbackResult:
     selected_robust_objective: float = float("inf")
     baseline_effect_score: Optional[float] = None
     selected_effect_score: Optional[float] = None
+    baseline_bic: float = float("inf")
+    selected_bic: float = float("inf")
+    bic_improvement: float = float("-inf")
+    numerically_valid: bool = False
     model_spec: Optional[dict[str, object]] = None
     stage_results: tuple["FallbackResult", ...] = ()
 
@@ -544,6 +548,7 @@ def run_robust_fallback(
     fe = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
     attempts: list[FallbackAttempt] = []
     errors: list[str] = []
+    known = None
     initial_standardized_residual = None
     if baseline_fit is not None and hasattr(baseline_fit, "residual"):
         baseline_residual = np.asarray(baseline_fit.residual, dtype=float).reshape(-1)
@@ -637,7 +642,42 @@ def run_robust_fallback(
     if not attempts:
         detail = errors[0] if errors else "no valid seeds"
         raise RuntimeError(f"All robust fallback seeds failed: {detail}")
-    attempts.sort(key=lambda attempt: (not attempt.stable, attempt.robust_objective, attempt.original_chi2))
+
+    selection_keep = (
+        ~known
+        if known is not None and np.any(known)
+        else np.ones(t.size, dtype=bool)
+    )
+
+    def selection_chi2(attempt: FallbackAttempt) -> float:
+        if known is None or not np.any(known):
+            return float(attempt.original_chi2)
+        residual = np.asarray(
+            getattr(attempt.result.fit, "residual", ()),
+            dtype=float,
+        ).reshape(-1)
+        if (
+            residual.size == t.size
+            and np.count_nonzero(selection_keep) > 0
+            and np.all(np.isfinite(residual[selection_keep]))
+        ):
+            return float(
+                np.sum(
+                    np.square(
+                        residual[selection_keep] / fe[selection_keep]
+                    )
+                )
+            )
+        return float(attempt.original_chi2)
+
+    attempts.sort(
+        key=lambda attempt: (
+            not attempt.optimizer_success,
+            attempt.parameter_at_bound,
+            selection_chi2(attempt),
+            attempt.original_chi2,
+        )
+    )
     converged = [
         attempt for attempt in attempts
         if (
@@ -648,8 +688,24 @@ def run_robust_fallback(
             and np.isfinite(attempt.robust_objective)
         )
     ]
-    ranked = converged if converged else attempts
-    ranked.sort(key=lambda attempt: (attempt.robust_objective, attempt.original_chi2))
+    valid_attempts = [
+        attempt
+        for attempt in attempts
+        if (
+            attempt.optimizer_success
+            and not attempt.parameter_at_bound
+            and np.isfinite(attempt.original_chi2)
+            and np.all(np.isfinite(_fit_raw_parameters(attempt.result.fit)))
+        )
+    ]
+    ranked = valid_attempts if valid_attempts else attempts
+    ranked.sort(
+        key=lambda attempt: (
+            selection_chi2(attempt),
+            attempt.original_chi2,
+            attempt.robust_objective,
+        )
+    )
     best = ranked[0]
     reasons = ["robust_fallback_completed"]
     if not best.stable:
@@ -750,22 +806,46 @@ def run_robust_fallback(
         np.asarray(getattr(best.result.fit, "params", ())).size
     )
     n_data = max(int(t.size), 1)
+    n_selection = max(int(np.count_nonzero(selection_keep)), 1)
     delta_chi2 = baseline_original_chi2 - best.original_chi2
-    bic_improvement = float(
-        delta_chi2
-        - max(selected_dimension - baseline_dimension, 0) * np.log(n_data)
+    baseline_selection_chi2 = baseline_original_chi2
+    if baseline_fit is not None and known is not None and np.any(known):
+        baseline_residual_for_selection = np.asarray(
+            getattr(baseline_fit, "residual", ()),
+            dtype=float,
+        ).reshape(-1)
+        if (
+            baseline_residual_for_selection.size == t.size
+            and np.all(
+                np.isfinite(
+                    baseline_residual_for_selection[selection_keep]
+                )
+            )
+        ):
+            baseline_selection_chi2 = float(
+                np.sum(
+                    np.square(
+                        baseline_residual_for_selection[selection_keep]
+                        / fe[selection_keep]
+                    )
+                )
+            )
+    selected_selection_chi2 = selection_chi2(best)
+    baseline_bic = float(
+        baseline_selection_chi2
+        + baseline_dimension * np.log(n_selection)
     )
+    selected_bic = float(
+        selected_selection_chi2
+        + selected_dimension * np.log(n_selection)
+    )
+    bic_improvement = float(baseline_bic - selected_bic)
     model_selection_improved = bool(
         np.isfinite(bic_improvement)
-        and bic_improvement >= float(config.min_bic_improvement)
+        and bic_improvement > float(config.min_bic_improvement)
     )
     clean_region_improved = True
-    known = (
-        None
-        if known_anomaly_mask is None
-        else np.asarray(known_anomaly_mask, dtype=bool).reshape(-1)
-    )
-    if known is not None and np.any(known) and not clear_fspl_morphology:
+    if known is not None and np.any(known):
         baseline_residual = np.asarray(
             getattr(baseline_fit, "residual", np.full(t.size, np.nan)),
             dtype=float,
@@ -797,24 +877,19 @@ def run_robust_fallback(
             clean_region_improved = bool(
                 np.isfinite(clean_bic_improvement)
                 and clean_bic_improvement
-                >= float(config.min_bic_improvement)
+                > float(config.min_bic_improvement)
             )
         # Once a localized planet interval has been established, the adopted
         # single-lens family must be selected on the complementary data. A
         # correct physical model intentionally leaves the planet in its
         # full-cadence residual and can therefore have a worse all-point chi2
         # than a biased PSPL that partially absorbs that planet.
-        if not supported_partial_fspl_morphology:
-            model_selection_improved = clean_region_improved
+        model_selection_improved = clean_region_improved
     if not model_selection_improved:
         reasons.append("original_bic_not_improved")
     if not clean_region_improved:
         reasons.append("non_planet_region_bic_not_improved")
-    clean_region_acceptable = bool(
-        clean_region_improved or supported_partial_fspl_morphology
-    )
-    if supported_partial_fspl_morphology and not clean_region_improved:
-        reasons.append("partial_fspl_topology_overrides_clean_region_guard")
+    clean_region_acceptable = bool(clean_region_improved)
 
     baseline_score = None
     selected_score = None
@@ -1026,12 +1101,33 @@ def run_robust_fallback(
         and model_topology_acceptable
         and parallax_duration_acceptable
     )
-    success = bool(
+    diagnostic_acceptance = bool(
         strict_acceptance
         or clear_fspl_topology_acceptance
         or overwhelming_parallax_acceptance
         or known_planet_parallax_acceptance
     )
+    numerically_valid = bool(
+        best.optimizer_success
+        and not best.parameter_at_bound
+        and np.isfinite(best.original_chi2)
+        and np.all(np.isfinite(_fit_raw_parameters(best.result.fit)))
+    )
+    # Physical diagnostics decide whether this expensive fit should run.
+    # Once it has run, selection is deliberately model-based: retain every
+    # numerically valid, non-boundary solution whose BIC improves on its
+    # parent baseline. Morphology, segmentation convergence, and independent
+    # basin reproduction remain recorded diagnostics, but no longer veto a
+    # better single-lens model.
+    success = bool(
+        numerically_valid
+        and model_selection_improved
+        and clean_region_acceptable
+    )
+    if success:
+        reasons.append("accepted_by_postfit_validity_and_bic")
+        if not diagnostic_acceptance:
+            reasons.append("diagnostic_warnings_do_not_veto_postfit_model")
     if not success:
         reasons.append("fallback_acceptance_failed")
     return FallbackResult(
@@ -1047,6 +1143,10 @@ def run_robust_fallback(
         selected_robust_objective=best.robust_objective,
         baseline_effect_score=baseline_score,
         selected_effect_score=selected_score,
+        baseline_bic=baseline_bic,
+        selected_bic=selected_bic,
+        bic_improvement=bic_improvement,
+        numerically_valid=numerically_valid,
         model_spec=None if model_spec is None else {
             "effect": model_spec.effect,
             "parameter_dimension": model_spec.parameter_dimension,
@@ -1146,33 +1246,51 @@ def run_staged_joint_fallback(
             f"{effect}:{type(exc).__name__}:{exc}"
         )
         joint_result = None
-    if joint_result is not None and joint_result.success:
-        return replace(joint_result, stage_results=tuple(stage_results))
-
     # A mixed detector decision does not prove that both effects are present.
-    # If the joint model is unstable, retain the strongest independently
-    # accepted physical stage instead of rejecting a valid parallax/FSPL
-    # correction or letting the extra component absorb a planet block.
-    successful_stages = [result for result in stage_results if result.success]
-    if successful_stages:
-        selected_stage = min(
-            successful_stages,
+    # Compare every numerically valid, PSPL-improving model on the same
+    # selection data and retain the lowest BIC. This naturally falls back to
+    # FSPL/parallax when the joint component does not earn its extra
+    # parameter.
+    successful_models = [
+        result
+        for result in (
+            *stage_results,
+            *((joint_result,) if joint_result is not None else ()),
+        )
+        if result.success
+    ]
+    if successful_models:
+        selected_model = min(
+            successful_models,
             key=lambda result: (
+                result.selected_bic
+                if np.isfinite(result.selected_bic)
+                else float("inf"),
                 result.selected_original_chi2,
                 result.selected_robust_objective,
             ),
         )
+        selected_joint = bool(selected_model is joint_result)
         reasons = tuple(
             dict.fromkeys(
                 (
-                    *selected_stage.reason_codes,
-                    "joint_fallback_rejected",
-                    "accepted_single_effect_stage",
+                    *selected_model.reason_codes,
+                    "selected_by_hierarchical_bic",
+                    *(
+                        ()
+                        if selected_joint
+                        else (
+                            "joint_model_not_preferred_by_bic",
+                            "accepted_lower_order_model",
+                            # Backward-compatible provenance label.
+                            "accepted_single_effect_stage",
+                        )
+                    ),
                 )
             )
         )
         return replace(
-            selected_stage,
+            selected_model,
             reason_codes=reasons,
             stage_results=tuple(stage_results),
         )

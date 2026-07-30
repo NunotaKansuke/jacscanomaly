@@ -30,6 +30,7 @@ class RoutingThresholds:
     min_planet_mask_retention: float = 0.50
     max_planet_overlap: float = 0.35
     min_parallax_fallback_tE: float = 20.0
+    coherent_parallax_rescue_score: float = 4.0
     allow_rank_deficient_exact_probe: bool = True
     exact_probe_available: bool = False
 
@@ -134,12 +135,28 @@ def route_candidate(
         np.isfinite(parallax_tE)
         and parallax_tE < thresholds.min_parallax_fallback_tE
     )
+    coherent_parallax_rescue = bool(
+        "parallax" in candidate.effect
+        and candidate.morphology == "parallax_coherent_wings"
+        and np.isfinite(parallax_tE)
+        and parallax_tE >= thresholds.min_parallax_fallback_tE
+        and score >= thresholds.coherent_parallax_rescue_score
+    )
     if planet_dominated:
         decision = "planet"
         reasons.append("routed_as_planet_anomaly")
-    elif score < thresholds.exact_probe_score and robust_score < thresholds.exact_probe_score:
+    elif (
+        score < thresholds.exact_probe_score
+        and robust_score < thresholds.exact_probe_score
+        and not coherent_parallax_rescue
+    ):
         decision = "skip"
         reasons.append("score_below_exact_probe")
+    elif coherent_parallax_rescue and score < thresholds.exact_probe_score:
+        decision = "exact_probe"
+        reasons.append("coherent_long_parallax_low_score_rescue")
+        if not thresholds.exact_probe_available:
+            reasons.append("exact_probe_unavailable")
     elif (
         compact_dominated
         and not clear_physical_morphology
