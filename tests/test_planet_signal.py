@@ -252,7 +252,14 @@ def test_planet_signal_extractor_keeps_beam_intervals_compact_relative_to_tE():
     result = extractor.run(time, flux, ferr, x0=params, refit=False)
 
     assert result.best is not None
-    assert result.best.t_start < 10.9 < result.best.t_end
+    assert any(
+        candidate.t_start < 8.9 < candidate.t_end
+        for candidate in result.candidates
+    )
+    assert any(
+        candidate.t_start < 10.9 < candidate.t_end
+        for candidate in result.candidates
+    )
     assert all(
         candidate.t_end - candidate.t_start
         <= 0.25 * abs(float(result.refined_fit.params[1]))
@@ -261,7 +268,7 @@ def test_planet_signal_extractor_keeps_beam_intervals_compact_relative_to_tE():
     assert not np.all(result.signal_mask[(time > 9.4) & (time < 10.4)])
 
 
-def test_prior_signal_window_is_capped_relative_to_adopted_tE(monkeypatch):
+def test_prior_signal_window_does_not_mask_a_broad_smooth_residual(monkeypatch):
     time = np.linspace(0.0, 20.0, 401)
     params = np.array([10.0, 4.0, 0.2])
     baseline_flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
@@ -294,9 +301,7 @@ def test_prior_signal_window_is_capped_relative_to_adopted_tE(monkeypatch):
         prior_signal_windows=((10.0, 8.0),),
     )
 
-    masked_time = time[result.signal_mask]
-    assert masked_time.size > 0
-    assert masked_time[-1] - masked_time[0] <= 0.25 * abs(float(fit.params[1]))
+    assert not np.any(result.signal_mask)
 
 
 def test_beam_interval_stops_after_first_weak_scan(monkeypatch):

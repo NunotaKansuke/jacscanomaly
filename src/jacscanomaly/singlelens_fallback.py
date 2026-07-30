@@ -799,6 +799,13 @@ def run_robust_fallback(
                 and clean_bic_improvement
                 >= float(config.min_bic_improvement)
             )
+        # Once a localized planet interval has been established, the adopted
+        # single-lens family must be selected on the complementary data. A
+        # correct physical model intentionally leaves the planet in its
+        # full-cadence residual and can therefore have a worse all-point chi2
+        # than a biased PSPL that partially absorbs that planet.
+        if not supported_partial_fspl_morphology:
+            model_selection_improved = clean_region_improved
     if not model_selection_improved:
         reasons.append("original_bic_not_improved")
     if not clean_region_improved:
@@ -933,6 +940,28 @@ def run_robust_fallback(
             for candidate in candidate_tuple
         )
     )
+    known_planet_parallax_acceptance = bool(
+        "parallax" in str(effect)
+        and known is not None
+        and np.any(known)
+        and independently_supported_long_parallax
+        and score_ratio <= 1.0e-2
+        and best.stable
+        and best.optimizer_success
+        and not best.parameter_at_bound
+        and support_identifiable
+        and model_selection_improved
+        and clean_region_acceptable
+    )
+    if known_planet_parallax_acceptance and not (
+        best.result.converged
+        and len(converged) >= 2
+        and best.result.segmentation_stable
+        and basin_reproduced
+    ):
+        reasons.append(
+            "known_planet_parallax_evidence_overrides_contamination_stability"
+        )
     global_fit_acceptable = bool(
         selected_reduced_chi2 <= 2.0
         or fractional_chi2_improvement >= 0.5
@@ -1001,6 +1030,7 @@ def run_robust_fallback(
         strict_acceptance
         or clear_fspl_topology_acceptance
         or overwhelming_parallax_acceptance
+        or known_planet_parallax_acceptance
     )
     if not success:
         reasons.append("fallback_acceptance_failed")

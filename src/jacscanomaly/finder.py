@@ -46,6 +46,7 @@ from .singlelens_fallback import (
 from .exact_probe import run_exact_probe
 from .effect_aware import EffectAwareFinderResult, match_planet_candidates
 from .parallax_backend import native_parallax_effect_score
+from .contamination import protected_support_mask
 
 if TYPE_CHECKING:
     from .planet_signal import PlanetSignalConfig
@@ -798,14 +799,27 @@ class Finder:
         # This entry point owns an exact-probe executor, so the router should
         # never mark it unavailable and leave a boundary candidate stranded.
         thresholds = replace(thresholds, exact_probe_available=True)
-        effects = self.detect_effects(
+        preliminary_effects = self.detect_effects(
             fit=initial_fit,
             route=True,
             routing_thresholds=thresholds,
             execute_exact_probe=True,
         )
-        effects = tuple(effects)
-        fallback_candidates = tuple(candidate for candidate in effects if getattr(candidate, "decision", "skip") == "fallback")
+        preliminary_effects = tuple(preliminary_effects)
+        preliminary_fallback_candidates = tuple(
+            candidate
+            for candidate in preliminary_effects
+            if getattr(candidate, "decision", "skip") == "fallback"
+        )
+        mask_protection = np.zeros(time_np.size, dtype=bool)
+        for candidate in preliminary_fallback_candidates:
+            if candidate.seed_parameters is None:
+                continue
+            mask_protection |= protected_support_mask(
+                time_np,
+                candidate.effect,
+                candidate.seed_parameters,
+            )
         # A cheap first pass keeps ordinary events fast.  Preserve the full
         # beam search for an event that already looks planetary, or for one
         # that the physical-effect router judges worthy of fallback.  Doing
@@ -824,7 +838,7 @@ class Finder:
                         (PlanetSignalConfig() if planet_config is None else planet_config).seed_min_dchi2
                     )
                 )
-                or bool(fallback_candidates)
+                or bool(preliminary_fallback_candidates)
             )
         ):
             from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
@@ -837,10 +851,40 @@ class Finder:
                 initial_seed=planet_before.initial_seed,
                 refit=False,
                 verbose=verbose,
+                mask_protection=mask_protection,
             )
             reason_codes.append("planet_scan_before_escalated")
+
+        # The post-planet PSPL is the actual baseline for physical-effect
+        # diagnosis. The preliminary detector above is only a cheap escalation
+        # hint; it must not select or seed the expensive fallback.
+        baseline_fit = (
+            initial_fit
+            if planet_before is None
+            else planet_before.refined_fit
+        )
+        planet_mask = (
+            None
+            if planet_before is None
+            else np.asarray(planet_before.signal_mask, dtype=bool)
+        )
+        effects = tuple(
+            self.detect_effects(
+                fit=baseline_fit,
+                route=True,
+                routing_thresholds=thresholds,
+                execute_exact_probe=True,
+                planet_mask=planet_mask,
+            )
+        )
+        fallback_candidates = tuple(
+            candidate
+            for candidate in effects
+            if getattr(candidate, "decision", "skip") == "fallback"
+        )
+        reason_codes.append("post_planet_effect_diagnostics_completed")
         fallback_result = None
-        selected_fit = initial_fit
+        selected_fit = baseline_fit
         routing_decision = effects
         if fallback_candidates:
             known_anomaly_mask = np.zeros(time_np.size, dtype=bool)
@@ -861,11 +905,85 @@ class Finder:
                         (time_np >= start - padding)
                         & (time_np <= end + padding)
                     )
+            # The planet mask and physical-effect support are complementary.
+            # A time-binned low-frequency residual must remain visible to the
+            # FSPL/parallax fitter; otherwise the fallback segmenter can label
+            # the very signal it is meant to fit as generic contamination.
+            smooth_effect_support = None
+            if planet_before is not None and planet_before.candidates:
+                from .residual_decomposition import decompose_binned_residual
+
+                cadence = (
+                    float(np.median(np.diff(np.sort(time_np))))
+                    if time_np.size > 1
+                    else 0.0
+                )
+                candidate_scales = [
+                    max(
+                        0.5
+                        * max(
+                            float(candidate.t_end)
+                            - float(candidate.t_start),
+                            0.0,
+                        ),
+                        cadence,
+                    )
+                    for candidate in planet_before.candidates
+                ]
+                characteristic_scale = float(
+                    np.median(candidate_scales)
+                )
+                if (
+                    planet_before.initial_seed is not None
+                    and np.isfinite(planet_before.initial_seed.teff)
+                    and abs(float(planet_before.initial_seed.teff)) > 0.0
+                ):
+                    characteristic_scale = abs(
+                        float(planet_before.initial_seed.teff)
+                    )
+                initial_z = (
+                    np.asarray(baseline_fit.residual, dtype=float)
+                    / np.maximum(ferr_np, 1.0e-12)
+                )
+                decomposition = decompose_binned_residual(
+                    time_np,
+                    initial_z,
+                    characteristic_scale=max(
+                        characteristic_scale,
+                        cadence,
+                        1.0e-12,
+                    ),
+                )
+                # Threshold the binned trend so low-level noise does not
+                # become protected support. Localized planet samples are
+                # explicitly removed from this support.
+                smooth_effect_support = (
+                    np.abs(decomposition.smooth_z) >= 1.5
+                ).astype(float)
+                # Preserve the effect detector's geometric support as well.
+                # The binned support augments it around coherent inner-event
+                # residuals; it does not replace the parallax wings or FSPL
+                # shoulders selected by the diagnostic.
+                for candidate in fallback_candidates:
+                    if candidate.seed_parameters is None:
+                        continue
+                    smooth_effect_support = np.maximum(
+                        smooth_effect_support,
+                        protected_support_mask(
+                            time_np,
+                            candidate.effect,
+                            candidate.seed_parameters,
+                        ).astype(float),
+                    )
+                smooth_effect_support[known_anomaly_mask] = 0.0
+                if not np.any(smooth_effect_support > 0.0):
+                    smooth_effect_support = None
             try:
                 fallback_result = self.robust_fallback(
-                    time_np, flux_np, ferr_np, fit=initial_fit,
+                    time_np, flux_np, ferr_np, fit=baseline_fit,
                     candidates=fallback_candidates, effect="mixed",
                     config=fallback_config,
+                    protected_mask=smooth_effect_support,
                     known_anomaly_mask=known_anomaly_mask,
                 )
                 if fallback_result.success:
@@ -881,7 +999,7 @@ class Finder:
             reason_codes.append("fallback_skipped")
 
         planet_after = None
-        accepted = selected_fit is not initial_fit
+        accepted = bool(fallback_result is not None and fallback_result.success)
         if accepted and run_planet_after:
             from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
             prior_windows = tuple(

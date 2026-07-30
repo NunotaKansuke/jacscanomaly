@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from time import perf_counter
 from typing import Optional, Tuple
@@ -13,6 +13,7 @@ from .finder import Finder
 from .anomaly_models import get_chi2_anom_masked, get_chi2_flat_masked
 from .models import BestCandidate
 from .plot import _adaptive_single_lens_curve, _single_lens_model_flux
+from .residual_decomposition import decompose_binned_residual
 from .singlelens_fit import SingleLensFitResult
 
 
@@ -36,6 +37,17 @@ class PlanetSignalConfig:
     mask_core_min_improvement: float = 9.0
     mask_core_improvement_peak_frac: float = 0.05
     mask_core_pad_teff: float = 0.25
+    mask_use_binned_local_structure: bool = True
+    mask_bin_scale_fraction: float = 0.1
+    mask_trend_scale_factor: float = 3.0
+    mask_bin_min_cadences: float = 3.0
+    mask_trend_min_bins: int = 5
+    mask_local_min_abs_z: float = 3.0
+    mask_local_peak_frac: float = 0.2
+    mask_local_group_peak_frac: float = 0.35
+    mask_smooth_leak_fraction: float = 0.03
+    mask_sharp_fraction_threshold: float = 0.03
+    mask_sharp_association_teff: float = 3.0
     max_mask_fraction: float = 0.5
     max_signal_span_over_tE: float = 0.25
     min_signal_span: float = 0.0
@@ -63,6 +75,8 @@ class PlanetSignalConfig:
     beam_point_penalty: float = 4.0
     beam_interval_penalty: float = 25.0
     beam_width_penalty: float = 0.0
+    beam_repeat_seed_tolerance: float = 0.5
+    beam_repeat_neighbor_teff: float = 2.0
     flat_baseline_on_masked_peak: bool = True
     flat_baseline_u0_threshold: float = 0.01
     flat_baseline_peak_support_frac: float = 0.01
@@ -1068,6 +1082,11 @@ class PlanetSignalExtractor:
 
     finder: Finder
     config: PlanetSignalConfig = PlanetSignalConfig()
+    _mask_protection: Optional[np.ndarray] = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def run(
         self,
@@ -1082,6 +1101,7 @@ class PlanetSignalExtractor:
         initial_fit: Optional[SingleLensFitResult] = None,
         initial_seed: Optional[BestCandidate] = None,
         freeze_baseline: bool = False,
+        mask_protection: Optional[np.ndarray] = None,
     ) -> PlanetSignalResult:
         """
         Separate localized residual signal while refining a baseline fit.
@@ -1110,6 +1130,10 @@ class PlanetSignalExtractor:
             residual intervals.  This is used after a physical fallback has
             selected FSPL or parallax: the anomaly search must not silently
             refit or reselect the single-lens model family.
+        mask_protection : array-like of bool, optional
+            Samples that a cheap physical-effect diagnostic requires the
+            single-lens-family fit to retain. These points cannot enter the
+            planet mask, but remain present in the final residual search.
 
         Returns
         -------
@@ -1136,6 +1160,13 @@ class PlanetSignalExtractor:
             time, flux, ferr, x0
         )
         self.finder._ensure_fitter(float(np.median(time_np)))
+        if mask_protection is None:
+            self._mask_protection = None
+        else:
+            protection = np.asarray(mask_protection, dtype=bool).reshape(-1)
+            if protection.size != time_np.size:
+                raise ValueError("mask_protection must match time.")
+            self._mask_protection = protection.copy()
 
         if initial_fit is None:
             if refit:
@@ -1284,20 +1315,34 @@ class PlanetSignalExtractor:
         cap = self._signal_half_width_cap(fit)
         residual = np.asarray(jax.device_get(fit.residual), dtype=float)
         ferr = np.maximum(np.asarray(fit.ferr, dtype=float), 1e-12)
-        abs_z = np.abs(residual / ferr)
+        z = residual / ferr
+        abs_z = np.abs(z)
         for center, half_width in tuple(prior_signal_windows):
             center_f = float(center)
             half_width_f = min(max(float(half_width), 0.0), cap)
             if not (np.isfinite(center_f) and np.isfinite(half_width_f)):
                 continue
             window = np.abs(np.asarray(time, dtype=float) - center_f) <= half_width_f
+            decomposition = self._binned_mask_structure(
+                time=np.asarray(time, dtype=float),
+                z=z,
+                characteristic_scale=max(half_width_f, 1e-12),
+            )
             mask |= self._coherent_residual_core_mask(
                 time=np.asarray(time, dtype=float),
                 abs_z=abs_z,
                 window=window,
                 pad=min(
                     float(self.config.mask_core_pad_teff) * half_width_f,
+                    decomposition.bin_width
+                    if decomposition is not None
+                    else float("inf"),
                     cap,
+                ),
+                structure_abs_z=(
+                    None
+                    if decomposition is None
+                    else self._localized_structure_score(decomposition)
                 ),
             )
         return mask
@@ -1341,48 +1386,111 @@ class PlanetSignalExtractor:
         abs_z: np.ndarray,
         window: np.ndarray,
         pad: float,
+        structure_abs_z: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Trim a proposal to one coherent high-significance residual lobe."""
+        """Trim a proposal to coherent high-frequency residual lobes.
+
+        ``abs_z`` retains the full residual significance for compatibility
+        with existing callers.  When ``structure_abs_z`` is supplied, lobe
+        selection is instead performed on the time-binned local remainder.
+        This prevents a broad FSPL/parallax mismatch from becoming a planet
+        mask while retaining multiple sharp caustic features in one proposal.
+        """
         time = np.asarray(time, dtype=float)
-        values = np.asarray(abs_z, dtype=float)
+        raw_values = np.asarray(abs_z, dtype=float)
+        values = (
+            raw_values
+            if structure_abs_z is None
+            else np.asarray(structure_abs_z, dtype=float)
+        )
         window = np.asarray(window, dtype=bool)
         out = np.zeros(window.shape, dtype=bool)
-        indices = np.flatnonzero(window & np.isfinite(values))
+        indices = np.flatnonzero(
+            window & np.isfinite(values) & np.isfinite(raw_values)
+        )
         if indices.size == 0:
             return out
 
-        peak_index = int(indices[np.argmax(values[indices])])
-        peak = float(values[peak_index])
+        peak = float(np.max(values[indices]))
         threshold = max(
-            float(self.config.beam_grow_min_abs_z),
-            float(self.config.mask_core_peak_frac) * peak,
+            float(self.config.mask_local_min_abs_z)
+            if structure_abs_z is not None
+            else float(self.config.beam_grow_min_abs_z),
+            (
+                float(self.config.mask_local_peak_frac)
+                if structure_abs_z is not None
+                else float(self.config.mask_core_peak_frac)
+            )
+            * peak,
         )
         active = np.flatnonzero(window & (values >= threshold))
         if active.size == 0:
             return out
 
-        # Permit two sub-threshold cadence samples inside one lobe, but do not
-        # bridge separate peaks or a broad single-lens mismatch.
+        # Permit two sub-threshold cadence samples inside one lobe. Keep every
+        # material lobe, rather than bridging the first and last one into a
+        # single broad interval or retaining only the strongest caustic.
         breaks = np.flatnonzero(np.diff(active) > 3)
         starts = np.r_[0, breaks + 1]
         ends = np.r_[breaks + 1, active.size]
-        group = None
+        groups: list[np.ndarray] = []
+        group_threshold = max(
+            threshold,
+            float(self.config.mask_local_group_peak_frac) * peak,
+        )
         for start, end in zip(starts, ends):
             candidate = active[int(start) : int(end)]
-            if candidate[0] <= peak_index <= candidate[-1]:
-                group = candidate
-                break
-        if group is None:
-            group = np.asarray([peak_index], dtype=int)
+            if float(np.max(values[candidate])) >= group_threshold:
+                groups.append(candidate)
+        if not groups:
+            peak_index = int(indices[np.argmax(values[indices])])
+            groups = [np.asarray([peak_index], dtype=int)]
 
         positive_dt = np.diff(time)
         positive_dt = positive_dt[positive_dt > 0.0]
         cadence = float(np.median(positive_dt)) if positive_dt.size else 0.0
         padding = max(float(pad), cadence)
-        lo = float(time[int(group[0])]) - padding
-        hi = float(time[int(group[-1])]) + padding
-        out = window & (time >= lo) & (time <= hi)
-        return out
+        for group in groups:
+            lo = float(time[int(group[0])]) - padding
+            hi = float(time[int(group[-1])]) + padding
+            out |= window & (time >= lo) & (time <= hi)
+        return self._exclude_mask_protection(out)
+
+    def _exclude_mask_protection(self, mask: np.ndarray) -> np.ndarray:
+        out = np.asarray(mask, dtype=bool)
+        protection = self._mask_protection
+        if protection is None:
+            return out
+        if np.asarray(protection).size != out.size:
+            raise ValueError("Internal mask protection does not match time.")
+        return out & ~np.asarray(protection, dtype=bool)
+
+    def _binned_mask_structure(
+        self,
+        *,
+        time: np.ndarray,
+        z: np.ndarray,
+        characteristic_scale: float,
+    ):
+        """Return the smooth/local residual split used only for mask design."""
+        if not bool(self.config.mask_use_binned_local_structure):
+            return None
+        return decompose_binned_residual(
+            time,
+            z,
+            characteristic_scale=characteristic_scale,
+            bin_scale_fraction=float(self.config.mask_bin_scale_fraction),
+            trend_scale_factor=float(self.config.mask_trend_scale_factor),
+            min_cadences_per_bin=float(self.config.mask_bin_min_cadences),
+            min_trend_bins=int(self.config.mask_trend_min_bins),
+        )
+
+    def _localized_structure_score(self, decomposition) -> np.ndarray:
+        """Measure within-bin structure without promoting smooth high-S/N drift."""
+        local = np.abs(np.asarray(decomposition.local_z, dtype=float))
+        binned = np.abs(np.asarray(decomposition.binned_z, dtype=float))
+        leak = max(float(self.config.mask_smooth_leak_fraction), 0.0)
+        return local / np.sqrt(1.0 + np.square(leak * binned))
 
     def _mask_is_compact_for_fit(
         self,
@@ -1701,6 +1809,11 @@ class PlanetSignalExtractor:
                 if self.config.beam_probe_only:
                     continue
 
+                repeated_seed = self._beam_seed_repeats_history(
+                    seed,
+                    branch.iterations,
+                )
+
                 interval_masks = self._beam_interval_masks_from_seed(
                     time_np=time_np,
                     fit=branch.fit,
@@ -1708,6 +1821,15 @@ class PlanetSignalExtractor:
                     seed=seed,
                 )
                 for interval_mask in interval_masks:
+                    if repeated_seed:
+                        interval_mask = self._neighbor_repeat_mask(
+                            time_np,
+                            branch.mask,
+                            interval_mask,
+                            seed,
+                        )
+                    if not np.any(interval_mask):
+                        continue
                     combined = branch.mask | interval_mask
                     if np.array_equal(combined, branch.mask):
                         continue
@@ -1777,6 +1899,69 @@ class PlanetSignalExtractor:
         point_weight = np.where(best_branch.mask, 0.0, 1.0)
         return best_branch.fit, best_branch.mask, point_weight, list(best_branch.iterations), observed_initial_seed
 
+    def _beam_seed_repeats_history(
+        self,
+        seed: BestCandidate,
+        iterations: tuple[PlanetSignalIteration, ...],
+    ) -> bool:
+        tolerance = max(float(self.config.beam_repeat_seed_tolerance), 0.0)
+        for previous_iteration in iterations:
+            previous = previous_iteration.seed
+            if previous is None:
+                continue
+            scale = max(
+                abs(float(seed.teff)),
+                abs(float(previous.teff)),
+                1.0e-12,
+            )
+            scale_ratio = abs(float(seed.teff)) / max(
+                abs(float(previous.teff)),
+                1.0e-12,
+            )
+            if (
+                abs(float(seed.t0) - float(previous.t0))
+                <= tolerance * scale
+                and 0.5 <= scale_ratio <= 2.0
+            ):
+                return True
+        return False
+
+    def _neighbor_repeat_mask(
+        self,
+        time: np.ndarray,
+        current_mask: np.ndarray,
+        new_mask: np.ndarray,
+        seed: BestCandidate,
+    ) -> np.ndarray:
+        current_indices = np.flatnonzero(np.asarray(current_mask, dtype=bool))
+        new_indices = np.flatnonzero(np.asarray(new_mask, dtype=bool))
+        out = np.zeros(np.asarray(new_mask).shape, dtype=bool)
+        if current_indices.size == 0 or new_indices.size == 0:
+            return out
+        t = np.asarray(time, dtype=float)
+        current_times = t[current_indices]
+        allowed = (
+            max(float(self.config.beam_repeat_neighbor_teff), 0.0)
+            * abs(float(seed.teff))
+        )
+        positive_dt = np.diff(np.sort(t))
+        positive_dt = positive_dt[positive_dt > 0.0]
+        cadence = float(np.median(positive_dt)) if positive_dt.size else 0.0
+        allowed = max(allowed, 2.0 * cadence)
+
+        breaks = np.flatnonzero(np.diff(new_indices) > 1)
+        starts = np.r_[0, breaks + 1]
+        ends = np.r_[breaks + 1, new_indices.size]
+        for start, end in zip(starts, ends):
+            component = new_indices[int(start) : int(end)]
+            nearest = min(
+                float(np.min(np.abs(current_times - t[index])))
+                for index in component
+            )
+            if nearest <= allowed:
+                out[component] = True
+        return out
+
     def _fit_is_catastrophically_worse(
         self,
         reference_fit: SingleLensFitResult,
@@ -1803,6 +1988,35 @@ class PlanetSignalExtractor:
         ferr = np.asarray(fit.ferr, dtype=float)
         z = residual / ferr
         abs_z = np.abs(z)
+        decomposition = self._binned_mask_structure(
+            time=time_np,
+            z=z,
+            characteristic_scale=abs(float(seed.teff)),
+        )
+        structure_abs_z = (
+            None
+            if decomposition is None
+            else self._localized_structure_score(decomposition)
+        )
+        if decomposition is not None:
+            association = (
+                np.abs(time_np - float(seed.t0))
+                <= float(self.config.mask_sharp_association_teff)
+                * abs(float(seed.teff))
+            )
+            if np.any(association):
+                local_abs = np.abs(decomposition.local_z)
+                raw_peak = float(np.max(abs_z[association]))
+                local_peak = float(np.max(local_abs[association]))
+                sharp_fraction = local_peak / max(raw_peak, 1.0e-12)
+                if sharp_fraction >= float(
+                    self.config.mask_sharp_fraction_threshold
+                ):
+                    structure_abs_z = np.where(
+                        association,
+                        local_abs,
+                        structure_abs_z,
+                    )
         masks: list[np.ndarray] = []
 
         for factor in tuple(self.config.beam_teff_factors):
@@ -1823,7 +2037,13 @@ class PlanetSignalExtractor:
             self._signal_half_width_cap(fit),
         )
         search = (~current_mask) & (np.abs(time_np - float(seed.t0)) <= search_half_width)
-        core = search & (abs_z >= float(self.config.beam_grow_min_abs_z))
+        core_values = abs_z if structure_abs_z is None else structure_abs_z
+        core_threshold = (
+            float(self.config.beam_grow_min_abs_z)
+            if structure_abs_z is None
+            else float(self.config.mask_local_min_abs_z)
+        )
+        core = search & (core_values >= core_threshold)
         if np.any(core):
             idx = np.flatnonzero(search)
             core_idx = np.flatnonzero(core)
@@ -1855,8 +2075,14 @@ class PlanetSignalExtractor:
                 time=time_np,
                 abs_z=abs_z,
                 window=mask,
-                pad=float(self.config.mask_core_pad_teff)
-                * abs(float(seed.teff)),
+                pad=min(
+                    float(self.config.mask_core_pad_teff)
+                    * abs(float(seed.teff)),
+                    decomposition.bin_width
+                    if decomposition is not None
+                    else float("inf"),
+                ),
+                structure_abs_z=structure_abs_z,
             )
             mask &= ~current_mask
             if not np.any(mask):
@@ -2130,6 +2356,17 @@ class PlanetSignalExtractor:
         if not np.any(seed_window):
             return np.zeros_like(seed_window, dtype=bool)
 
+        decomposition = self._binned_mask_structure(
+            time=time_np,
+            z=z,
+            characteristic_scale=abs(float(seed_teff)),
+        )
+        structure_abs_z = (
+            abs_z
+            if decomposition is None
+            else self._localized_structure_score(decomposition)
+        )
+
         w_j = 1.0 / (ferr_j ** 2)
         mask_j = jnp.asarray(seed_window)
         chi2_anom, chi2s_anom = get_chi2_anom_masked(
@@ -2146,10 +2383,17 @@ class PlanetSignalExtractor:
         chi2s_anom_np = np.asarray(jax.device_get(chi2s_anom), dtype=float)
         improvement = np.where(seed_window, np.maximum(chi2s_flat_np - chi2s_anom_np, 0.0), 0.0)
 
-        peak_abs_z = float(np.max(abs_z[seed_window]))
+        peak_abs_z = float(np.max(structure_abs_z[seed_window]))
         z_threshold = max(
-            float(self.config.mask_core_min_abs_z),
-            float(self.config.mask_core_peak_frac) * peak_abs_z,
+            float(self.config.mask_core_min_abs_z)
+            if decomposition is None
+            else float(self.config.mask_local_min_abs_z),
+            (
+                float(self.config.mask_core_peak_frac)
+                if decomposition is None
+                else float(self.config.mask_local_peak_frac)
+            )
+            * peak_abs_z,
         )
         peak_improvement = float(np.max(improvement[seed_window]))
         improvement_threshold = max(
@@ -2157,19 +2401,25 @@ class PlanetSignalExtractor:
             float(self.config.mask_core_improvement_peak_frac) * peak_improvement,
         )
 
-        core = seed_window & (abs_z >= z_threshold) & (improvement >= improvement_threshold)
+        core = (
+            seed_window
+            & (structure_abs_z >= z_threshold)
+            & (improvement >= improvement_threshold)
+        )
         if not np.any(core):
             return np.zeros_like(seed_window, dtype=bool)
 
         pad = max(0.0, float(self.config.mask_core_pad_teff) * float(seed_teff))
+        if decomposition is not None:
+            pad = min(pad, float(decomposition.bin_width))
         if pad <= 0.0:
-            return core
+            return self._exclude_mask_protection(core)
 
         core_times = time_np[core]
         padded = np.zeros_like(core, dtype=bool)
         for t_core in core_times:
             padded |= np.abs(time_np - float(t_core)) <= pad
-        return padded & seed_window
+        return self._exclude_mask_protection(padded & seed_window)
 
     @staticmethod
     def _suppress_masked_residual(residual_j: jnp.ndarray, mask_np: np.ndarray) -> jnp.ndarray:
