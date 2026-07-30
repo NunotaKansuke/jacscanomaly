@@ -1135,12 +1135,25 @@ class Finder:
             raise TypeError(
                 f"The {effect} fitter cannot evaluate saved parameters."
             )
+        # ``params`` is the public/physical representation emitted by a fit
+        # (physical ``tE`` and ``rho``).  The native evaluator's seed
+        # contract is also physical ``tE`` but logarithmic finite-source
+        # radius.  Both spellings have existed in the backends, so normalize
+        # the canonical rho slot before handing it to ``_raw_seed``.  Without
+        # this conversion a saved rho=0.02 was interpreted as log(rho)=0.02,
+        # producing rho=exp(0.02)=1.02 and a catastrophically bad fixed
+        # evaluation in post-physical refinement.
         seed = np.asarray(params, dtype=float).reshape(-1).copy()
-        if "logrho" in tuple(spec.raw_parameter_names):
-            rho_index = tuple(spec.raw_parameter_names).index("logrho")
-            seed[rho_index] = np.log(
-                max(abs(float(seed[rho_index])), 1.0e-12)
-            )
+        raw_names = tuple(spec.raw_parameter_names)
+        physical_names = tuple(spec.parameter_names)
+        for raw_name in ("logrho", "log_rho"):
+            if raw_name in raw_names:
+                raw_index = raw_names.index(raw_name)
+                if "rho" not in physical_names:
+                    raise ValueError("finite-source evaluator is missing a public rho parameter")
+                physical_index = physical_names.index("rho")
+                seed[raw_index] = np.log(max(abs(float(seed[physical_index])), 1.0e-12))
+                break
         fit = spec.fitter.evaluate_fixed(
             time_np,
             np.asarray(flux, dtype=float),
