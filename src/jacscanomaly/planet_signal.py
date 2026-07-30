@@ -2279,6 +2279,65 @@ class PlanetSignalExtractor:
             seen.add(key)
             unique.append(mask)
 
+        # The binned/local split is deliberately conservative for broad
+        # FSPL/parallax structure.  It must not, however, erase a compact,
+        # high-significance template signal merely because the signal itself
+        # is smooth over a few *local* bins.  In that failure mode the local
+        # remainder can leave only one cadence in ``unique`` even though the
+        # raw residual has a coherent, short dip/peak.  Recover the raw core
+        # only in this narrow situation; broad residuals still have to pass
+        # the binned-local criterion above.
+        binned_support = max((int(np.sum(mask)) for mask in unique), default=0)
+        central_seed_support = (
+            np.abs(time_np - float(seed.t0))
+            <= 2.0 * abs(float(seed.teff))
+        )
+        binned_covers_seed = any(
+            bool(np.any(mask & central_seed_support)) for mask in unique
+        )
+        params = np.asarray(fit.params, dtype=float).reshape(-1)
+        event_scale = abs(float(params[1])) if params.size >= 2 else float("inf")
+        seed_is_compact = (
+            np.isfinite(event_scale)
+            and event_scale > 0.0
+            and abs(float(seed.teff)) <= 0.25 * self._signal_half_width_cap(fit)
+        )
+        raw_peak = float(np.max(abs_z[search])) if np.any(search) else 0.0
+        if (
+            structure_abs_z is not None
+            # A local-bin remainder can also lock onto a separate low-level
+            # fluctuation elsewhere in the proposal.  That is equivalent to
+            # collapse for the template signal when it leaves the seed core
+            # uncovered.
+            and (binned_support <= 1 or not binned_covers_seed)
+            and seed_is_compact
+            and raw_peak >= float(self.config.mask_core_min_abs_z)
+        ):
+            for proposal_mask in masks:
+                proposal = self._cap_signal_interval(
+                    time_np,
+                    proposal_mask,
+                    center=float(seed.t0),
+                    fit=fit,
+                )
+                raw_mask = self._coherent_residual_core_mask(
+                    time=time_np,
+                    abs_z=abs_z,
+                    window=proposal,
+                    pad=float(self.config.mask_core_pad_teff) * abs(float(seed.teff)),
+                    structure_abs_z=None,
+                )
+                raw_mask &= ~current_mask
+                # A one-point mask cannot define a stable continuation fit;
+                # it is exactly the binned-collapse case being repaired.
+                if int(np.sum(raw_mask)) < 2:
+                    continue
+                key = np.packbits(raw_mask).tobytes()
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(raw_mask)
+
         def interval_priority(mask: np.ndarray) -> float:
             added = mask & (~current_mask)
             if not np.any(added):
