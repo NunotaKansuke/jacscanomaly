@@ -30,17 +30,21 @@ of weighted fluxes, the profiled fit requires three correlations:
 
 .. math::
 
-   Q_x(k) &= \sum_j W_j x_{j-k},\\
-   Q_{xx}(k) &= \sum_j W_j x_{j-k}^2,\\
+   \begin{aligned}
+   Q_x(k)    &= \sum_j W_j x_{j-k}, \\
+   Q_{xx}(k) &= \sum_j W_j x_{j-k}^2, \\
    Q_{xy}(k) &= \sum_j WY_j x_{j-k}.
+   \end{aligned}
 
 Let ``W`` and ``Y`` be the total weight and total weighted flux.  Then
 
 .. math::
 
-   S_{xx}(k) &= Q_{xx}(k) - \frac{Q_x(k)^2}{W},\\
-   S_{xy}(k) &= Q_{xy}(k) - \frac{YQ_x(k)}{W},\\
+   \begin{aligned}
+   S_{xx}(k)       &= Q_{xx}(k) - \frac{Q_x(k)^2}{W}, \\
+   S_{xy}(k)       &= Q_{xy}(k) - \frac{YQ_x(k)}{W}, \\
    \Delta\chi^2(k) &= \frac{S_{xy}(k)^2}{S_{xx}(k)}.
+   \end{aligned}
 
 The implementation centers the flux before the correlation to avoid subtracting
 large nearly equal baseline terms.  This is algebraically equivalent to the
