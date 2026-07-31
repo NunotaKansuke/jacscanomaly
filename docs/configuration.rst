@@ -97,15 +97,13 @@ Automatic single-lens initialization
 ------------------------------------
 
 When no initial guess is passed to :meth:`jacscanomaly.Finder.run` for a PSPL
-fit, the finder uses the profiled FFT search over a logarithmic ``(u0, teff)``
-bank and passes the best candidates to the final fitter. Important options
+fit, the finder loops over a logarithmic ``tE`` bank and evaluates every
+``(u0, t0)`` row with batched FFT correlations.  It passes the best candidates
+to the final fitter. Important options
 include:
 
-``auto_init_teff_min`` / ``auto_init_teff_max``
-   Range of effective timescales used for initial candidate search.
-
-``auto_init_teff_grid_n``
-   Number of logarithmic effective-timescale templates.
+``auto_init_tE_min`` / ``auto_init_tE_max`` / ``auto_init_fft_tE_grid_n``
+   Einstein-timescale range and number of logarithmic outer FFT scales.
 
 ``auto_init_u0_min`` / ``auto_init_u0_max`` / ``auto_init_u0_grid_n``
    Impact-parameter range and number of logarithmic ``u0`` templates.
@@ -117,8 +115,14 @@ include:
 ``auto_init_fft_top_k``
    Number of ranked FFT seeds passed to the PSPL fitter.
 
-The legacy ``auto_init_tE_*``, ``auto_init_dt0_coeff``, and
-``auto_init_min_n_eff`` options remain relevant to non-PSPL initialization.
+``auto_init_fft_workers``
+   SciPy FFT worker count for the batched transforms. ``-1`` uses all
+   available CPUs.
+
+The ``auto_init_teff_*``, ``auto_init_dt0_coeff``, and
+``auto_init_min_n_eff`` options remain relevant to non-PSPL initialization;
+the teff bounds also define the conservative fallback seed for a flat PSPL
+light curve.
 
 Season splitting
 ----------------

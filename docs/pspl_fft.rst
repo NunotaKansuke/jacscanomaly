@@ -14,14 +14,17 @@ should always be evaluated on the original timestamps.
 What the FFT accelerates
 ------------------------
 
-For fixed impact parameter ``u0`` and effective timescale
-``teff = u0 * tE``, define the excess-magnification template
+For fixed Einstein timescale ``tE``, write the exact excess magnification as
 
 .. math::
 
-   x(t-t_0) = A\!\left[u_0\sqrt{1 + ((t-t_0)/t_{\rm eff})^2}\right] - 1.
+   x(t-t_0,u_0\mid t_E)
+   = A\!\left[\sqrt{u_0^2 + ((t-t_0)/t_E)^2}\right] - 1.
 
-Changing ``t0`` only translates this template.  If ``W_j`` is the sum of
+Changing ``t0`` translates a row of the radial source-plane map, while changing
+``u0`` selects another row.  ``search_tE`` therefore loops only over ``tE`` in
+Python and evaluates the complete ``(u0, t0)`` plane with batched one-dimensional
+FFTs.  If ``W_j`` is the sum of
 inverse-variance weights in calculation-grid bin ``j`` and ``WY_j`` is the sum
 of weighted fluxes, the profiled fit requires three correlations:
 
@@ -57,7 +60,8 @@ By default, negative source-flux solutions are projected to the boundary
 Basic use
 ---------
 
-Choose a modest bank in ``u0`` and ``teff``.  The best candidate can be passed
+Choose a modest source-plane row grid in ``u0`` and an outer scale bank in
+``tE``.  The best candidate can be passed
 directly to the existing PSPL fitter:
 
 .. code-block:: python
@@ -71,14 +75,15 @@ directly to the existing PSPL fitter:
        grid_dt=0.05,
        positive_source=True,
        max_grid_points=500_000,
+       fft_workers=-1,
    )
 
-   search = scanner.search(
+   search = scanner.search_tE(
        time,
        flux,
        ferr,
        u0_grid=np.geomspace(0.01, 1.0, 8),
-       teff_grid=np.geomspace(0.1, 100.0, 24),
+       tE_grid=np.geomspace(1.0, 1000.0, 24),
        top_k=8,
    )
 
@@ -97,6 +102,10 @@ For multistart fitting, ``search.initial_guesses()`` returns the ranked
 ``(t0, tE, u0)`` rows.  ``peaks_per_template`` can retain more than one local
 ``t0`` maximum per template when a light curve contains several plausible
 events.
+
+The original ``search(u0_grid=..., teff_grid=...)`` API remains available for
+code that needs a rectangular ``(u0, teff)`` bank.  ``Finder`` now uses the
+batched ``tE``-outer search for automatic PSPL initialization.
 
 Irregular cadence and grid spacing
 ----------------------------------
@@ -140,7 +149,7 @@ It is useful to distinguish four counts:
    the ``N`` in the usual ``N log N`` shorthand.
 
 ``B``
-   Number of template shapes, equal to the number of ``(u0, teff)`` pairs.
+   Number of template shapes, equal to ``N_u0 * N_tE`` for ``search_tE``.
 
 A direct template-bank scan costs approximately ``O(B M K)``.  The FFT scanner
 costs ``O(B G log G)`` after two data transforms that are reused by the full
@@ -155,6 +164,24 @@ events, ``u0`` is partly degenerate with source flux and ``tE``; the most robust
 peak observables are often ``t0`` and ``teff``.  A small ``u0`` bank is therefore
 usually sufficient for initialization, followed by continuous fitting on the
 original data.
+
+Benchmarking
+------------
+
+``tools/benchmark_pspl_fft.py`` compares the legacy scalar-template bank and
+the new batched ``tE`` bank with the same observation count, FFT-grid length,
+number of ``u0`` rows, and number of outer scales.  For example:
+
+.. code-block:: console
+
+   python tools/benchmark_pspl_fft.py \
+       --grid-points 32768 --u0-count 8 --scale-count 24 --repeats 5
+
+The two banks contain the same number of templates but use different physical
+parameterizations, so this benchmark measures execution cost rather than
+candidate-by-candidate scientific equivalence.  Numerical equivalence is tested
+separately by comparing every batched ``(u0, t0)`` profile with scalar exact-PSPL
+template scans at ``teff = u0 * tE``.
 
 ``pspl_excess_magnification`` evaluates ``A - 1`` with a rationalized expression
 instead of computing ``A`` and subtracting one.  This avoids cancellation in the

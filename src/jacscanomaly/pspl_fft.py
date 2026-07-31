@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
+from scipy import fft as scipy_fft
 
 
 __all__ = [
@@ -136,6 +137,7 @@ class PSPLFFTSearchResult:
     n_grid: int
     u0_grid: np.ndarray
     teff_grid: np.ndarray
+    tE_grid: Optional[np.ndarray] = None
 
     def initial_guesses(self, dtype=float) -> np.ndarray:
         """Return ranked ``(t0, tE, u0)`` rows for multistart fitting."""
@@ -181,6 +183,10 @@ class PSPLFFTScanner:
         Guard against unexpectedly large FFT allocations.
     singular_rtol : float, optional
         Relative threshold used to reject nearly constant templates.
+    fft_workers : int, optional
+        SciPy FFT worker count for batched source-plane transforms.  Negative
+        values count backward from the available CPU count; ``-1`` uses all
+        available workers.
     """
 
     def __init__(
@@ -191,6 +197,7 @@ class PSPLFFTScanner:
         positive_source: bool = True,
         max_grid_points: int = 1_000_000,
         singular_rtol: float = 1.0e-12,
+        fft_workers: int = -1,
     ) -> None:
         if grid_dt is not None:
             grid_dt_value = float(grid_dt)
@@ -210,12 +217,16 @@ class PSPLFFTScanner:
         singular_value = float(singular_rtol)
         if not np.isfinite(singular_value) or singular_value <= 0.0:
             raise ValueError("singular_rtol must be positive and finite.")
+        workers_value = int(fft_workers)
+        if workers_value == 0:
+            raise ValueError("fft_workers must be non-zero.")
 
         self.grid_dt = grid_dt_value
         self.samples_per_teff = samples_value
         self.positive_source = bool(positive_source)
         self.max_grid_points = max_points_value
         self.singular_rtol = singular_value
+        self.fft_workers = workers_value
 
     def scan_template(
         self,
@@ -232,6 +243,31 @@ class PSPLFFTScanner:
         grid_dt = self._resolve_grid_dt(teff_value)
         prepared = self._prepare(time, flux, ferr, grid_dt=grid_dt)
         return self._scan_prepared(prepared, u0=u0_value, teff=teff_value)
+
+    def scan_tE(
+        self,
+        time,
+        flux,
+        ferr,
+        *,
+        u0_grid: Sequence[float],
+        tE: float,
+    ) -> tuple[PSPLFFTProfile, ...]:
+        """Scan the full ``(u0, t0)`` IFFT plane for one exact PSPL ``tE``."""
+        u0_values = self._positive_grid(u0_grid, "u0_grid")
+        tE_value = self._positive_scalar(tE, "tE")
+        min_teff = float(np.min(u0_values) * tE_value)
+        prepared = self._prepare(
+            time,
+            flux,
+            ferr,
+            grid_dt=self._resolve_grid_dt(min_teff),
+        )
+        return self._scan_prepared_tE_batch(
+            prepared,
+            u0_values=u0_values,
+            tE=tE_value,
+        )
 
     def search(
         self,
@@ -312,6 +348,101 @@ class PSPLFFTScanner:
             u0_grid=u0_values.copy(),
             teff_grid=teff_values.copy(),
         )
+
+    def search_tE(
+        self,
+        time,
+        flux,
+        ferr,
+        *,
+        u0_grid: Sequence[float],
+        tE_grid: Sequence[float],
+        top_k: int = 8,
+        peaks_per_template: int = 1,
+    ) -> PSPLFFTSearchResult:
+        """Search an exact PSPL bank with ``tE`` as the outer scale grid.
+
+        For one ``tE``, every ``u0`` is a row of the radial source-plane
+        magnification map
+
+        ``A(sqrt(u0**2 + ((t - t0) / tE)**2)) - 1``.
+
+        Those rows are transformed and correlated as a single NumPy batch.
+        Thus Python only loops over ``tE``; the returned IFFT plane contains
+        every ``(u0, t0)`` trial for that scale.
+        """
+        u0_values = self._positive_grid(u0_grid, "u0_grid")
+        tE_values = self._positive_grid(tE_grid, "tE_grid")
+        top_k_value, peaks_value = self._validate_search_counts(
+            top_k=top_k,
+            peaks_per_template=peaks_per_template,
+        )
+
+        min_teff = float(np.min(u0_values) * np.min(tE_values))
+        prepared = self._prepare(
+            time,
+            flux,
+            ferr,
+            grid_dt=self._resolve_grid_dt(min_teff),
+        )
+
+        ranked: list[PSPLFFTCandidate] = []
+        best_profile: Optional[PSPLFFTProfile] = None
+        best_candidate: Optional[PSPLFFTCandidate] = None
+        for tE_value in tE_values:
+            profiles = self._scan_prepared_tE_batch(
+                prepared,
+                u0_values=u0_values,
+                tE=float(tE_value),
+            )
+            for profile in profiles:
+                for index in self._peak_indices(profile, peaks_value):
+                    candidate = profile.candidate(index)
+                    ranked.append(candidate)
+                    if best_candidate is None or candidate.delta_chi2 > best_candidate.delta_chi2:
+                        best_candidate = candidate
+                        best_profile = profile
+
+        ranked.sort(key=lambda candidate: candidate.delta_chi2, reverse=True)
+        ranked = ranked[:top_k_value] if top_k_value else []
+        best = ranked[0] if ranked else None
+        if best is None:
+            best_profile = None
+        elif best_candidate is None or (
+            best.u0 != best_candidate.u0
+            or best.tE != best_candidate.tE
+            or best.grid_index != best_candidate.grid_index
+        ):
+            best_profile = self._scan_prepared(
+                prepared,
+                u0=best.u0,
+                teff=best.teff,
+            )
+
+        teff_values = np.multiply.outer(tE_values, u0_values).reshape(-1)
+        return PSPLFFTSearchResult(
+            candidates=tuple(ranked),
+            best=best,
+            best_profile=best_profile,
+            t0_grid=prepared.t0_grid,
+            grid_dt=float(prepared.grid_dt),
+            null_chi2=float(prepared.null_chi2),
+            n_observations=int(prepared.n_observations),
+            n_grid=int(prepared.t0_grid.size),
+            u0_grid=u0_values.copy(),
+            teff_grid=teff_values,
+            tE_grid=tE_values.copy(),
+        )
+
+    @staticmethod
+    def _validate_search_counts(*, top_k: int, peaks_per_template: int) -> tuple[int, int]:
+        top_k_value = int(top_k)
+        if top_k_value < 0:
+            raise ValueError("top_k must be non-negative.")
+        peaks_value = int(peaks_per_template)
+        if peaks_value < 1:
+            raise ValueError("peaks_per_template must be at least 1.")
+        return top_k_value, peaks_value
 
     def _resolve_grid_dt(self, min_teff: float) -> float:
         if self.grid_dt is not None:
@@ -430,6 +561,96 @@ class PSPLFFTScanner:
             tE=float(teff / u0),
             null_chi2=float(prepared.null_chi2),
             grid_dt=float(prepared.grid_dt),
+        )
+
+    def _scan_prepared_tE_batch(
+        self,
+        prepared: _PreparedFFTData,
+        *,
+        u0_values: np.ndarray,
+        tE: float,
+    ) -> tuple[PSPLFFTProfile, ...]:
+        """Return all source-plane ``u0`` rows for one ``tE`` in one FFT batch."""
+        tE_value = self._positive_scalar(tE, "tE")
+        u0_rows = np.asarray(u0_values, dtype=float).reshape(-1, 1)
+        source_x = prepared.lags.reshape(1, -1) / tE_value
+        u = np.hypot(u0_rows, source_x)
+        u2 = np.square(u)
+        root = np.hypot(u, 2.0)
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            templates = 4.0 / (u * root * (u2 + 2.0 + u * root))
+        templates = np.nan_to_num(templates, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Thread-pool dispatch costs more than the FFT itself for small grids.
+        # Keep the default ``-1`` adaptive, while honoring an explicit positive
+        # worker count at every size.
+        workers = (
+            1
+            if self.fft_workers < 0 and prepared.nfft < 32_768
+            else self.fft_workers
+        )
+        fft_templates_reversed = scipy_fft.rfft(
+            templates[:, ::-1],
+            n=prepared.nfft,
+            axis=-1,
+            workers=workers,
+        )
+        fft_templates2_reversed = scipy_fft.rfft(
+            np.square(templates[:, ::-1]),
+            n=prepared.nfft,
+            axis=-1,
+            workers=workers,
+        )
+        crop = prepared.crop
+        qx = scipy_fft.irfft(
+            fft_templates_reversed * prepared.fft_weights[None, :],
+            n=prepared.nfft,
+            axis=-1,
+            workers=workers,
+        )[:, crop]
+        qxx = scipy_fft.irfft(
+            fft_templates2_reversed * prepared.fft_weights[None, :],
+            n=prepared.nfft,
+            axis=-1,
+            workers=workers,
+        )[:, crop]
+        sxy = scipy_fft.irfft(
+            fft_templates_reversed * prepared.fft_weighted_centered_flux[None, :],
+            n=prepared.nfft,
+            axis=-1,
+            workers=workers,
+        )[:, crop]
+
+        sxx = qxx - np.square(qx) / prepared.total_weight
+        scale = np.maximum(1.0, np.max(np.abs(qxx), axis=1, keepdims=True))
+        valid = np.isfinite(sxx) & np.isfinite(sxy) & (sxx > self.singular_rtol * scale)
+        source_numerator = np.maximum(sxy, 0.0) if self.positive_source else sxy
+
+        fs = np.zeros_like(sxx)
+        delta_chi2 = np.zeros_like(sxx)
+        fs[valid] = source_numerator[valid] / sxx[valid]
+        delta_chi2[valid] = np.square(source_numerator[valid]) / sxx[valid]
+        delta_chi2 = np.clip(delta_chi2, 0.0, max(prepared.null_chi2, 0.0))
+        f0 = prepared.mean_flux - fs * qx / prepared.total_weight
+        fb = f0 - fs
+        chi2 = np.maximum(prepared.null_chi2 - delta_chi2, 0.0)
+
+        return tuple(
+            PSPLFFTProfile(
+                t0=prepared.t0_grid.copy(),
+                chi2=chi2[row],
+                delta_chi2=delta_chi2[row],
+                fs=fs[row],
+                f0=f0[row],
+                fb=fb[row],
+                valid=valid[row],
+                u0=float(u0),
+                teff=float(u0 * tE_value),
+                tE=tE_value,
+                null_chi2=float(prepared.null_chi2),
+                grid_dt=float(prepared.grid_dt),
+            )
+            for row, u0 in enumerate(np.asarray(u0_values, dtype=float))
         )
 
     @staticmethod
