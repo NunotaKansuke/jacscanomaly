@@ -104,7 +104,7 @@ $t_0$ maximum per template when a light curve contains several plausible
 events.
 
 The original `search(u0_grid=..., teff_grid=...)` API remains available for
-code that needs a rectangular $(u_0, t_{\rm eff})$ bank. `Finder` now uses the
+code that needs a rectangular $(u_0, t_{\mathrm{eff}})$ bank. `Finder` now uses the
 batched $t_E$-outer search for automatic PSPL initialization.
 
 ## Irregular cadence and grid spacing
@@ -124,11 +124,13 @@ by bins with zero weight.
 If `grid_dt` is omitted, the scanner uses
 
 $$
-\Delta t = \frac{\min(t_{\rm eff})}{\mathtt{samples\_per\_teff}}.
+\Delta t = \frac{\min(t_{\mathrm{eff}})}{N_{\mathrm{samples}}}.
 $$
 
+Here $N_{\mathrm{samples}}$ is the `samples_per_teff` setting.
+
 A useful initial choice is roughly 5--10 samples across the shortest trial
-$t_{\rm eff}$. A finer grid reduces binning and $t_0$ discretization error but
+$t_{\mathrm{eff}}$. A finer grid reduces binning and $t_0$ discretization error but
 increases memory and runtime. `max_grid_points` prevents accidental large
 allocations for a long observing baseline and a very small spacing.
 
@@ -151,7 +153,7 @@ truncated-template method can still be faster.
 
 Use logarithmic spacing for both positive parameters. In high-magnification
 events, $u_0$ is partly degenerate with source flux and $t_E$; the most robust
-peak observables are often $t_0$ and $t_{\rm eff}$. A small $u_0$ bank is
+peak observables are often $t_0$ and $t_{\mathrm{eff}}$. A small $u_0$ bank is
 therefore usually sufficient for initialization, followed by continuous fitting
 on the original data.
 
@@ -170,7 +172,7 @@ The two banks contain the same number of templates but use different physical
 parameterizations, so this benchmark measures execution cost rather than
 candidate-by-candidate scientific equivalence. Numerical equivalence is tested
 separately by comparing every batched $(u_0, t_0)$ profile with scalar
-exact-PSPL template scans at $t_{\rm eff} = u_0 t_E$.
+exact-PSPL template scans at $t_{\mathrm{eff}} = u_0 t_E$.
 
 `pspl_excess_magnification` evaluates $A - 1$ with a rationalized expression
 instead of computing $A$ and subtracting one. This avoids cancellation in the
