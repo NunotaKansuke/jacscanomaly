@@ -16,7 +16,7 @@ For fixed Einstein timescale $t_E$, the exact excess magnification is
 
 $$
 x(t-t_0, u_0 \mid t_E)
-= A\!\left[\sqrt{u_0^2 + ((t-t_0)/t_E)^2}\right] - 1.
+= A\left[\sqrt{u_0^2 + ((t-t_0)/t_E)^2}\right] - 1.
 $$
 
 Changing $t_0$ translates a row of the radial source-plane map, while changing
@@ -140,7 +140,7 @@ It is useful to distinguish four counts:
 - $K$: number of trial peak times in a direct scan.
 - $G$: number of points in the regular FFT calculation grid. This, not $M$, is
   the $N$ in the usual $N \log N$ shorthand.
-- $B$: number of template shapes, equal to $N_{u0} N_{tE}$ for `search_tE`.
+- $B$: number of template shapes, equal to $N_{u_0} N_{t_E}$ for `search_tE`.
 
 A direct template-bank scan costs approximately $O(BMK)$. The FFT scanner costs
 $O(BG\log G)$ after two data transforms that are reused by the full bank. If the
