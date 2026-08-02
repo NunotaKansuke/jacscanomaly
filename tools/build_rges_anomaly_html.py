@@ -543,8 +543,8 @@ def _event_page(row: dict[str, Any], manifest: list[dict[str, Any]], scripts: di
     event = row["event"]
     ordered = [item["event"] for item in manifest]
     position = ordered.index(event)
-    previous = ordered[position - 1]
-    following = ordered[(position + 1) % len(ordered)]
+    previous = ordered[position - 1] if position > 0 else None
+    following = ordered[position + 1] if position + 1 < len(ordered) else None
     payload_path = out_dir / "planet_signal_data" / f"{event}.json"
     metadata = row["payload"].get("metadata", {}) or {}
     plots = row["payload"].get("plots", {}) or {}
@@ -571,13 +571,23 @@ def _event_page(row: dict[str, Any], manifest: list[dict[str, Any]], scripts: di
         f'<figure><figcaption>{_esc(label)}</figcaption><img src="../{subdir}/{_esc(path.name)}" alt="{_esc(label)}"></figure>'
         for label, path, subdir in figure_names if subdir == "template_free_figures"
     )
+    previous_link = (
+        f'<a href="{_esc(previous)}.html">&#x2190;&nbsp;{_esc(previous)}</a>'
+        if previous is not None
+        else '<span class="nav-disabled">&#x2190;&nbsp;First</span>'
+    )
+    following_link = (
+        f'<a href="{_esc(following)}.html">{_esc(following)}&nbsp;&#x2192;</a>'
+        if following is not None
+        else '<span class="nav-disabled">Last&nbsp;&#x2192;</span>'
+    )
     nav = (
         '<div class="event-nav">'
         '<a href="../index.html">&#x2302;&nbsp;Index</a>'
-        f'<a href="{_esc(previous)}.html">&#x2190;&nbsp;{_esc(previous)}</a>'
-        f'<span>{_esc(event)}</span>'
-        f'<a href="{_esc(following)}.html">{_esc(following)}&nbsp;&#x2192;</a>'
-        '</div>'
+        + previous_link
+        + f'<span>{_esc(event)}</span>'
+        + following_link
+        + '</div>'
     )
     series = row["payload"].get("series", {}) or {}
     body = (
