@@ -1,6 +1,6 @@
 # Roman planet-signal パイプライン／HTML公開 引き継ぎ
 
-最終更新: 2026-07-31  
+最終更新: 2026-07-31
 現行コード: `jacscanomaly` commit `938f1cc`。主要変更は、保存済みFSPL解の `rho`
 復元（`9143a7e`）、惑星抽出からbinned残差を完全に除外（`fccf85b`）、
 一峰性惑星候補判定のC++化（`938f1cc`）。
