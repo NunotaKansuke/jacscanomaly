@@ -277,6 +277,152 @@ Fit fit_weighted_line(
     return fit;
 }
 
+// Apply the post-grid one-lobe test without transferring the candidate batch
+// through XLA.  This deliberately mirrors PlanetSignalExtractor's former JAX
+// implementation: a flat and the two point-lens template shapes are fit in
+// each local window, then the per-sample improvement is box-smoothed and its
+// number of above-threshold lobes is counted.
+PyObject* unimodal_mask(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject *time_obj = nullptr, *residual_obj = nullptr, *ferr_obj = nullptr;
+    PyObject *t0_obj = nullptr, *teff_obj = nullptr;
+    double teff_coeff = 3.0, min_improvement = 9.0, peak_frac = 0.2;
+    int min_pts = 4, smooth_points = 5, max_lobes = 1;
+    static const char* kwlist[] = {
+        "time", "residual", "ferr", "t0", "teff", "teff_coeff",
+        "min_pts", "min_improvement", "peak_frac", "smooth_points",
+        "max_lobes", nullptr
+    };
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "OOOOO|diddii",
+            const_cast<char**>(kwlist), &time_obj, &residual_obj, &ferr_obj,
+            &t0_obj, &teff_obj, &teff_coeff, &min_pts, &min_improvement,
+            &peak_frac, &smooth_points, &max_lobes)) {
+        return nullptr;
+    }
+    PyArrayObject* time_arr = as_double_array(time_obj);
+    PyArrayObject* residual_arr = as_double_array(residual_obj);
+    PyArrayObject* ferr_arr = as_double_array(ferr_obj);
+    PyArrayObject* t0_arr = as_double_array(t0_obj);
+    PyArrayObject* teff_arr = as_double_array(teff_obj);
+    if (!time_arr || !residual_arr || !ferr_arr || !t0_arr || !teff_arr) {
+        Py_XDECREF(time_arr); Py_XDECREF(residual_arr); Py_XDECREF(ferr_arr);
+        Py_XDECREF(t0_arr); Py_XDECREF(teff_arr);
+        return nullptr;
+    }
+    if (PyArray_NDIM(time_arr) != 1 || PyArray_NDIM(residual_arr) != 1 ||
+        PyArray_NDIM(ferr_arr) != 1 || PyArray_NDIM(t0_arr) != 1 ||
+        PyArray_NDIM(teff_arr) != 1) {
+        PyErr_SetString(PyExc_ValueError, "all inputs must be one-dimensional arrays");
+        Py_DECREF(time_arr); Py_DECREF(residual_arr); Py_DECREF(ferr_arr);
+        Py_DECREF(t0_arr); Py_DECREF(teff_arr);
+        return nullptr;
+    }
+    const npy_intp n = PyArray_DIM(time_arr, 0);
+    const npy_intp n_grid = PyArray_DIM(t0_arr, 0);
+    if (PyArray_DIM(residual_arr, 0) != n || PyArray_DIM(ferr_arr, 0) != n ||
+        PyArray_DIM(teff_arr, 0) != n_grid) {
+        PyErr_SetString(PyExc_ValueError, "incompatible unimodal-mask input lengths");
+        Py_DECREF(time_arr); Py_DECREF(residual_arr); Py_DECREF(ferr_arr);
+        Py_DECREF(t0_arr); Py_DECREF(teff_arr);
+        return nullptr;
+    }
+    npy_intp dims[1] = {n_grid};
+    PyArrayObject* out = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, dims, NPY_BOOL));
+    if (!out) {
+        Py_DECREF(time_arr); Py_DECREF(residual_arr); Py_DECREF(ferr_arr);
+        Py_DECREF(t0_arr); Py_DECREF(teff_arr);
+        return nullptr;
+    }
+    const double* time = static_cast<const double*>(PyArray_DATA(time_arr));
+    const double* residual = static_cast<const double*>(PyArray_DATA(residual_arr));
+    const double* ferr = static_cast<const double*>(PyArray_DATA(ferr_arr));
+    const double* t0s = static_cast<const double*>(PyArray_DATA(t0_arr));
+    const double* teffs = static_cast<const double*>(PyArray_DATA(teff_arr));
+    auto* accepted = static_cast<npy_bool*>(PyArray_DATA(out));
+    int width = std::max(1, smooth_points);
+    if ((width % 2) == 0) ++width;
+    const int pad = width / 2;
+
+    Py_BEGIN_ALLOW_THREADS
+    #pragma omp parallel for schedule(dynamic, 8)
+    for (npy_intp g = 0; g < n_grid; ++g) {
+        accepted[g] = 0;
+        const double teff = std::abs(teffs[g]);
+        if (!(teff > 0.0) || !std::isfinite(teff)) continue;
+        const double lo = t0s[g] - teff_coeff * teff;
+        const double hi = t0s[g] + teff_coeff * teff;
+        const Window window{
+            static_cast<npy_intp>(std::upper_bound(time, time + n, lo) - time),
+            static_cast<npy_intp>(std::lower_bound(time, time + n, hi) - time),
+        };
+        const int count = window.size();
+        if (count < min_pts) continue;
+        std::vector<double> weight(static_cast<size_t>(count));
+        double sw = 0.0, sy = 0.0;
+        for (int k = 0; k < count; ++k) {
+            const npy_intp i = window.start + k;
+            const double fe = std::max(ferr[i], 1e-12);
+            weight[static_cast<size_t>(k)] = 1.0 / (fe * fe);
+            sw += weight[static_cast<size_t>(k)];
+            sy += weight[static_cast<size_t>(k)] * residual[i];
+        }
+        if (!(sw > 0.0)) continue;
+        const double mu = sy / sw;
+        // fit_weighted_line expects arrays whose window offsets begin at zero.
+        std::vector<double> local_time(static_cast<size_t>(count));
+        std::vector<double> local_residual(static_cast<size_t>(count));
+        for (int k = 0; k < count; ++k) {
+            local_time[static_cast<size_t>(k)] = time[window.start + k];
+            local_residual[static_cast<size_t>(k)] = residual[window.start + k];
+        }
+        const Window local_window{0, static_cast<npy_intp>(count)};
+        const Fit fit0 = fit_weighted_line(calc_a0, t0s[g], teff,
+            local_time.data(), local_residual.data(), weight.data(), local_window);
+        const Fit fit1 = fit_weighted_line(calc_a1, t0s[g], teff,
+            local_time.data(), local_residual.data(), weight.data(), local_window);
+        const Fit fit = (fit0.valid && (!fit1.valid || fit0.chi2 < fit1.chi2)) ? fit0 : fit1;
+        const bool use0 = fit0.valid && (!fit1.valid || fit0.chi2 < fit1.chi2);
+        if (!fit.valid) continue;
+        std::vector<double> improvement(static_cast<size_t>(count));
+        double peak = 0.0;
+        for (int k = 0; k < count; ++k) {
+            const double rflat = local_residual[static_cast<size_t>(k)] - mu;
+            const double a = use0 ? calc_a0(t0s[g], teff, local_time[static_cast<size_t>(k)])
+                                  : calc_a1(t0s[g], teff, local_time[static_cast<size_t>(k)]);
+            const double ranom = local_residual[static_cast<size_t>(k)] - (fit.a * a + fit.b);
+            const double value = std::max((rflat * rflat - ranom * ranom)
+                * weight[static_cast<size_t>(k)], 0.0);
+            improvement[static_cast<size_t>(k)] = value;
+            peak = std::max(peak, value);
+        }
+        if (!(peak > 0.0) || !std::isfinite(peak)) continue;
+        const double threshold = std::max(min_improvement, peak_frac * peak);
+        int lobes = 0;
+        bool previous = false;
+        for (int k = 0; k < count; ++k) {
+            double smooth = 0.0;
+            for (int j = -pad; j <= pad; ++j) {
+                const int at = k + j;
+                if (at >= 0 && at < count) {
+                    smooth += improvement[static_cast<size_t>(at)];
+                } else if (window.start == 0 && at < 0) {
+                    smooth += improvement.front();
+                } else if (window.end == n && at >= count) {
+                    smooth += improvement.back();
+                }
+            }
+            const bool active = smooth / static_cast<double>(width) >= threshold;
+            if (active && !previous) ++lobes;
+            previous = active;
+        }
+        accepted[g] = lobes <= max_lobes;
+    }
+    Py_END_ALLOW_THREADS
+    Py_DECREF(time_arr); Py_DECREF(residual_arr); Py_DECREF(ferr_arr);
+    Py_DECREF(t0_arr); Py_DECREF(teff_arr);
+    return reinterpret_cast<PyObject*>(out);
+}
+
 PyObject* run_grid(PyObject*, PyObject* args, PyObject* kwargs) {
     PyObject* time_obj = nullptr;
     PyObject* flux_obj = nullptr;
@@ -820,6 +966,12 @@ PyMethodDef methods[] = {
         reinterpret_cast<PyCFunction>(run_grid),
         METH_VARARGS | METH_KEYWORDS,
         "Evaluate anomaly grid points with a plain C++ for-loop backend.",
+    },
+    {
+        "unimodal_mask",
+        reinterpret_cast<PyCFunction>(unimodal_mask),
+        METH_VARARGS | METH_KEYWORDS,
+        "Classify template-grid candidates with the native one-lobe test.",
     },
     {
         "fit_pspl",

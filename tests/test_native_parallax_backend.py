@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 pytest.importorskip("jacscanomaly._parallax_cpp")
 
@@ -10,6 +11,7 @@ from jacscanomaly import (
     TimeSpec,
 )
 from jacscanomaly.parallax_backend import native_parallax_effect_score
+from jacscanomaly.plot import _adaptive_single_lens_curve
 
 
 def _linear_ephemeris(origin="sun", time_spec=TimeSpec()):
@@ -189,3 +191,43 @@ def test_native_fixed_evaluation_preserves_public_seed_coordinates():
     np.testing.assert_allclose(np.asarray(fit.params), seed, atol=1.0e-12)
     assert float(fit.chi2) < 1.0e-20
     assert fit.optimizer_status == "native_cpp_fixed_evaluation"
+
+
+def test_adaptive_parallax_plot_is_clipped_to_ephemeris_support():
+    calls = []
+    ephemeris = SimpleNamespace(
+        time=np.asarray([100.0, 110.0]),
+        extrapolation="reject",
+    )
+
+    class Projector:
+        time_spec = TimeSpec("jd", offset=100.0)
+        earth_ephemeris = ephemeris
+        satellite_or_observer_ephemeris = ephemeris
+        reference_ephemeris = None
+
+        def magnification_at(self, time, raw_params):
+            values = np.asarray(time, dtype=float)
+            calls.append(values)
+            assert np.min(values) >= 0.0
+            assert np.max(values) <= 10.0
+            return np.ones_like(values)
+
+    fit = SimpleNamespace(
+        param_names=("t0", "tE", "u0", "piEN", "piEE"),
+        params=np.asarray([5.0, 2.0, 0.1, 0.0, 0.0]),
+        raw_params=np.asarray([105.0, np.log(2.0), 0.1, 0.0, 0.0]),
+        parallax_projector=Projector(),
+        fs=2.0,
+        fb=1.0,
+        ferr=np.ones(11),
+        flux=np.full(11, 3.0),
+        time=np.linspace(0.0, 10.0, 11),
+    )
+
+    time, flux = _adaptive_single_lens_curve(fit, (-5.0, 15.0))
+
+    assert calls
+    assert time[0] == pytest.approx(0.0)
+    assert time[-1] == pytest.approx(10.0)
+    np.testing.assert_allclose(flux, 3.0)

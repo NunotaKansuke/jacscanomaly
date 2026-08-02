@@ -66,4 +66,40 @@ def test_native_fallback_preserves_planet_candidate_through_after_scan():
     assert result.fallback_result.model_spec["backend"] == "native_cpp_scipy_trf"
     assert result.planet_before is not None and result.planet_before.candidates
     assert result.planet_after is not None and result.planet_after.candidates
+    assert result.planet_after.iterations
+    assert result.planet_after.refined_fit.param_names == (
+        "t0",
+        "tE",
+        "u0",
+        "piEN",
+        "piEE",
+    )
+    assert all(
+        iteration.fit.param_names
+        == ("t0", "tE", "u0", "piEN", "piEE")
+        for iteration in result.planet_after.iterations
+    )
+    reconstructed = finder.evaluate_saved_physical_solution(
+        time,
+        flux,
+        ferr,
+        effect=result.fallback_result.effect,
+        params=result.fallback_result.fit.params,
+        fs=float(result.fallback_result.fit.fs),
+        fb=float(result.fallback_result.fit.fb),
+    )
+    assert reconstructed.param_names == (
+        "t0",
+        "tE",
+        "u0",
+        "piEN",
+        "piEE",
+    )
+    assert np.allclose(
+        reconstructed.model_flux,
+        result.fallback_result.fit.model_flux,
+        rtol=1.0e-8,
+        atol=1.0e-8,
+    )
+    assert "planet_after_fixed_family_warm_start" in result.reason_codes
     assert any(match.category == "survived" for match in result.candidate_matches)

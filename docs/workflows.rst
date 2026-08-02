@@ -119,6 +119,34 @@ does not infer or alter a baseline model.
 Signal extraction and peak/dip measurements
 --------------------------------------------
 
+For the complete model-selection and anomaly workflow, prefer the high-level
+API:
+
+.. code-block:: python
+
+   from jacscanomaly import Finder
+
+   result = Finder().run_anomaly_pipeline(time, flux, ferr)
+
+   print(result.has_anomaly_candidate)
+   print(result.best_anomaly_candidate)
+   for candidate in result.anomaly_candidates:
+       print(candidate["rank"], candidate["t_center"], candidate["max_abs_z"])
+   print(result.adopted_fit.model_kind)
+
+``result.anomaly_candidates`` is the normal reporting interface: a ranked
+list of dictionaries with the location, interval, timescale, strength,
+provenance, and adopted model. Overlapping final-residual features and
+template-free windows are merged, with feature timing/sign and template-free
+chi-square statistics retained in one row. ``best_anomaly_candidate`` is the
+first row or ``None``. The deliberately cautious name
+``has_anomaly_candidate`` means that a false value is not a proof that no
+physical anomaly exists.
+
+``result.fit_exclusion_mask`` contains only points excluded by an accepted
+continuation fit. ``result.measurement_mask`` is a separate frozen-residual
+measurement window and must not be used as an HTML removal/display mask.
+
 For a candidate event, use the extractor to prevent the strongest anomaly
 from biasing the single-lens baseline. Then measure extrema in the refined
 residual:

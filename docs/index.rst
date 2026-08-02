@@ -59,6 +59,8 @@ If you are using the package for the first time:
    pspl_fft
    results
    planet_features
+   planet_signal_pipeline_handover_ja
+   rges_f146_pipeline_handover_ja
 
 .. toctree::
    :maxdepth: 2

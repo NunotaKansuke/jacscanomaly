@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 from jacscanomaly.contamination import (
     ContaminationConfig,
+    ContaminationSegmentation,
+    RobustFitResult,
     _blocks_from_state,
     contamination_objective,
     protected_support_mask,
@@ -142,6 +144,341 @@ def test_bound_stuck_fallback_is_never_success():
 
     assert not result.success
     assert "parameter_at_bound" in result.reason_codes
+
+
+def test_fallback_rejects_fit_that_only_improves_the_planet_interval(monkeypatch):
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    time = np.arange(20.0)
+    ferr = np.ones(20)
+    known_planet = time < 10.0
+    baseline = SimpleNamespace(
+        params=np.asarray([0.0, 10.0, 0.1]),
+        residual=np.where(known_planet, 3.0, 0.0),
+        chi2=90.0,
+    )
+    selected = SimpleNamespace(
+        params=np.asarray([0.0, 10.0, 0.1, 0.05]),
+        residual=np.where(known_planet, 0.0, 1.0),
+        chi2=10.0,
+        optimizer_success=True,
+    )
+    segmentation = ContaminationSegmentation(
+        state=known_planet.astype(np.int8),
+        anomaly_probability=known_planet.astype(float),
+        blocks=((0, 9),),
+        objective=1.0,
+        anomaly_fraction=0.5,
+        anomaly_span_fraction=0.5,
+        protected_fraction=0.0,
+    )
+
+    monkeypatch.setattr(
+        fallback_module,
+        "robust_refine_with_fitter",
+        lambda *args, **kwargs: RobustFitResult(
+            fit=selected,
+            initial_fit=baseline,
+            final_weights=np.ones(20),
+            segmentation=segmentation,
+            iterations=(),
+            converged=True,
+            segmentation_stable=True,
+        ),
+    )
+    candidate = EffectCandidate(
+        effect="fspl",
+        score=100.0,
+        score_without_compact_blocks=100.0,
+        effective_rank=1,
+        condition_number=1.0,
+        coverage=1.0,
+        max_point_influence=0.0,
+        max_block_influence=0.0,
+        subset_stability=1.0,
+        morphology="mixed_or_planet",
+    )
+    result = run_robust_fallback(
+        object(),
+        time,
+        np.ones(20),
+        ferr,
+        [0.0, 10.0, 0.1, 0.05],
+        candidates=(candidate,),
+        extra_seeds=([0.1, 10.0, 0.1, 0.05],),
+        effect="fspl",
+        config=FallbackConfig(parameter_dimension=4, max_seeds=2),
+        known_anomaly_mask=known_planet,
+        baseline_fit=baseline,
+        effect_score_fn=lambda fit, *_: 100.0 if fit is baseline else 1.0,
+    )
+
+    assert not result.success
+    assert "non_planet_region_bic_not_improved" in result.reason_codes
+
+
+def test_partial_fspl_signed_topology_cannot_override_clean_region_bic(monkeypatch):
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    time = np.arange(20.0)
+    ferr = np.ones(20)
+    known_planet = time < 10.0
+    baseline = SimpleNamespace(
+        params=np.asarray([0.0, 10.0, 0.1]),
+        residual=np.where(known_planet, 3.0, 0.0),
+        chi2=90.0,
+    )
+    selected = SimpleNamespace(
+        params=np.asarray([0.0, 10.0, 0.1, 0.05]),
+        residual=np.where(known_planet, 0.0, 1.0),
+        chi2=10.0,
+        optimizer_success=True,
+    )
+    segmentation = ContaminationSegmentation(
+        state=known_planet.astype(np.int8),
+        anomaly_probability=known_planet.astype(float),
+        blocks=((0, 9),),
+        objective=1.0,
+        anomaly_fraction=0.5,
+        anomaly_span_fraction=0.5,
+        protected_fraction=0.0,
+    )
+    monkeypatch.setattr(
+        fallback_module,
+        "robust_refine_with_fitter",
+        lambda *args, **kwargs: RobustFitResult(
+            fit=selected,
+            initial_fit=baseline,
+            final_weights=np.ones(20),
+            segmentation=segmentation,
+            iterations=(),
+            converged=True,
+            segmentation_stable=True,
+        ),
+    )
+    candidate = EffectCandidate(
+        effect="fspl",
+        score=100.0,
+        score_without_compact_blocks=100.0,
+        effective_rank=1,
+        condition_number=1.0,
+        coverage=1.0,
+        max_point_influence=0.0,
+        max_block_influence=0.0,
+        subset_stability=1.0,
+        morphology="fspl_partial_peak",
+        subset_diagnostics=({
+            "name": "fspl_morphology",
+            "partial": True,
+            "central_symmetry": 0.98,
+            "template_explained_fraction": 0.9,
+            "core_mean_z": -30.0,
+            "left_shoulder_mean_z": 8.0,
+            "right_shoulder_mean_z": float("nan"),
+        },),
+    )
+
+    result = run_robust_fallback(
+        object(),
+        time,
+        np.ones(20),
+        ferr,
+        [0.0, 10.0, 0.1, 0.05],
+        candidates=(candidate,),
+        extra_seeds=([0.1, 10.0, 0.1, 0.05],),
+        effect="fspl",
+        config=FallbackConfig(parameter_dimension=4, max_seeds=2),
+        known_anomaly_mask=known_planet,
+        baseline_fit=baseline,
+        effect_score_fn=lambda fit, *_: 100.0 if fit is baseline else 1.0,
+    )
+
+    assert not result.success
+    assert "non_planet_region_bic_not_improved" in result.reason_codes
+    assert "fallback_acceptance_failed" in result.reason_codes
+
+
+def test_clear_fspl_topology_can_override_segmenter_oscillation(monkeypatch):
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    time = np.arange(200.0)
+    baseline = SimpleNamespace(
+        params=np.asarray([100.0, 40.0, 0.03]),
+        residual=np.zeros(200),
+        chi2=10_000.0,
+    )
+    selected = SimpleNamespace(
+        params=np.asarray([100.0, 44.0, 0.03, 0.055]),
+        residual=np.zeros(200),
+        chi2=100.0,
+        optimizer_success=True,
+    )
+    segmentation = ContaminationSegmentation(
+        state=np.zeros(200, dtype=np.int8),
+        anomaly_probability=np.zeros(200),
+        blocks=(),
+        objective=1.0,
+        anomaly_fraction=0.0,
+        anomaly_span_fraction=0.0,
+        protected_fraction=0.0,
+    )
+    monkeypatch.setattr(
+        fallback_module,
+        "robust_refine_with_fitter",
+        lambda *args, **kwargs: RobustFitResult(
+            fit=selected,
+            initial_fit=baseline,
+            final_weights=np.ones(200),
+            segmentation=segmentation,
+            iterations=(),
+            converged=False,
+            segmentation_stable=False,
+        ),
+    )
+    candidate = EffectCandidate(
+        effect="fspl",
+        score=10_000.0,
+        score_without_compact_blocks=10_000.0,
+        effective_rank=1,
+        condition_number=1.0,
+        coverage=1.0,
+        max_point_influence=0.0,
+        max_block_influence=0.0,
+        subset_stability=1.0,
+        morphology="fspl_flattened_peak",
+    )
+
+    result = run_robust_fallback(
+        object(),
+        time,
+        np.ones(200),
+        np.ones(200),
+        selected.params,
+        candidates=(candidate,),
+        extra_seeds=([100.1, 44.0, 0.03, 0.055],),
+        effect="fspl",
+        config=FallbackConfig(parameter_dimension=4, max_seeds=2),
+        baseline_fit=baseline,
+        effect_score_fn=lambda fit, *_: 10_000.0 if fit is baseline else 10.0,
+    )
+
+    assert result.success
+    assert "clear_fspl_topology_overrides_contamination_stability" in result.reason_codes
+
+
+def test_overwhelming_reproduced_parallax_can_override_support_guard(monkeypatch):
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    time = np.arange(200.0)
+    baseline = SimpleNamespace(
+        params=np.asarray([100.0, 200.0, 0.5]),
+        residual=np.zeros(200),
+        chi2=10_000.0,
+    )
+    selected = SimpleNamespace(
+        params=np.asarray([100.0, 200.0, 0.5, -0.1, 0.03]),
+        residual=np.zeros(200),
+        chi2=100.0,
+        optimizer_success=True,
+    )
+    segmentation = ContaminationSegmentation(
+        state=np.zeros(200, dtype=np.int8),
+        anomaly_probability=np.zeros(200),
+        blocks=(),
+        objective=1.0,
+        anomaly_fraction=0.0,
+        anomaly_span_fraction=0.0,
+        protected_fraction=1.0,
+        protected_component_retained_fractions=(0.0,),
+    )
+    monkeypatch.setattr(
+        fallback_module,
+        "robust_refine_with_fitter",
+        lambda *args, **kwargs: RobustFitResult(
+            fit=selected,
+            initial_fit=baseline,
+            final_weights=np.ones(200),
+            segmentation=segmentation,
+            iterations=(),
+            converged=True,
+            segmentation_stable=True,
+        ),
+    )
+
+    result = run_robust_fallback(
+        object(),
+        time,
+        np.ones(200),
+        np.ones(200),
+        selected.params,
+        extra_seeds=([100.1, 200.0, 0.5, -0.1, 0.03],),
+        effect="space_parallax",
+        config=FallbackConfig(parameter_dimension=5, max_seeds=2),
+        baseline_fit=baseline,
+        effect_score_fn=lambda fit, *_: 10_000.0 if fit is baseline else 1.0,
+    )
+
+    assert result.success
+    assert "insufficient_identifiability" in result.reason_codes
+    assert "overwhelming_parallax_evidence_overrides_support_guard" in result.reason_codes
+
+
+def test_fallback_accepts_bic_gain_even_when_global_reduced_chi2_is_bad(monkeypatch):
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    time = np.arange(200.0)
+    baseline = SimpleNamespace(
+        params=np.asarray([100.0, 20.0, 0.1]),
+        residual=np.zeros(200),
+        chi2=1_000_000.0,
+    )
+    selected = SimpleNamespace(
+        params=np.asarray([100.0, 20.0, 0.1, 0.01]),
+        residual=np.zeros(200),
+        chi2=900_000.0,
+        optimizer_success=True,
+    )
+    segmentation = ContaminationSegmentation(
+        state=np.zeros(200, dtype=np.int8),
+        anomaly_probability=np.zeros(200),
+        blocks=(),
+        objective=1.0,
+        anomaly_fraction=0.0,
+        anomaly_span_fraction=0.0,
+        protected_fraction=0.0,
+    )
+    monkeypatch.setattr(
+        fallback_module,
+        "robust_refine_with_fitter",
+        lambda *args, **kwargs: RobustFitResult(
+            fit=selected,
+            initial_fit=baseline,
+            final_weights=np.ones(200),
+            segmentation=segmentation,
+            iterations=(),
+            converged=True,
+            segmentation_stable=True,
+        ),
+    )
+
+    result = run_robust_fallback(
+        object(),
+        time,
+        np.ones(200),
+        np.ones(200),
+        selected.params,
+        extra_seeds=([100.1, 20.0, 0.1, 0.01],),
+        effect="fspl",
+        config=FallbackConfig(parameter_dimension=4, max_seeds=2),
+        baseline_fit=baseline,
+        effect_score_fn=lambda fit, *_: (
+            1_000_000.0 if fit is baseline else 900_000.0
+        ),
+    )
+
+    assert result.success
+    assert "global_fit_improvement_insufficient" in result.reason_codes
+    assert "accepted_by_postfit_validity_and_bic" in result.reason_codes
 
 
 def test_protected_support_is_soft_and_keeps_regularization_finite():
@@ -385,6 +722,35 @@ def test_fspl_detector_local_variants_precede_broad_baseline_atlas():
     )
 
 
+def test_fspl_small_seed_budget_covers_factor_e_rho_bias():
+    detector = np.asarray([100.0, 12.0, -0.2, -2.0])
+    candidate = EffectCandidate(
+        effect="fspl",
+        score=100.0,
+        score_without_compact_blocks=80.0,
+        effective_rank=1,
+        condition_number=1.0,
+        coverage=1.0,
+        max_point_influence=0.0,
+        max_block_influence=0.0,
+        subset_stability=1.0,
+        seed_parameters=detector,
+    )
+
+    seeds = detector_seed_parameters(
+        [100.0, 10.0, -0.1],
+        (candidate,),
+        config=FallbackConfig(parameter_dimension=4, max_seeds=8),
+    )
+
+    assert any(np.isclose(seed[3], detector[3] + 1.0) for seed in seeds)
+    assert any(
+        np.isclose(seed[3], detector[3] + 1.0)
+        and np.signbit(seed[2]) != np.signbit(detector[2])
+        for seed in seeds
+    )
+
+
 def test_fspl_seed_families_change_rho_and_keep_four_dimensions():
     candidate = EffectCandidate(
         effect="fspl",
@@ -483,6 +849,166 @@ def test_joint_fallback_bridges_stage_seeds_into_six_dimensions():
 
     assert result.attempts
     assert all(attempt.seed.shape == (6,) for attempt in result.attempts)
+
+
+def test_staged_fallback_keeps_viable_stage_when_joint_ephemeris_is_unavailable(monkeypatch):
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    fit = SimpleNamespace(
+        params=np.asarray([0.0, 10.0, 0.1, 0.05]),
+        raw_params=np.asarray([0.0, 10.0, 0.1, np.log(0.05)]),
+        chi2=1.0,
+    )
+
+    def fake_factory(_config, effect, _tref):
+        if "space_parallax" in effect:
+            raise ValueError("observer ephemeris does not cover the requested data time range")
+        return EffectFitterSpec(
+            effect=effect,
+            fitter=object(),
+            parameter_dimension=4,
+            parameter_names=("t0", "tE", "u0", "rho"),
+            raw_parameter_names=("t0", "tE", "u0", "logrho"),
+            backend="synthetic",
+            convention="synthetic",
+        )
+
+    def fake_run(*args, **kwargs):
+        effect = kwargs["effect"]
+        return FallbackResult(
+            fit=fit,
+            initial_fit=fit,
+            effect=effect,
+            attempts=(),
+            selected_seed=np.asarray([0.0, 10.0, 0.1, np.log(0.05)]),
+            success=effect == "fspl",
+            reason_codes=("synthetic",),
+            selected_original_chi2=1.0,
+            selected_robust_objective=1.0,
+        )
+
+    monkeypatch.setattr(fallback_module, "make_effect_fitter", fake_factory)
+    monkeypatch.setattr(fallback_module, "run_robust_fallback", fake_run)
+    candidates = (
+        EffectCandidate(
+            effect="fspl",
+            score=10.0,
+            score_without_compact_blocks=10.0,
+            effective_rank=1,
+            condition_number=1.0,
+            coverage=1.0,
+            max_point_influence=0.0,
+            max_block_influence=0.0,
+            subset_stability=1.0,
+        ),
+        EffectCandidate(
+            effect="space_parallax",
+            score=10.0,
+            score_without_compact_blocks=10.0,
+            effective_rank=2,
+            condition_number=1.0,
+            coverage=1.0,
+            max_point_influence=0.0,
+            max_block_influence=0.0,
+            subset_stability=1.0,
+        ),
+    )
+
+    result = run_staged_joint_fallback(
+        FinderConfig(),
+        np.arange(20.0),
+        np.ones(20),
+        np.ones(20),
+        [0.0, 10.0, 0.1],
+        candidates=candidates,
+        effect="fspl_space_parallax",
+    )
+
+    assert result.success
+    assert result.effect == "fspl"
+    assert "accepted_single_effect_stage" in result.reason_codes
+
+
+def test_staged_fallback_selects_lower_order_model_when_joint_bic_is_worse(
+    monkeypatch,
+):
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    dimensions = {
+        "fspl": 4,
+        "annual_parallax": 5,
+        "space_parallax": 5,
+        "fspl_space_parallax": 6,
+    }
+    selected_bics = {
+        "fspl": 71_550.0,
+        "annual_parallax": 40_357.0,
+        "space_parallax": 40_341.0,
+        "fspl_space_parallax": 40_350.0,
+    }
+
+    def fake_factory(config, effect, tref):
+        dimension = dimensions[effect]
+        return EffectFitterSpec(
+            effect=effect,
+            fitter=object(),
+            parameter_dimension=dimension,
+            parameter_names=tuple(f"p{i}" for i in range(dimension)),
+            raw_parameter_names=tuple(f"p{i}" for i in range(dimension)),
+            backend="synthetic",
+            convention="synthetic",
+        )
+
+    def fake_run(*args, **kwargs):
+        effect = kwargs["effect"]
+        dimension = dimensions[effect]
+        fit = SimpleNamespace(
+            params=np.zeros(dimension),
+            chi2=selected_bics[effect],
+        )
+        return FallbackResult(
+            fit=fit,
+            initial_fit=fit,
+            effect=effect,
+            attempts=(),
+            selected_seed=np.zeros(dimension),
+            success=True,
+            reason_codes=("accepted_by_postfit_validity_and_bic",),
+            selected_original_chi2=selected_bics[effect],
+            selected_bic=selected_bics[effect],
+            numerically_valid=True,
+        )
+
+    monkeypatch.setattr(fallback_module, "make_effect_fitter", fake_factory)
+    monkeypatch.setattr(fallback_module, "run_robust_fallback", fake_run)
+    candidates = tuple(
+        EffectCandidate(
+            effect=effect,
+            score=100.0,
+            score_without_compact_blocks=100.0,
+            effective_rank=1,
+            condition_number=1.0,
+            coverage=1.0,
+            max_point_influence=0.0,
+            max_block_influence=0.0,
+            subset_stability=1.0,
+        )
+        for effect in ("fspl", "annual_parallax", "space_parallax")
+    )
+
+    result = run_staged_joint_fallback(
+        FinderConfig(),
+        np.arange(20.0),
+        np.ones(20),
+        np.ones(20),
+        [0.0, 10.0, 0.1],
+        candidates=candidates,
+        effect="fspl_space_parallax",
+    )
+
+    assert result.effect == "space_parallax"
+    assert "selected_by_hierarchical_bic" in result.reason_codes
+    assert "accepted_lower_order_model" in result.reason_codes
 
 
 def test_staged_joint_synthetic_regression_preserves_each_stage_seed(monkeypatch):
@@ -687,7 +1213,7 @@ def test_wrong_dimension_seed_is_reported_before_fit_attempt():
         )
 
 
-def test_finder_acceptance_score_uses_the_residual_physical_detector(monkeypatch):
+def test_finder_fspl_acceptance_score_keeps_the_clear_compact_peak(monkeypatch):
     import jacscanomaly.finder as finder_module
 
     baseline = SimpleNamespace(
@@ -722,6 +1248,7 @@ def test_finder_acceptance_score_uses_the_residual_physical_detector(monkeypatch
         finder_module,
         "detect_fspl_from_pspl_fit",
         lambda fit: SimpleNamespace(
+            score=20.0 if fit.marker == "baseline" else 2.0,
             score_without_compact_blocks=100.0
             if fit.marker == "baseline"
             else 5.0
@@ -747,7 +1274,7 @@ def test_finder_acceptance_score_uses_the_residual_physical_detector(monkeypatch
     monkeypatch.setattr(finder, "_ensure_fitter", lambda tref: None)
     candidate = EffectCandidate(
         effect="fspl",
-        score=100.0,
+        score=400.0,
         score_without_compact_blocks=100.0,
         effective_rank=1,
         condition_number=1.0,
@@ -756,6 +1283,7 @@ def test_finder_acceptance_score_uses_the_residual_physical_detector(monkeypatch
         max_block_influence=0.0,
         subset_stability=1.0,
         seed_parameters=np.asarray([0.0, 10.0, 0.1, np.log(0.05)]),
+        morphology="fspl_even_peak",
     )
 
     finder.robust_fallback(
@@ -767,5 +1295,5 @@ def test_finder_acceptance_score_uses_the_residual_physical_detector(monkeypatch
         effect="fspl",
     )
 
-    assert observed_scores == [100.0, 5.0]
+    assert observed_scores == [400.0, 2.0]
     assert observed_max_pi_e == [FinderConfig().max_piE]

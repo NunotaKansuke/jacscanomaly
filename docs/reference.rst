@@ -15,6 +15,8 @@ Finder
 
 .. automethod:: jacscanomaly.Finder.run
 
+.. automethod:: jacscanomaly.Finder.run_anomaly_pipeline
+
 .. automethod:: jacscanomaly.Finder.run_effect_aware
 
 .. automethod:: jacscanomaly.Finder.run_template_free
@@ -23,6 +25,26 @@ Finder
 ``AnomalyResult`` stores the baseline fit, residuals, all extracted clusters,
 grid diagnostics, and the selected ``best`` candidate. ``x0`` is an initial
 guess unless ``refit=False``; see :doc:`workflows` for the fixed-baseline mode.
+
+``Finder.run_anomaly_pipeline`` is the complete adopted-model workflow. It
+always performs a frozen final-residual measurement after model selection, so
+feature reporting does not depend on whether a post-physical continuation fit
+accepted an exclusion mask.
+
+.. autoclass:: jacscanomaly.AnomalyPipelineConfig
+   :no-index:
+
+.. autoclass:: jacscanomaly.AnomalyPipelineResult
+   :no-index:
+
+.. autoclass:: jacscanomaly.AnomalyCandidate
+   :no-index:
+
+``AnomalyPipelineResult.anomaly_candidates`` exposes the typed internal
+``AnomalyCandidate`` rows as JSON-ready dictionaries. The related
+``has_anomaly_candidate`` and ``best_anomaly_candidate`` properties provide
+the common yes/no and strongest-candidate queries without making callers
+combine the feature and template-free result formats themselves.
 
 Template-free residual API
 --------------------------

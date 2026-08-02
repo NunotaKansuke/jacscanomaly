@@ -46,8 +46,10 @@ from .singlelens_fallback import (
 from .exact_probe import run_exact_probe
 from .effect_aware import EffectAwareFinderResult, match_planet_candidates
 from .parallax_backend import native_parallax_effect_score
+from .contamination import protected_support_mask
 
 if TYPE_CHECKING:
+    from .anomaly_pipeline import AnomalyPipelineConfig, AnomalyPipelineResult
     from .planet_signal import PlanetSignalConfig
 
 
@@ -321,6 +323,7 @@ class Finder:
         routing_thresholds: Optional[RoutingThresholds] = None,
         include_fspl: bool = True,
         execute_exact_probe: bool = True,
+        planet_mask=None,
         **fspl_kwargs,
     ):
         """Run the physical detector in shadow mode on a PSPL fit.
@@ -372,6 +375,7 @@ class Finder:
             parallax_projector=parallax_projector,
             space_parallax_projector=space_parallax_projector,
             include_fspl=include_fspl,
+            planet_mask=planet_mask,
             **fspl_kwargs,
         )
         if not route:
@@ -389,21 +393,11 @@ class Finder:
             try:
                 probe = run_exact_probe(fit, projector, candidate, **fspl_kwargs)
                 promoted = probe.promoted_candidate
-                if (
-                    probe.decision == "skip"
-                    and candidate.score_without_compact_blocks >= thresholds.fallback_score
-                ):
-                    # An inconclusive cheap probe must not turn a robust,
-                    # broad physical score into a dead-end skip.
-                    promoted = candidate.with_decision(
-                        "fallback",
-                        ("exact_probe_not_promoted", "fallback_after_probe_inconclusive"),
-                    )
                 probed.append(promoted)
             except Exception as exc:
                 probed.append(
                     candidate.with_decision(
-                        "fallback" if candidate.score_without_compact_blocks >= thresholds.fallback_score else "skip",
+                        "exact_probe",
                         ("exact_probe_failed", type(exc).__name__),
                     )
                 )
@@ -452,8 +446,25 @@ class Finder:
                 "robust_fallback could not resolve an effect-specific fitter; "
                 "provide candidates or an explicit effect."
             )
-        spec = make_effect_fitter(self.config, resolved_effect, float(np.median(time_np)))
-        if base_seed is not None and np.asarray(base_seed).size not in (3, spec.parameter_dimension):
+        spec = None
+        try:
+            spec = make_effect_fitter(
+                self.config, resolved_effect, float(np.median(time_np))
+            )
+        except ValueError:
+            # A joint space-parallax backend can be unavailable when the
+            # observer ephemeris does not cover this event. Mixed fallback
+            # must still run its independently viable FSPL/annual stages.
+            if not (
+                effect == "mixed"
+                and resolved_effect in {"fspl_parallax", "fspl_space_parallax"}
+            ):
+                raise
+        if (
+            spec is not None
+            and base_seed is not None
+            and np.asarray(base_seed).size not in (3, spec.parameter_dimension)
+        ):
             raise ValueError(
                 f"Base seed dimension {np.asarray(base_seed).size} does not match "
                 f"{resolved_effect} fitter dimension {spec.parameter_dimension}."
@@ -467,7 +478,9 @@ class Finder:
             contamination=config.contamination,
             max_point_parameter_change=config.max_point_parameter_change,
             max_basin_distance=config.max_basin_distance,
-            parameter_dimension=spec.parameter_dimension,
+            parameter_dimension=(
+                None if spec is None else spec.parameter_dimension
+            ),
             default_logrho=config.default_logrho,
             u0_factors=config.u0_factors,
             rho_over_u0=config.rho_over_u0,
@@ -478,10 +491,30 @@ class Finder:
                 if config.max_piE is not None
                 else float(self.config.max_piE)
             ),
+            min_bic_improvement=config.min_bic_improvement,
         )
-        projector = getattr(spec.fitter, "_P", None)
+        projector = None if spec is None else getattr(spec.fitter, "_P", None)
 
         def physical_effect_score(value, score_effect: Optional[str] = None) -> float:
+            def candidate_score(candidate, detected=None) -> float:
+                measured = candidate if detected is None else detected
+                if (
+                    candidate.effect == "fspl"
+                    and candidate.morphology in {
+                        "fspl_even_peak",
+                        "fspl_flattened_peak",
+                    }
+                ):
+                    # The compact peak is the finite-source signal itself.
+                    # Removing it makes the baseline look artificially clean
+                    # and can reject a fit that eliminates the full FSPL
+                    # topology by orders of magnitude.
+                    return max(float(measured.score), 0.0)
+                return max(
+                    float(measured.score_without_compact_blocks),
+                    0.0,
+                )
+
             def relevant(candidate) -> bool:
                 if score_effect is None or score_effect == "mixed":
                     return True
@@ -494,7 +527,7 @@ class Finder:
             if value is fit:
                 return float(
                     sum(
-                        max(float(candidate.score_without_compact_blocks), 0.0)
+                        candidate_score(candidate)
                         for candidate in candidate_tuple
                         if relevant(candidate)
                     )
@@ -506,9 +539,7 @@ class Finder:
                     continue
                 if candidate.effect == "fspl":
                     detected = detect_fspl_from_pspl_fit(value)
-                    scores.append(
-                        max(float(detected.score_without_compact_blocks), 0.0)
-                    )
+                    scores.append(candidate_score(candidate, detected))
                 elif candidate.effect in {"annual_parallax", "space_parallax"}:
                     native_evaluator = getattr(value, "parallax_projector", None)
                     if native_evaluator is not None and hasattr(
@@ -558,6 +589,10 @@ class Finder:
                 known_anomaly_mask=known_anomaly_mask,
                 baseline_fit=fit,
                 effect_score_fn=effect_score_fn,
+            )
+        if spec is None:  # defensive: only mixed staged fallback may omit it
+            raise RuntimeError(
+                f"No fitter is available for resolved effect {resolved_effect}."
             )
         return run_robust_fallback(
             spec.fitter,
@@ -716,6 +751,7 @@ class Finder:
         run_planet_after: bool = True,
         planet_config: Optional["PlanetSignalConfig"] = None,
         planet_fast_mode: bool = True,
+        post_physical_max_refits: int = 3,
         routing_thresholds: Optional[RoutingThresholds] = None,
         fallback_config: FallbackConfig = FallbackConfig(),
         verbose: bool = False,
@@ -765,14 +801,27 @@ class Finder:
         # This entry point owns an exact-probe executor, so the router should
         # never mark it unavailable and leave a boundary candidate stranded.
         thresholds = replace(thresholds, exact_probe_available=True)
-        effects = self.detect_effects(
+        preliminary_effects = self.detect_effects(
             fit=initial_fit,
             route=True,
             routing_thresholds=thresholds,
             execute_exact_probe=True,
         )
-        effects = tuple(effects)
-        fallback_candidates = tuple(candidate for candidate in effects if getattr(candidate, "decision", "skip") == "fallback")
+        preliminary_effects = tuple(preliminary_effects)
+        preliminary_fallback_candidates = tuple(
+            candidate
+            for candidate in preliminary_effects
+            if getattr(candidate, "decision", "skip") == "fallback"
+        )
+        mask_protection = np.zeros(time_np.size, dtype=bool)
+        for candidate in preliminary_fallback_candidates:
+            if candidate.seed_parameters is None:
+                continue
+            mask_protection |= protected_support_mask(
+                time_np,
+                candidate.effect,
+                candidate.seed_parameters,
+            )
         # A cheap first pass keeps ordinary events fast.  Preserve the full
         # beam search for an event that already looks planetary, or for one
         # that the physical-effect router judges worthy of fallback.  Doing
@@ -791,7 +840,7 @@ class Finder:
                         (PlanetSignalConfig() if planet_config is None else planet_config).seed_min_dchi2
                     )
                 )
-                or bool(fallback_candidates)
+                or bool(preliminary_fallback_candidates)
             )
         ):
             from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
@@ -804,10 +853,40 @@ class Finder:
                 initial_seed=planet_before.initial_seed,
                 refit=False,
                 verbose=verbose,
+                mask_protection=mask_protection,
             )
             reason_codes.append("planet_scan_before_escalated")
+
+        # The post-planet PSPL is the actual baseline for physical-effect
+        # diagnosis. The preliminary detector above is only a cheap escalation
+        # hint; it must not select or seed the expensive fallback.
+        baseline_fit = (
+            initial_fit
+            if planet_before is None
+            else planet_before.refined_fit
+        )
+        planet_mask = (
+            None
+            if planet_before is None
+            else np.asarray(planet_before.signal_mask, dtype=bool)
+        )
+        effects = tuple(
+            self.detect_effects(
+                fit=baseline_fit,
+                route=True,
+                routing_thresholds=thresholds,
+                execute_exact_probe=True,
+                planet_mask=planet_mask,
+            )
+        )
+        fallback_candidates = tuple(
+            candidate
+            for candidate in effects
+            if getattr(candidate, "decision", "skip") == "fallback"
+        )
+        reason_codes.append("post_planet_effect_diagnostics_completed")
         fallback_result = None
-        selected_fit = initial_fit
+        selected_fit = baseline_fit
         routing_decision = effects
         if fallback_candidates:
             known_anomaly_mask = np.zeros(time_np.size, dtype=bool)
@@ -828,11 +907,85 @@ class Finder:
                         (time_np >= start - padding)
                         & (time_np <= end + padding)
                     )
+            # The planet mask and physical-effect support are complementary.
+            # A time-binned low-frequency residual must remain visible to the
+            # FSPL/parallax fitter; otherwise the fallback segmenter can label
+            # the very signal it is meant to fit as generic contamination.
+            smooth_effect_support = None
+            if planet_before is not None and planet_before.candidates:
+                from .residual_decomposition import decompose_binned_residual
+
+                cadence = (
+                    float(np.median(np.diff(np.sort(time_np))))
+                    if time_np.size > 1
+                    else 0.0
+                )
+                candidate_scales = [
+                    max(
+                        0.5
+                        * max(
+                            float(candidate.t_end)
+                            - float(candidate.t_start),
+                            0.0,
+                        ),
+                        cadence,
+                    )
+                    for candidate in planet_before.candidates
+                ]
+                characteristic_scale = float(
+                    np.median(candidate_scales)
+                )
+                if (
+                    planet_before.initial_seed is not None
+                    and np.isfinite(planet_before.initial_seed.teff)
+                    and abs(float(planet_before.initial_seed.teff)) > 0.0
+                ):
+                    characteristic_scale = abs(
+                        float(planet_before.initial_seed.teff)
+                    )
+                initial_z = (
+                    np.asarray(baseline_fit.residual, dtype=float)
+                    / np.maximum(ferr_np, 1.0e-12)
+                )
+                decomposition = decompose_binned_residual(
+                    time_np,
+                    initial_z,
+                    characteristic_scale=max(
+                        characteristic_scale,
+                        cadence,
+                        1.0e-12,
+                    ),
+                )
+                # Threshold the binned trend so low-level noise does not
+                # become protected support. Localized planet samples are
+                # explicitly removed from this support.
+                smooth_effect_support = (
+                    np.abs(decomposition.smooth_z) >= 1.5
+                ).astype(float)
+                # Preserve the effect detector's geometric support as well.
+                # The binned support augments it around coherent inner-event
+                # residuals; it does not replace the parallax wings or FSPL
+                # shoulders selected by the diagnostic.
+                for candidate in fallback_candidates:
+                    if candidate.seed_parameters is None:
+                        continue
+                    smooth_effect_support = np.maximum(
+                        smooth_effect_support,
+                        protected_support_mask(
+                            time_np,
+                            candidate.effect,
+                            candidate.seed_parameters,
+                        ).astype(float),
+                    )
+                smooth_effect_support[known_anomaly_mask] = 0.0
+                if not np.any(smooth_effect_support > 0.0):
+                    smooth_effect_support = None
             try:
                 fallback_result = self.robust_fallback(
-                    time_np, flux_np, ferr_np, fit=initial_fit,
+                    time_np, flux_np, ferr_np, fit=baseline_fit,
                     candidates=fallback_candidates, effect="mixed",
                     config=fallback_config,
+                    protected_mask=smooth_effect_support,
                     known_anomaly_mask=known_anomaly_mask,
                 )
                 if fallback_result.success:
@@ -840,7 +993,7 @@ class Finder:
                     reason_codes.append("fallback_accepted")
                 else:
                     reason_codes.append("fallback_rejected")
-            except Exception as exc:
+            except Exception:
                 reason_codes.append("fallback_failed")
                 fallback_result = None
                 logger.debug("effect-aware fallback failed", exc_info=True)
@@ -848,63 +1001,19 @@ class Finder:
             reason_codes.append("fallback_skipped")
 
         planet_after = None
-        accepted = selected_fit is not initial_fit
+        accepted = bool(fallback_result is not None and fallback_result.success)
         if accepted and run_planet_after:
-            from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
-            prior_windows = tuple(
-                (
-                    float(candidate.peak_time),
-                    max(
-                        0.5 * max(
-                            float(candidate.t_end) - float(candidate.t_start),
-                            0.0,
-                        ),
-                        float(np.median(np.diff(np.sort(time_np))))
-                        if time_np.size > 1
-                        else 0.0,
-                    ),
-                )
-                for candidate in (() if planet_before is None else planet_before.candidates)
-            )
-            resolved_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
-            if planet_fast_mode:
-                resolved_planet_config = replace(
-                    resolved_planet_config,
-                    baseline_mode="beam_interval",
-                    beam_max_iter=1,
-                    beam_width=1,
-                    beam_candidates_per_iter=1,
-                    beam_probe_only=True,
-                )
-            planet_after = PlanetSignalExtractor(self, resolved_planet_config).run(
+            planet_after = self.refine_planet_after_physical(
                 time_np,
                 flux_np,
                 ferr_np,
-                initial_fit=selected_fit,
-                refit=False,
+                selected_fit=selected_fit,
+                effect=str(fallback_result.effect),
+                planet_config=planet_config,
+                max_refits=post_physical_max_refits,
                 verbose=verbose,
-                prior_signal_windows=prior_windows,
             )
-            if planet_fast_mode and (
-                bool(
-                    planet_after.initial_seed is not None
-                    and np.isfinite(planet_after.initial_seed.dchi2)
-                    and planet_after.initial_seed.dchi2 >= float(resolved_planet_config.seed_min_dchi2)
-                )
-                or bool(fallback_candidates)
-            ):
-                full_planet_config = PlanetSignalConfig() if planet_config is None else planet_config
-                planet_after = PlanetSignalExtractor(self, full_planet_config).run(
-                    time_np,
-                    flux_np,
-                    ferr_np,
-                    initial_fit=selected_fit,
-                    initial_seed=planet_after.initial_seed,
-                    refit=False,
-                    verbose=verbose,
-                    prior_signal_windows=prior_windows,
-                )
-                reason_codes.append("planet_scan_after_escalated")
+            reason_codes.append("planet_after_fixed_family_warm_start")
             reason_codes.append("planet_scan_after_completed")
         elif not accepted:
             reason_codes.append("planet_after_not_needed")
@@ -937,6 +1046,350 @@ class Finder:
             reason_codes=tuple(reason_codes),
             diagnostics=diagnostics,
         )
+
+    def run_anomaly_pipeline(
+        self,
+        time,
+        flux,
+        ferr,
+        x0=None,
+        *,
+        data_kind: Literal["flux", "mag"] = "flux",
+        config: Optional["AnomalyPipelineConfig"] = None,
+        verbose: bool = False,
+    ) -> "AnomalyPipelineResult":
+        """Run model selection through final frozen-residual measurement.
+
+        This is the high-level, one-line anomaly API.  It preserves
+        :meth:`run_effect_aware` as the lower-level before/router/fallback/after
+        primitive, then guarantees that feature measurement is repeated with
+        the adopted single-lens fit frozen.  A rejected post-physical refit can
+        therefore clear the display/exclusion mask without erasing a genuine
+        feature from the final raw residual.
+        """
+        from .anomaly_pipeline import (
+            AnomalyPipelineConfig,
+            AnomalyPipelineResult,
+            build_anomaly_candidates,
+        )
+        from .planet_signal import PlanetSignalExtractor
+
+        resolved = AnomalyPipelineConfig() if config is None else config
+        effect_aware = self.run_effect_aware(
+            time,
+            flux,
+            ferr,
+            x0,
+            data_kind=data_kind,
+            run_planet_before=True,
+            run_planet_after=True,
+            planet_config=resolved.planet,
+            planet_fast_mode=bool(resolved.planet_fast_mode),
+            post_physical_max_refits=max(
+                0, int(resolved.post_physical_max_refits)
+            ),
+            routing_thresholds=resolved.routing_thresholds,
+            fallback_config=resolved.fallback,
+            verbose=verbose,
+        )
+        _, _, _, _, time_np, flux_np, ferr_np = self._to_arrays(
+            time,
+            flux,
+            ferr,
+            x0,
+            data_kind=data_kind,
+        )
+
+        fallback_accepted = bool(
+            effect_aware.fallback_result is not None
+            and effect_aware.fallback_result.success
+        )
+        refinement_source = (
+            effect_aware.planet_after
+            if fallback_accepted
+            else effect_aware.planet_before
+        )
+        adopted_fit = effect_aware.selected_fit
+        post_refinement_reset = False
+        post_refits_completed = 0
+        if refinement_source is not None:
+            refinement_iterations = len(tuple(refinement_source.iterations))
+            if fallback_accepted:
+                post_refits_completed = refinement_iterations
+            candidate_fit = refinement_source.refined_fit
+            if fallback_accepted:
+                parent_chi2 = float(np.asarray(effect_aware.selected_fit.chi2_dof))
+                candidate_chi2 = float(np.asarray(candidate_fit.chi2_dof))
+                allowed = max(
+                    parent_chi2
+                    * float(resolved.post_refinement_max_chi2_ratio),
+                    parent_chi2
+                    + float(resolved.post_refinement_max_chi2_delta),
+                )
+                if not np.isfinite(candidate_chi2) or candidate_chi2 > allowed:
+                    post_refinement_reset = True
+                    post_refits_completed = 0
+                else:
+                    adopted_fit = candidate_fit
+            else:
+                adopted_fit = candidate_fit
+
+        fit_exclusion_mask = np.zeros(time_np.shape, dtype=bool)
+        if (
+            refinement_source is not None
+            and not post_refinement_reset
+            and tuple(refinement_source.iterations)
+        ):
+            signal_mask = np.asarray(
+                refinement_source.signal_mask, dtype=bool
+            ).reshape(-1)
+            point_weight = np.asarray(
+                refinement_source.point_weight, dtype=float
+            ).reshape(-1)
+            if signal_mask.size != time_np.size:
+                raise RuntimeError(
+                    "Refinement signal mask does not match the input light curve."
+                )
+            fit_exclusion_mask = (
+                signal_mask & (point_weight <= 0.0)
+                if point_weight.size == signal_mask.size
+                else signal_mask.copy()
+            )
+
+        # Enforce the invariant even when a caller supplies a custom final
+        # measurement configuration: this stage may measure windows but must
+        # never change the adopted model or cap them by its tE.
+        measurement_config = replace(
+            resolved.final_measurement,
+            max_signal_span_over_tE=float("inf"),
+            frozen_measurement_windows=True,
+        )
+        final_measurement = PlanetSignalExtractor(
+            self, measurement_config
+        ).run(
+            time_np,
+            flux_np,
+            ferr_np,
+            initial_fit=adopted_fit,
+            refit=False,
+            freeze_baseline=True,
+            verbose=verbose,
+        )
+        adopted_params = np.asarray(adopted_fit.params, dtype=float)
+        measured_params = np.asarray(
+            final_measurement.refined_fit.params, dtype=float
+        )
+        if (
+            str(getattr(final_measurement.refined_fit, "model_kind", ""))
+            != str(getattr(adopted_fit, "model_kind", ""))
+            or not np.array_equal(measured_params, adopted_params)
+        ):
+            raise RuntimeError(
+                "Final residual measurement changed the adopted single-lens fit."
+            )
+
+        features = final_measurement.measure_features(resolved.features)
+        template_free = self.run_template_free(
+            time_np,
+            flux_np,
+            ferr_np,
+            data_kind="flux",
+            fit=adopted_fit,
+            config=resolved.template_free,
+        )
+        candidates = build_anomaly_candidates(
+            features,
+            template_free,
+            time=time_np,
+            fit_exclusion_mask=fit_exclusion_mask,
+            adopted_model=str(getattr(adopted_fit, "model_kind", "unknown")),
+            cadence_factor=resolved.candidate_merge_cadence_factor,
+        )
+        reason_codes = list(effect_aware.reason_codes)
+        if post_refinement_reset:
+            reason_codes.append("post_physical_refinement_reset")
+        reason_codes.extend(
+            (
+                "final_residual_measurement_completed",
+                "template_free_search_completed",
+            )
+        )
+        diagnostics = {
+            **dict(effect_aware.diagnostics),
+            "planet_before_refits_completed": int(
+                len(tuple(effect_aware.planet_before.iterations))
+                if effect_aware.planet_before is not None
+                else 0
+            ),
+            "post_physical_refits_completed": int(post_refits_completed),
+            "post_physical_mask_points": int(
+                np.sum(fit_exclusion_mask) if fallback_accepted else 0
+            ),
+            "fit_exclusion_mask_points": int(np.sum(fit_exclusion_mask)),
+            "post_physical_refinement_reset": bool(post_refinement_reset),
+            "final_measurement_mask_points": int(
+                np.sum(final_measurement.signal_mask)
+            ),
+            "final_feature_count": int(features.n_peaks + features.n_dips),
+            "anomaly_candidate_count": len(candidates),
+        }
+        return AnomalyPipelineResult(
+            effect_aware=effect_aware,
+            adopted_fit=adopted_fit,
+            post_physical_result=effect_aware.planet_after,
+            fit_exclusion_mask=fit_exclusion_mask,
+            final_measurement=final_measurement,
+            features=features,
+            template_free=template_free,
+            candidates=candidates,
+            reason_codes=tuple(reason_codes),
+            diagnostics=diagnostics,
+        )
+
+    @staticmethod
+    def _physical_model_kind(effect: str) -> str:
+        return {
+            "fspl": "fspl",
+            "annual_parallax": "pspl_parallax",
+            "space_parallax": "pspl_space_parallax",
+            "fspl_parallax": "fspl_parallax",
+            "fspl_space_parallax": "fspl_space_parallax",
+        }.get(str(effect), str(effect))
+
+    def refine_planet_after_physical(
+        self,
+        time,
+        flux,
+        ferr,
+        *,
+        selected_fit: SingleLensFitResult,
+        effect: str,
+        planet_config: Optional["PlanetSignalConfig"] = None,
+        max_refits: int = 3,
+        verbose: bool = False,
+    ):
+        """Re-detect a planet and locally polish one accepted model family.
+
+        The fallback's multistart search is not repeated.  A fresh
+        effect-specific fitter starts from the accepted solution, the regular
+        planet scanner proposes a localized mask, and one continuation fit is
+        allowed per pass.  No pre-fallback PSPL window is forced into the
+        post-physical result.
+        """
+        from .planet_signal import PlanetSignalConfig, PlanetSignalExtractor
+
+        max_refits = max(0, int(max_refits))
+        resolved = PlanetSignalConfig() if planet_config is None else planet_config
+        post_config = replace(
+            resolved,
+            baseline_mode="beam_interval",
+            beam_max_iter=max_refits,
+            beam_width=1,
+            beam_candidates_per_iter=1,
+            beam_probe_only=False,
+            flat_baseline_on_masked_peak=False,
+        )
+        time_np = np.asarray(time, dtype=float)
+        spec = make_effect_fitter(
+            self.config,
+            str(effect),
+            float(np.median(time_np)),
+        )
+        if not hasattr(selected_fit, "model_kind"):
+            object.__setattr__(
+                selected_fit,
+                "model_kind",
+                self._physical_model_kind(str(effect)),
+            )
+        return PlanetSignalExtractor(self, post_config).run(
+            time_np,
+            np.asarray(flux, dtype=float),
+            np.asarray(ferr, dtype=float),
+            initial_fit=selected_fit,
+            refit=False,
+            verbose=verbose,
+            prior_signal_windows=(),
+            freeze_baseline=False,
+            baseline_refit_fitter=spec.fitter,
+        )
+
+    def evaluate_saved_physical_solution(
+        self,
+        time,
+        flux,
+        ferr,
+        *,
+        effect: str,
+        params,
+        fs: Optional[float] = None,
+        fb: Optional[float] = None,
+    ) -> SingleLensFitResult:
+        """Reconstruct an accepted physical model without optimizing it."""
+        time_np = np.asarray(time, dtype=float)
+        spec = make_effect_fitter(
+            self.config,
+            str(effect),
+            float(np.median(time_np)),
+        )
+        if not hasattr(spec.fitter, "evaluate_fixed"):
+            raise TypeError(
+                f"The {effect} fitter cannot evaluate saved parameters."
+            )
+        # ``params`` is the public/physical representation emitted by a fit
+        # (physical ``tE`` and ``rho``).  The native evaluator's seed
+        # contract is also physical ``tE`` but logarithmic finite-source
+        # radius.  Both spellings have existed in the backends, so normalize
+        # the canonical rho slot before handing it to ``_raw_seed``.  Without
+        # this conversion a saved rho=0.02 was interpreted as log(rho)=0.02,
+        # producing rho=exp(0.02)=1.02 and a catastrophically bad fixed
+        # evaluation in post-physical refinement.
+        seed = np.asarray(params, dtype=float).reshape(-1).copy()
+        raw_names = tuple(spec.raw_parameter_names)
+        physical_names = tuple(spec.parameter_names)
+        for raw_name in ("logrho", "log_rho"):
+            if raw_name in raw_names:
+                raw_index = raw_names.index(raw_name)
+                if "rho" not in physical_names:
+                    raise ValueError("finite-source evaluator is missing a public rho parameter")
+                physical_index = physical_names.index("rho")
+                seed[raw_index] = np.log(max(abs(float(seed[physical_index])), 1.0e-12))
+                break
+        fit = spec.fitter.evaluate_fixed(
+            time_np,
+            np.asarray(flux, dtype=float),
+            np.asarray(ferr, dtype=float),
+            seed,
+        )
+        if fs is not None and fb is not None:
+            fitted_fs = float(np.asarray(fit.fs))
+            fitted_fb = float(np.asarray(fit.fb))
+            if not np.isfinite(fitted_fs) or abs(fitted_fs) <= 1.0e-30:
+                raise ValueError("Cannot reconstruct magnification from zero fs.")
+            magnification = (
+                np.asarray(fit.model_flux, dtype=float) - fitted_fb
+            ) / fitted_fs
+            model_flux = float(fs) * magnification + float(fb)
+            residual = np.asarray(flux, dtype=float) - model_flux
+            ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+            chi2 = float(np.sum((residual / ferr_np) ** 2))
+            fit = replace(
+                fit,
+                fs=float(fs),
+                fb=float(fb),
+                model_flux=model_flux,
+                residual=residual,
+                chi2=chi2,
+                chi2_dof=chi2 / max(
+                    time_np.size - int(spec.parameter_dimension),
+                    1,
+                ),
+            )
+        object.__setattr__(
+            fit,
+            "model_kind",
+            self._physical_model_kind(str(effect)),
+        )
+        return fit
 
     def run_template_free(
         self,

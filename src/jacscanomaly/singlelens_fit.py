@@ -397,20 +397,51 @@ class CPPPSPLFitter:
             min_t0_support_points=int(self.min_t0_support_points),
             t0_support_tE_coeff=float(self.t0_support_tE_coeff),
         )
+        params_np = np.asarray(params, dtype=float)
+        model_np = np.asarray(model_flux, dtype=float)
+        residual_np = np.asarray(residual, dtype=float)
+        t0, tE, u0 = params_np[:3]
+        support = int(np.count_nonzero(
+            np.abs(time_np - t0)
+            <= float(self.t0_support_tE_coeff) * max(abs(tE), 1e-12)
+        ))
+        # ``fit_pspl`` uses an all-1e100 residual internally when a trial
+        # violates its support guard.  Older versions of the binding returned
+        # that sentinel as an ordinary fit (with fs=fb=0), which let a failed
+        # model corrupt downstream windows and plots.  Do not manufacture a
+        # fit result from that sentinel.
+        invalid_reason = None
+        if params_np.shape != (3,) or not np.all(np.isfinite(params_np)):
+            invalid_reason = "non-finite native parameters"
+        elif not np.isfinite(chi2) or float(chi2) / max(time_np.size, 1) >= 1e150:
+            invalid_reason = "native residual sentinel"
+        elif abs(float(u0)) < float(self.u0_min):
+            invalid_reason = "u0 below configured lower bound"
+        elif support < int(self.min_t0_support_points):
+            invalid_reason = (
+                f"only {support} points within "
+                f"{self.t0_support_tE_coeff:g} tE of t0"
+            )
+        elif not (np.all(np.isfinite(model_np)) and np.all(np.isfinite(residual_np))):
+            invalid_reason = "non-finite native model or residual"
+        if invalid_reason is not None:
+            raise RuntimeError(f"CPP PSPL fit rejected: {invalid_reason}")
         n = int(time_np.shape[0])
         chi2_dof = float(chi2) / max(n - 3, 1)
         fit = SingleLensFitResult(
             time=time_np,
             flux=flux_np,
             ferr=ferr_np,
-            params=jnp.asarray(params),
+            params=params_np,
             param_names=("t0", "tE", "u0"),
-            chi2=jnp.asarray(float(chi2)),
-            chi2_dof=jnp.asarray(chi2_dof),
-            fs=jnp.asarray(float(fs)),
-            fb=jnp.asarray(float(fb)),
-            model_flux=jnp.asarray(model_flux),
-            residual=jnp.asarray(residual),
+            chi2=float(chi2),
+            chi2_dof=chi2_dof,
+            fs=float(fs),
+            fb=float(fb),
+            model_flux=model_np,
+            residual=residual_np,
+            optimizer_success=True,
+            optimizer_status="native_cpp_lm",
         )
         self._last_fit = fit
         return fit
@@ -590,17 +621,66 @@ class CPPVBMFSPLFitter:
             time=time_np,
             flux=flux_np,
             ferr=ferr_np,
-            params=jnp.asarray(params),
+            params=np.asarray(params, dtype=float),
             param_names=("t0", "tE", "u0", "rho"),
-            chi2=jnp.asarray(float(chi2)),
-            chi2_dof=jnp.asarray(float(chi2) / max(n - 4, 1)),
-            fs=jnp.asarray(float(fs)),
-            fb=jnp.asarray(float(fb)),
-            model_flux=jnp.asarray(model_flux),
-            residual=jnp.asarray(residual),
-            raw_params=jnp.asarray(raw),
+            chi2=float(chi2),
+            chi2_dof=float(chi2) / max(n - 4, 1),
+            fs=float(fs),
+            fb=float(fb),
+            model_flux=np.asarray(model_flux, dtype=float),
+            residual=np.asarray(residual, dtype=float),
+            raw_params=np.asarray(raw, dtype=float),
             optimizer_success=bool(converged),
             optimizer_status=f"native_vbm_lm:iterations={int(iterations)}",
+        )
+        self._last_fit = fit
+        return fit
+
+    def evaluate_fixed(
+        self,
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        ferr: jnp.ndarray,
+        q0: jnp.ndarray,
+    ) -> SingleLensFitResult:
+        """Evaluate a saved FSPL solution without another nonlinear fit."""
+        time_np = np.asarray(time, dtype=float)
+        flux_np = np.asarray(flux, dtype=float)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+        q0_np = np.asarray(q0, dtype=float)
+        if q0_np.shape != (4,):
+            raise ValueError("q0 must be (t0, tE, u0, logrho).")
+        t0, tE, u0, logrho = map(float, q0_np)
+        tE_safe = max(abs(tE), 1.0e-12)
+        u = np.sqrt(((time_np - t0) / tE_safe) ** 2 + u0 * u0)
+        vbm = _make_vbm_magnifier(self.vbm_tol, self.vbm_reltol)
+        if self.espl_table_path is not None:
+            vbm.LoadESPLTable(str(self.espl_table_path))
+        rho = float(np.exp(np.clip(logrho, -50.0, 10.0)))
+        magnification = _vbm_espl_magnification(vbm, u, rho)
+        fs, fb = _solve_fs_fb_numpy(
+            magnification,
+            flux_np,
+            ferr_np,
+        )
+        model_flux = fs * magnification + fb
+        residual = flux_np - model_flux
+        chi2 = float(np.sum((residual / ferr_np) ** 2))
+        fit = SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=np.asarray([t0, tE, u0, rho], dtype=float),
+            param_names=("t0", "tE", "u0", "rho"),
+            chi2=chi2,
+            chi2_dof=chi2 / max(time_np.size - 4, 1),
+            fs=float(fs),
+            fb=float(fb),
+            model_flux=model_flux,
+            residual=residual,
+            raw_params=q0_np.copy(),
+            optimizer_success=True,
+            optimizer_status="native_vbm_fixed_evaluation",
         )
         self._last_fit = fit
         return fit

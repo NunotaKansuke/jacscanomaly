@@ -37,6 +37,12 @@ from .planet_signal import (
     PlanetSignalResult,
     PlanetSignalTiming,
 )
+from .anomaly_pipeline import (
+    AnomalyCandidate,
+    AnomalyPipelineConfig,
+    AnomalyPipelineResult,
+    build_anomaly_candidates,
+)
 from .pspl_fft import (
     PSPLFFTCandidate,
     PSPLFFTProfile,
@@ -133,6 +139,10 @@ __all__ = [
     "PlanetSignalIteration",
     "PlanetSignalResult",
     "PlanetSignalTiming",
+    "AnomalyPipelineConfig",
+    "AnomalyPipelineResult",
+    "AnomalyCandidate",
+    "build_anomaly_candidates",
     "PSPLFFTCandidate",
     "PSPLFFTProfile",
     "PSPLFFTScanner",
@@ -187,4 +197,4 @@ __all__ = [
     "run_parallax_exact_probe",
 ]
 
-__version__ = "0.5.1"
+__version__ = "0.5.3"

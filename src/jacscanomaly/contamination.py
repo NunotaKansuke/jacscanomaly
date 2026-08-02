@@ -25,6 +25,7 @@ class ContaminationConfig:
     max_protected_anomaly_fraction: float = 0.35
     anomaly_weight: float = 0.05
     min_weight: float = 0.02
+    forced_anomaly_weight: float = 1.0e-4
     weight_damping: float = 0.5
     max_iter: int = 8
     min_weight_change: float = 1.0e-3
@@ -185,14 +186,17 @@ def contamination_objective(
     )
     value = float(np.sum(np.where(s, _student_nll(z, config.anomaly_scale, config.student_dof) + occupancy, _student_nll(z, config.baseline_scale, config.student_dof))))
     value += float(np.sum(s.astype(float) * support_strength * support_penalty))
-    for i in range(1, s.size):
-        gap = float(t[i] - t[i - 1])
-        if gap > float(config.season_gap):
-            continue
-        if s[i] != s[i - 1]:
-            value += float(config.transition_penalty)
-        if s[i] and s[i - 1]:
-            value += float(config.span_penalty) * max(gap, 0.0)
+    if s.size > 1:
+        gaps = np.diff(t)
+        connected = gaps <= float(config.season_gap)
+        transitions = connected & (s[1:] != s[:-1])
+        anomaly_spans = connected & s[1:] & s[:-1]
+        value += float(config.transition_penalty) * float(
+            np.count_nonzero(transitions)
+        )
+        value += float(config.span_penalty) * float(
+            np.sum(np.maximum(gaps[anomaly_spans], 0.0))
+        )
     return float(value)
 
 
@@ -561,6 +565,9 @@ def robust_refine_with_fitter(
     )
     if forced_mask.size != t.size:
         raise ValueError("forced_anomaly_mask must match time.")
+    forced_weight = float(
+        np.clip(config.forced_anomaly_weight, 1.0e-12, 1.0)
+    )
     if initial_anomaly_mask is not None:
         initial_mask = np.asarray(initial_anomaly_mask, dtype=bool).reshape(-1)
         if initial_mask.size != t.size:
@@ -568,8 +575,10 @@ def robust_refine_with_fitter(
         initial_mask |= forced_mask
         weights = np.where(initial_mask, float(config.anomaly_weight), 1.0)
         weights = np.clip(weights, float(config.min_weight), 1.0)
+        weights[forced_mask] = forced_weight
     elif initial_standardized_residual is None:
         weights = np.where(forced_mask, float(config.anomaly_weight), 1.0)
+        weights[forced_mask] = forced_weight
     else:
         initial_z = np.asarray(initial_standardized_residual, dtype=float).reshape(-1)
         if initial_z.size != t.size or not np.all(np.isfinite(initial_z)):
@@ -589,6 +598,7 @@ def robust_refine_with_fitter(
             anomaly_weight=config.anomaly_weight,
             min_weight=config.min_weight,
         )
+        weights[forced_mask] = forced_weight
     initial_fit = _canonicalize_fit(
         fitter.fit(t, f, fe / np.sqrt(weights), current_x0),
         fe,
@@ -619,6 +629,7 @@ def robust_refine_with_fitter(
             anomaly_weight=config.anomaly_weight,
             min_weight=config.min_weight,
         )
+        raw_next_weights[forced_mask] = forced_weight
         damping = float(np.clip(config.weight_damping, 0.0, 1.0))
         next_weights = weights + damping * (raw_next_weights - weights)
         next_x0 = _parameter_vector(current_fit)
@@ -669,6 +680,7 @@ def robust_refine_with_fitter(
         anomaly_weight=config.anomaly_weight,
         min_weight=config.min_weight,
     )
+    final_weights[forced_mask] = forced_weight
     final_state_change = float(
         np.mean(final_segmentation.state != segmentation.state)
     )

@@ -1,3 +1,6 @@
+from dataclasses import replace
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -120,6 +123,48 @@ def test_planet_signal_extractor_masks_local_unexplained_signal():
     assert result.best.max_abs_z > 5.0
 
 
+def test_planet_signal_extractor_frozen_baseline_never_refits(monkeypatch):
+    time = np.linspace(0.0, 20.0, 240)
+    params = np.array([10.0, 5.0, 0.2])
+    ferr = np.full_like(time, 0.02)
+    flux = 2.0 * np.asarray(A_pspl_func(params, time)) + 0.1
+    flux += 0.3 * np.exp(-0.5 * ((time - 9.0) / 0.12) ** 2)
+    finder = Finder(
+        FinderConfig(
+            grid_backend="jax",
+            single_fit_backend="jax",
+            teff_init=0.08,
+            common_ratio=1.5,
+            teff_grid_n=6,
+            dt0_coeff=0.5,
+            min_pts_in_window=3,
+        )
+    )
+    initial_fit = finder.fit_single_lens(time, flux, ferr, x0=params)
+    extractor = PlanetSignalExtractor(
+        finder,
+        PlanetSignalConfig(max_iter=2, seed_min_dchi2=20.0, candidate_min_points=2),
+    )
+
+    def fail_refit(**_kwargs):
+        raise AssertionError("a frozen adopted model must not be refit")
+
+    monkeypatch.setattr(extractor, "_fit_masked_single_lens_and_evaluate_full", fail_refit)
+    result = extractor.run(
+        time,
+        flux,
+        ferr,
+        initial_fit=initial_fit,
+        refit=False,
+        freeze_baseline=True,
+        prior_signal_windows=((9.0, 0.25),),
+    )
+
+    assert result.refined_fit is initial_fit
+    assert result.signal_mask.any()
+    assert result.best is not None
+
+
 def test_planet_signal_extractor_robust_mode_downweights_connected_structure():
     time = np.linspace(0.0, 20.0, 360)
     params = np.array([10.0, 4.0, 0.25])
@@ -169,7 +214,7 @@ def test_planet_signal_extractor_robust_mode_downweights_connected_structure():
     assert np.any(result.signal_mask[bridge_core])
 
 
-def test_planet_signal_extractor_beam_interval_selects_connected_interval():
+def test_planet_signal_extractor_keeps_beam_intervals_compact_relative_to_tE():
     time = np.linspace(0.0, 20.0, 360)
     params = np.array([10.0, 4.0, 0.25])
     flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.05
@@ -208,9 +253,56 @@ def test_planet_signal_extractor_beam_interval_selects_connected_interval():
     result = extractor.run(time, flux, ferr, x0=params, refit=False)
 
     assert result.best is not None
-    assert result.best.t_start < 9.0
-    assert result.best.t_end > 10.9
-    assert np.all(result.signal_mask[(time > 9.4) & (time < 10.4)])
+    assert any(
+        candidate.t_start < 8.9 < candidate.t_end
+        for candidate in result.candidates
+    )
+    assert any(
+        candidate.t_start < 10.9 < candidate.t_end
+        for candidate in result.candidates
+    )
+    assert all(
+        candidate.t_end - candidate.t_start
+        <= 0.25 * abs(float(result.refined_fit.params[1]))
+        for candidate in result.candidates
+    )
+    assert not np.all(result.signal_mask[(time > 9.4) & (time < 10.4)])
+
+
+def test_prior_signal_window_does_not_mask_a_broad_smooth_residual(monkeypatch):
+    time = np.linspace(0.0, 20.0, 401)
+    params = np.array([10.0, 4.0, 0.2])
+    baseline_flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
+    ferr = np.full_like(time, 0.02)
+    finder = Finder(FinderConfig(grid_backend="jax"))
+    fit = finder.fit_single_lens(time, baseline_flux, ferr, x0=params)
+    flux = baseline_flux + 0.4 * np.exp(-0.5 * ((time - 10.0) / 2.0) ** 2)
+    residual = flux - np.asarray(fit.model_flux)
+    fit = replace(
+        fit,
+        flux=flux,
+        residual=residual,
+        chi2=np.asarray(np.sum(np.square(residual / ferr))),
+    )
+    extractor = PlanetSignalExtractor(
+        finder,
+        PlanetSignalConfig.fast(
+            beam_max_iter=0,
+            max_signal_span_over_tE=0.25,
+        ),
+    )
+
+    result = extractor.run(
+        time,
+        flux,
+        ferr,
+        initial_fit=fit,
+        refit=False,
+        freeze_baseline=True,
+        prior_signal_windows=((10.0, 8.0),),
+    )
+
+    assert not np.any(result.signal_mask)
 
 
 def test_beam_interval_stops_after_first_weak_scan(monkeypatch):
@@ -234,6 +326,56 @@ def test_beam_interval_stops_after_first_weak_scan(monkeypatch):
 
     assert len(calls) == 1
     assert not result.signal_mask.any()
+
+
+def test_default_beam_uses_three_adaptive_single_branch_iterations():
+    config = PlanetSignalConfig()
+
+    assert config.beam_max_iter == 3
+    assert config.beam_width == 1
+    assert config.beam_candidates_per_iter == 1
+
+
+def test_residual_measurement_config_does_not_cap_intervals_by_te():
+    config = PlanetSignalConfig.residual_measurement()
+
+    assert config.baseline_mode == "beam_interval"
+    assert np.isinf(config.max_signal_span_over_tE)
+    assert config.frozen_measurement_windows is True
+
+
+def test_beam_rejects_a_new_pspl_u0_boundary_solution():
+    extractor = PlanetSignalExtractor(Finder())
+    reference = SimpleNamespace(
+        params=np.asarray([100.0, 2.0, 0.0047]),
+        model_kind="pspl",
+    )
+    candidate = SimpleNamespace(
+        params=np.asarray([100.0, 2.4, -1.0e-4]),
+        model_kind="pspl",
+    )
+
+    assert extractor._continuation_hit_new_pspl_u0_bound(
+        reference,
+        candidate,
+    )
+
+
+def test_beam_keeps_a_pspl_solution_that_started_near_the_u0_bound():
+    extractor = PlanetSignalExtractor(Finder())
+    reference = SimpleNamespace(
+        params=np.asarray([100.0, 2.0, 1.5e-4]),
+        model_kind="pspl",
+    )
+    candidate = SimpleNamespace(
+        params=np.asarray([100.0, 2.1, 1.0e-4]),
+        model_kind="pspl",
+    )
+
+    assert not extractor._continuation_hit_new_pspl_u0_bound(
+        reference,
+        candidate,
+    )
 
 
 def test_beam_interval_stops_when_no_interval_is_adopted(monkeypatch):

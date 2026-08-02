@@ -140,6 +140,42 @@ def _adaptive_single_lens_curve(
     if xmax == xmin:
         xmax = xmin + 1.0
 
+    # Dense plotting windows can extend beyond a satellite ephemeris even
+    # though every observed point used by the fit is covered.  Native
+    # parallax evaluation intentionally rejects extrapolation, so clip only
+    # the display curve to the common ephemeris support.  This does not alter
+    # the fitted model or any anomaly statistic.
+    projector = getattr(fit, "parallax_projector", None)
+    if projector is not None and hasattr(projector, "time_spec"):
+        offset = float(getattr(projector.time_spec, "offset", 0.0))
+        lower_support: list[float] = []
+        upper_support: list[float] = []
+        for eph in (
+            getattr(projector, "earth_ephemeris", None),
+            getattr(projector, "satellite_or_observer_ephemeris", None),
+            getattr(projector, "reference_ephemeris", None),
+        ):
+            if eph is None or getattr(eph, "extrapolation", "reject") != "reject":
+                continue
+            eph_time = np.asarray(getattr(eph, "time", ()), dtype=float)
+            if eph_time.size:
+                lower_support.append(float(eph_time[0]) - offset)
+                upper_support.append(float(eph_time[-1]) - offset)
+        if lower_support:
+            xmin = max(xmin, max(lower_support))
+            xmax = min(xmax, min(upper_support))
+            if xmax <= xmin:
+                observed_time = np.asarray(getattr(fit, "time", ()), dtype=float)
+                observed_time = observed_time[np.isfinite(observed_time)]
+                if observed_time.size:
+                    xmin = max(float(np.min(observed_time)), max(lower_support))
+                    xmax = min(float(np.max(observed_time)), min(upper_support))
+            if xmax <= xmin:
+                raise ValueError(
+                    "No common ephemeris support is available for the "
+                    "requested model-curve window."
+                )
+
     n0 = max(2, int(base_points))
     x = np.linspace(xmin, xmax, n0)
     y = _single_lens_model_flux(fit, x)
@@ -157,7 +193,13 @@ def _adaptive_single_lens_curve(
     max_flux_step = max(float(max_flux_step), np.finfo(float).eps)
 
     if min_time_step is None:
-        min_time_step = max((xmax - xmin) / max_points, 1e-6)
+        # ``max_points`` is a global budget, not a uniform-grid resolution.
+        # A span-wide floor (span / max_points) prevents a narrow high-curvature
+        # feature from being refined when the requested xlim is very broad
+        # (e.g. a high-magnification u0~0 PSPL event).  Keep a much smaller
+        # numerical floor and let the global point budget decide where points
+        # are spent; this preserves adaptive allocation around sharp features.
+        min_time_step = max((xmax - xmin) / (max_points * 16.0), 1e-8)
     min_time_step = max(float(min_time_step), np.finfo(float).eps)
 
     for _ in range(max_iter):

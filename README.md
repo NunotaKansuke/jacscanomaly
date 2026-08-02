@@ -75,6 +75,11 @@ result = finder.run(time, flux, ferr)
 
 result.print_summary()
 
+# For the complete adopted-model anomaly workflow:
+# result = finder.run_anomaly_pipeline(time, flux, ferr)
+# print(result.has_anomaly_candidate)
+# print(result.best_anomaly_candidate)
+
 # In notebooks, get a one-row table:
 # display(result.summary_table())
 ```
