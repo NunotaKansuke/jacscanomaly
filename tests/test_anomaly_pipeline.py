@@ -267,6 +267,7 @@ def test_unified_candidates_merge_feature_with_template_free_statistics():
         "t_start": 9.8,
         "t_end": 10.3,
         "timescale": 0.5,
+        "half_width": 0.25,
         "max_abs_z": 12.0,
         "signed_z": 12.0,
         "fractional_deviation": 0.18,

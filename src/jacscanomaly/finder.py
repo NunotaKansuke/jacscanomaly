@@ -879,11 +879,30 @@ class Finder:
                 planet_mask=planet_mask,
             )
         )
+        # A compact signal can be routed as ``planet`` before the physical
+        # model comparison has had a chance to test whether it is actually
+        # finite-source structure.  Keep FSPL/parallax candidates with that
+        # diagnostic in the comparison set; the fallback's complementary
+        # (non-planet) BIC gate still decides whether the physical model wins.
         fallback_candidates = tuple(
             candidate
             for candidate in effects
-            if getattr(candidate, "decision", "skip") == "fallback"
+            if (
+                getattr(candidate, "decision", "skip") == "fallback"
+                or (
+                    getattr(candidate, "decision", "skip") == "planet"
+                    and getattr(candidate, "effect", "")
+                    in {"fspl", "annual_parallax"}
+                    and "planet_morphology_dominated"
+                    in tuple(getattr(candidate, "reason_codes", ()))
+                )
+            )
         )
+        if any(
+            getattr(candidate, "decision", "skip") == "planet"
+            for candidate in fallback_candidates
+        ):
+            reason_codes.append("planet_candidate_included_for_physical_comparison")
         reason_codes.append("post_planet_effect_diagnostics_completed")
         fallback_result = None
         selected_fit = baseline_fit

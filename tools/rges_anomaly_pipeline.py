@@ -467,6 +467,22 @@ def _run_one(
         safe_event,
         display_mask=display_mask,
     )
+    model_comparison = []
+    if fallback_result is not None:
+        for stage in tuple(getattr(fallback_result, "stage_results", ())):
+            model_comparison.append(
+                {
+                    "effect": getattr(stage, "effect", None),
+                    "success": getattr(stage, "success", None),
+                    "bic_improvement": getattr(stage, "bic_improvement", None),
+                    "baseline_bic": getattr(stage, "baseline_bic", None),
+                    "selected_bic": getattr(stage, "selected_bic", None),
+                    "selected_original_chi2": getattr(
+                        stage, "selected_original_chi2", None
+                    ),
+                    "reason_codes": getattr(stage, "reason_codes", ()),
+                }
+            )
     plot_indices = _plot_indices(time_values, display_mask, plot_points)
     payload = {
         "schema_version": 2,
@@ -506,6 +522,7 @@ def _run_one(
                     "selected_bic": fallback_result.selected_bic,
                     "n_attempts": len(fallback_result.attempts),
                     "model_spec": fallback_result.model_spec,
+                    "model_comparison": model_comparison,
                 }
                 if fallback_result is not None
                 else None

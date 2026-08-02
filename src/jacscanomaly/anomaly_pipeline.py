@@ -77,6 +77,7 @@ class AnomalyCandidate:
             "t_start": float(self.t_start),
             "t_end": float(self.t_end),
             "timescale": float(self.timescale),
+            "half_width": float(max(self.t_end - self.t_start, 0.0) / 2.0),
             "max_abs_z": float(self.max_abs_z),
             "signed_z": None if self.signed_z is None else float(self.signed_z),
             "fractional_deviation": (

@@ -37,6 +37,36 @@ def _canonical_scripts() -> dict[str, str]:
     missing = wanted - found.keys()
     if missing:
         raise RuntimeError(f"canonical Roman HTML blocks missing: {sorted(missing)}")
+
+    # The canonical Roman page predates the unified RGES candidate schema and
+    # draws overlays only from ``features.items``.  Keep its CSS/plot plumbing,
+    # but make both public plots consume the adopted candidate list whenever it
+    # is available.  This is what allows template-free-only candidates to get
+    # the same center/range overlay as measured peak/dip features.
+    event_js = found["EVENT_JS"]
+    event_js = event_js.replace(
+        "const shown = d.features?.items || [];",
+        "const shown = (d.anomaly_candidates?.length ? d.anomaly_candidates : (d.features?.items || [])).map(p => ({...p, time: p.t_center ?? p.time}));",
+    )
+    event_js = event_js.replace(
+        "const color = p.kind === 'dip' ? C.dip_range : C.peak_range;",
+        "const color = Number(p.signed_z ?? (p.kind === 'dip' ? -1 : 1)) < 0 ? C.dip_range : C.peak_range;",
+    )
+    feature_js = found["FEATURE_EVENT_JS"]
+    feature_js = feature_js.replace(
+        "(measured.features || []).forEach(feature => {",
+        "(measured.candidates || measured.features || []).forEach(feature => {",
+    )
+    feature_js = feature_js.replace(
+        "const color = feature.kind === 'dip' ? '#16a34a' : '#dc2626';",
+        "const color = Number(feature.signed_z ?? (feature.kind === 'dip' ? -1 : 1)) < 0 ? '#16a34a' : '#dc2626';",
+    )
+    feature_js = feature_js.replace(
+        "features: signal.features?.items || []",
+        "features: signal.features?.items || [],\n      candidates: (signal.anomaly_candidates?.length ? signal.anomaly_candidates : (signal.features?.items || [])).map(c => ({...c, time: c.t_center ?? c.time}))",
+    )
+    found["EVENT_JS"] = event_js
+    found["FEATURE_EVENT_JS"] = feature_js
     return found
 
 
@@ -103,10 +133,25 @@ def _event_xlim(payload: dict[str, Any], time_values: list[Any]) -> list[float]:
     if t0 is None or t_e is None or u0 is None:
         return _xlim(time_values)
 
-    # Same scale as the canonical Roman event plot: 3 tE effective widths,
-    # with a five-day minimum half-width.  This keeps the whole event visible
-    # without opening the plot to an entire observing season.
-    half_width = max(3.0 * abs(t_e) * max(abs(u0), 1.0), 5.0)
+    model_kind = str(selected.get("model_kind", "")).lower()
+    rho = _finite(params.get("rho"))
+    if rho is None:
+        rho = _finite(params.get("logrho"))
+        if rho is not None:
+            rho = math.exp(rho)
+
+    # A finite-source fit can have an effectively unconstrained tE when the
+    # light curve only measures the source-crossing core.  Using that raw tE
+    # for the initial display range opens the plot to the entire season (for
+    # RMDC26_000004 it is ~488,000 days).  When tE is longer than the observed
+    # baseline, use the measured impact/source-crossing scale instead.
+    data_span = (max(finite_time) - min(finite_time)) if finite_time else 0.0
+    if "fspl" in model_kind and rho is not None and abs(t_e) > max(data_span, 1.0):
+        effective_scale = abs(t_e) * max(math.hypot(abs(u0), abs(rho)), 1.0e-6)
+    else:
+        effective_scale = abs(t_e) * max(abs(u0), 1.0)
+    # Keep a several-width event view, with a five-day minimum half-width.
+    half_width = max(3.0 * effective_scale, 5.0)
     lo, hi = t0 - half_width, t0 + half_width
 
     # Keep a separated anomaly and every adopted planet-signal point in the
@@ -539,9 +584,17 @@ def _make_template_free_zoom(payload: dict[str, Any], target: Path) -> bool:
     return True
 
 
-def _event_page(row: dict[str, Any], manifest: list[dict[str, Any]], scripts: dict[str, str], out_dir: Path) -> None:
+def _event_page(
+    row: dict[str, Any],
+    manifest: list[dict[str, Any]],
+    scripts: dict[str, str],
+    out_dir: Path,
+    navigation_events: list[str] | None = None,
+) -> None:
     event = row["event"]
-    ordered = [item["event"] for item in manifest]
+    ordered = list(navigation_events or [item["event"] for item in manifest])
+    if event not in ordered:
+        ordered.append(event)
     position = ordered.index(event)
     previous = ordered[position - 1] if position > 0 else None
     following = ordered[position + 1] if position + 1 < len(ordered) else None
@@ -711,10 +764,15 @@ def build_html(
     _index_page(manifest, scripts, out_dir)
 
     by_event = {row["event"]: row for row in rows_to_write}
+    # Navigation follows the complete known event sequence, not only the
+    # pages already generated in the incremental portal.  This intentionally
+    # creates anchors to future pages; the serial runner will publish those
+    # files later in the same run.
+    navigation_events = sorted({row["event"] for row in all_rows})
     for manifest_row in manifest:
         row = by_event.get(manifest_row["event"])
         if row is not None:
-            _event_page(row, manifest, scripts, out_dir)
+            _event_page(row, manifest, scripts, out_dir, navigation_events)
     _write_legacy_redirects(out_dir, manifest)
 
     build_version = version or f"v{datetime.now(timezone.utc).strftime('%Y.%m.%d.%H%M')}"
