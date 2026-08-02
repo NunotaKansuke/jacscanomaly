@@ -113,7 +113,7 @@ Add `tests/test_pspl_fft.py` covering:
 
 ## Documentation
 
-Add `docs/pspl_fft.rst` with the equations, the distinction between observation count `M` and FFT-grid length `G`, irregular-cadence behavior, an example template-bank search, and refinement through `PSPLFitter`.
+Add `docs/pspl_fft.md` with the equations, the distinction between observation count `M` and FFT-grid length `G`, irregular-cadence behavior, an example template-bank search, and refinement through `PSPLFitter`.
 
 Link the page from `docs/index.rst` if the existing toctree structure permits a minimal edit.
 

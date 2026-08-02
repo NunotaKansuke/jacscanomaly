@@ -114,6 +114,69 @@ def test_search_recovers_seed_from_irregular_sampling():
     np.testing.assert_allclose(result.initial_guesses()[0], result.best.as_pspl_params())
 
 
+def test_batched_tE_plane_matches_scalar_template_scans():
+    rng = np.random.default_rng(41)
+    time = np.arange(0.0, 24.0, 0.05)
+    time = time[rng.random(time.size) > 0.3]
+    ferr = rng.uniform(0.02, 0.08, time.size)
+    flux = (
+        1.7
+        + 0.9 * pspl_excess_magnification(time - 11.3, 0.18, 0.18 * 7.0)
+        + rng.normal(0.0, ferr)
+    )
+    u0_grid = np.array([0.05, 0.18, 0.7])
+    scanner = PSPLFFTScanner(grid_dt=0.05, positive_source=False)
+
+    batched = scanner.scan_tE(time, flux, ferr, u0_grid=u0_grid, tE=7.0)
+
+    assert len(batched) == len(u0_grid)
+    for u0, batch_profile in zip(u0_grid, batched):
+        scalar = scanner.scan_template(
+            time,
+            flux,
+            ferr,
+            u0=float(u0),
+            teff=float(u0 * 7.0),
+        )
+        assert batch_profile.tE == pytest.approx(7.0)
+        np.testing.assert_array_equal(batch_profile.valid, scalar.valid)
+        np.testing.assert_allclose(batch_profile.delta_chi2, scalar.delta_chi2, rtol=2e-12, atol=2e-9)
+        np.testing.assert_allclose(batch_profile.fs, scalar.fs, rtol=2e-12, atol=2e-11)
+        np.testing.assert_allclose(batch_profile.f0, scalar.f0, rtol=2e-12, atol=2e-11)
+        np.testing.assert_allclose(batch_profile.fb, scalar.fb, rtol=2e-12, atol=2e-11)
+
+
+def test_tE_outer_search_recovers_source_plane_row_and_scale():
+    rng = np.random.default_rng(52)
+    dt = 0.04
+    time = np.sort(rng.uniform(0.0, 36.0, 600))
+    true_t0 = 17.2
+    true_u0 = 0.25
+    true_tE = 6.0
+    ferr = rng.uniform(0.02, 0.05, time.size)
+    flux = 2.1 + 1.3 * pspl_excess_magnification(
+        time - true_t0,
+        true_u0,
+        true_u0 * true_tE,
+    )
+    flux += rng.normal(0.0, ferr)
+
+    result = PSPLFFTScanner(grid_dt=dt).search_tE(
+        time,
+        flux,
+        ferr,
+        u0_grid=[0.1, 0.25, 0.5],
+        tE_grid=[4.0, 6.0, 9.0],
+        top_k=5,
+    )
+
+    assert result.best is not None
+    assert abs(result.best.t0 - true_t0) <= dt
+    assert result.best.u0 == pytest.approx(true_u0)
+    assert result.best.tE == pytest.approx(true_tE)
+    np.testing.assert_allclose(result.tE_grid, [4.0, 6.0, 9.0])
+
+
 def test_positive_source_constraint_projects_negative_event_to_baseline():
     time = np.linspace(0.0, 20.0, 201)
     ferr = np.full_like(time, 0.05)
@@ -167,9 +230,15 @@ def test_validation_and_grid_guard():
         PSPLFFTScanner(grid_dt=0.1).search(
             time, flux, ferr, u0_grid=[], teff_grid=[1.0]
         )
+    with pytest.raises(ValueError, match="tE_grid"):
+        PSPLFFTScanner(grid_dt=0.1).search_tE(
+            time, flux, ferr, u0_grid=[0.2], tE_grid=[]
+        )
+    with pytest.raises(ValueError, match="fft_workers"):
+        PSPLFFTScanner(grid_dt=0.1, fft_workers=0)
 
 
-def test_finder_uses_two_dimensional_pspl_fft_initialization():
+def test_finder_uses_tE_outer_batched_pspl_fft_initialization():
     rng = np.random.default_rng(3)
     time = np.linspace(0.0, 20.0, 401)
     true_t0 = 10.0
@@ -188,6 +257,9 @@ def test_finder_uses_two_dimensional_pspl_fft_initialization():
             auto_init_u0_min=0.1,
             auto_init_u0_max=0.4,
             auto_init_u0_grid_n=4,
+            auto_init_tE_min=2.5,
+            auto_init_tE_max=5.0,
+            auto_init_fft_tE_grid_n=4,
             auto_init_fft_grid_dt=0.05,
             auto_init_fft_max_grid_points=1_000,
             auto_init_fft_top_k=4,
@@ -204,5 +276,7 @@ def test_finder_uses_two_dimensional_pspl_fft_initialization():
     teff = guesses[:, 1] * guesses[:, 2]
     assert np.min(np.abs(guesses[:, 0] - true_t0)) <= 0.05
     assert np.min(np.abs(teff - true_teff)) <= 0.1
+    assert np.all(guesses[:, 1] >= 2.5)
+    assert np.all(guesses[:, 1] <= 5.0)
     assert np.all(guesses[:, 1] > 0.0)
     assert np.all(guesses[:, 2] > 0.0)

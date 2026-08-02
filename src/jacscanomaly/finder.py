@@ -1760,45 +1760,46 @@ class Finder:
         ferr_j: jnp.ndarray,
         time_np: np.ndarray,
     ) -> np.ndarray:
-        """Estimate PSPL starts with a profiled ``(u0, teff, t0)`` FFT bank."""
+        """Estimate PSPL starts with a profiled ``tE -> (u0, t0)`` FFT bank."""
         cfg = self.config
-        if cfg.auto_init_teff_min <= 0 or cfg.auto_init_teff_max <= 0:
-            raise ValueError("auto_init_teff_min and auto_init_teff_max must be positive.")
-        if cfg.auto_init_teff_max < cfg.auto_init_teff_min:
-            raise ValueError("auto_init_teff_max must be >= auto_init_teff_min.")
         if cfg.auto_init_u0_min <= 0 or cfg.auto_init_u0_max <= 0:
             raise ValueError("auto_init_u0_min and auto_init_u0_max must be positive.")
         if cfg.auto_init_u0_max < cfg.auto_init_u0_min:
             raise ValueError("auto_init_u0_max must be >= auto_init_u0_min.")
+        if cfg.auto_init_tE_min <= 0 or cfg.auto_init_tE_max <= 0:
+            raise ValueError("auto_init_tE_min and auto_init_tE_max must be positive.")
+        if cfg.auto_init_tE_max < cfg.auto_init_tE_min:
+            raise ValueError("auto_init_tE_max must be >= auto_init_tE_min.")
 
-        n_teff = int(cfg.auto_init_teff_grid_n)
         n_u0 = int(cfg.auto_init_u0_grid_n)
+        n_tE = int(cfg.auto_init_fft_tE_grid_n)
         top_k = int(cfg.auto_init_fft_top_k)
-        if n_teff < 1 or n_u0 < 1:
+        if n_tE < 1 or n_u0 < 1:
             raise ValueError("PSPL FFT template-grid sizes must be at least one.")
         if top_k < 1:
             raise ValueError("auto_init_fft_top_k must be at least one.")
 
-        teff_grid = np.geomspace(
-            float(cfg.auto_init_teff_min),
-            float(cfg.auto_init_teff_max),
-            n_teff,
-        )
         u0_grid = np.geomspace(
             float(cfg.auto_init_u0_min),
             float(cfg.auto_init_u0_max),
             n_u0,
         )
+        tE_grid = np.geomspace(
+            float(cfg.auto_init_tE_min),
+            float(cfg.auto_init_tE_max),
+            n_tE,
+        )
         scanner = PSPLFFTScanner(
             grid_dt=cfg.auto_init_fft_grid_dt,
             max_grid_points=int(cfg.auto_init_fft_max_grid_points),
+            fft_workers=int(cfg.auto_init_fft_workers),
         )
-        search = scanner.search(
+        search = scanner.search_tE(
             time_np,
             np.asarray(jax.device_get(flux_j), dtype=float),
             np.asarray(jax.device_get(ferr_j), dtype=float),
             u0_grid=u0_grid,
-            teff_grid=teff_grid,
+            tE_grid=tE_grid,
             top_k=top_k,
         )
 

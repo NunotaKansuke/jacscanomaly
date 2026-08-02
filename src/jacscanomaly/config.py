@@ -129,13 +129,13 @@ class FinderConfig:
     # 0b) Automatic single-lens initialization
     # ==================================================
     auto_init_teff_min: float = 0.03
-    """Smallest teff used by the PSPL FFT initial-value search."""
+    """Smallest teff used by legacy initialization and the PSPL flat fallback."""
 
     auto_init_teff_max: float = 100.0
-    """Largest teff used by the PSPL FFT initial-value search."""
+    """Largest teff used by legacy initialization and the PSPL flat fallback."""
 
     auto_init_teff_grid_n: int = 24
-    """Number of logarithmic teff templates used for PSPL initialization."""
+    """Number of logarithmic teff templates used by non-PSPL initialization."""
 
     auto_init_dt0_coeff: float = 0.25
     """Legacy t0 grid spacing coefficient used for non-PSPL initialization."""
@@ -159,7 +159,7 @@ class FinderConfig:
     """Largest u0 template used by the PSPL FFT initial-value search."""
 
     auto_init_u0_grid_n: int = 8
-    """Number of logarithmic u0 templates used by the PSPL FFT search."""
+    """Number of source-plane u0 rows evaluated together for each PSPL tE."""
 
     auto_init_fft_grid_dt: Optional[float] = 0.02
     """Regular FFT time spacing used for PSPL initialization."""
@@ -170,14 +170,20 @@ class FinderConfig:
     auto_init_fft_top_k: int = 4
     """Number of ranked PSPL FFT seeds passed to the fitter."""
 
+    auto_init_fft_workers: int = -1
+    """SciPy worker count for batched PSPL FFTs; -1 uses all available CPUs."""
+
+    auto_init_fft_tE_grid_n: int = 24
+    """Number of logarithmic outer tE scales used by the PSPL FFT search."""
+
     auto_init_tE_min: float = 1.0
-    """Smallest legacy tE seed used for non-PSPL initialization."""
+    """Smallest tE scale used by PSPL FFT and legacy non-PSPL initialization."""
 
     auto_init_tE_max: float = 1000.0
-    """Largest legacy tE seed used for non-PSPL initialization."""
+    """Largest tE scale used by PSPL FFT and legacy non-PSPL initialization."""
 
     auto_init_tE_grid_n: int = 4
-    """Number of legacy tE seeds used for non-PSPL initialization."""
+    """Number of legacy tE seeds used by non-PSPL initialization."""
 
     auto_init_logrho: float = -7.0
     """Initial logrho used for FSPL models when x0 is omitted."""
