@@ -94,6 +94,9 @@ class PlanetSignalConfig:
     scan_unimodal_peak_frac: float = 0.2
     scan_unimodal_smooth_points: int = 5
     scan_unimodal_max_lobes: int = 1
+    # In a frozen final-measurement pass this window is only the domain over
+    # which peak/dip widths are measured.  It is never fed back into a fit.
+    frozen_measurement_windows: bool = False
 
     @classmethod
     def fast(cls, **overrides) -> "PlanetSignalConfig":
@@ -125,6 +128,24 @@ class PlanetSignalConfig:
         values = {"beam_probe_only": True}
         values.update(overrides)
         return cls.fast(**values)
+
+    @classmethod
+    def residual_measurement(cls, **overrides) -> "PlanetSignalConfig":
+        """Return the frozen, final-residual measurement configuration.
+
+        This pass never changes the adopted single-lens model.  Its intervals
+        are measurements of residual structure, rather than exclusions used
+        to improve a fit, so they must not be capped by the model timescale.
+        In particular, a poor or nearly-flat PSPL null must not erase a real
+        residual peak merely because its fitted ``tE`` is short.
+        """
+        values = {
+            "baseline_mode": "beam_interval",
+            "max_signal_span_over_tE": float("inf"),
+            "frozen_measurement_windows": True,
+        }
+        values.update(overrides)
+        return cls(**values)
 
     @classmethod
     def post_physical(cls, *, max_refits: int = 3, **overrides) -> "PlanetSignalConfig":
@@ -1745,15 +1766,23 @@ class PlanetSignalExtractor:
             )
             half_width = min(half_width, self._signal_half_width_cap(initial_fit))
             seed_window = np.abs(time_np - float(seed.t0)) <= half_width
-            new_mask = self._template_improvement_mask_from_seed(
-                time_np=time_np,
-                time_j=time_j,
-                residual_j=residual_j,
-                ferr_j=ferr_j,
-                seed_window=seed_window,
-                seed_t0=float(seed.t0),
-                seed_teff=float(seed.teff),
-            )
+            if bool(self.config.frozen_measurement_windows):
+                # A frozen pass is only measuring residual morphology.  Keep
+                # the complete Finder window so FWHM crossings and adjacent
+                # peak--dip structure are available to the feature detector;
+                # unlike a fit mask, this interval cannot contaminate the
+                # adopted single-lens model.
+                new_mask = self._exclude_mask_protection(seed_window)
+            else:
+                new_mask = self._template_improvement_mask_from_seed(
+                    time_np=time_np,
+                    time_j=time_j,
+                    residual_j=residual_j,
+                    ferr_j=ferr_j,
+                    seed_window=seed_window,
+                    seed_t0=float(seed.t0),
+                    seed_teff=float(seed.teff),
+                )
             combined = signal_mask | new_mask
             added = int(np.sum(combined) - np.sum(signal_mask))
             if added <= 0 or np.mean(combined) > float(self.config.max_mask_fraction):

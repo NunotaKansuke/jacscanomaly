@@ -6,6 +6,24 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [0.5.3] - 2026-08-03
+
+### Added
+- Added `Finder.run_anomaly_pipeline()` as the one-call adopted-model
+  workflow with a mandatory frozen final-residual measurement pass.
+- Added unified ranked anomaly candidates through
+  `has_anomaly_candidate`, `best_anomaly_candidate`, and
+  `anomaly_candidates`.
+- RGES F146 artifacts now store the unified candidate list as the canonical
+  JSON/HTML reporting source, while retaining feature and template-free
+  details for auditability.
+
+### Fixed
+- Candidate reporting no longer disappears when a post-physical continuation
+  refit is rejected and its exclusion mask is rolled back.
+- HTML display masks remain limited to points actually excluded by an accepted
+  fit; frozen residual measurement windows are not treated as display masks.
+
 ## [0.5.2] - 2026-07-29
 
 ### Added

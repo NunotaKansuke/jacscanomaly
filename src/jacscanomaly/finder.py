@@ -49,6 +49,7 @@ from .parallax_backend import native_parallax_effect_score
 from .contamination import protected_support_mask
 
 if TYPE_CHECKING:
+    from .anomaly_pipeline import AnomalyPipelineConfig, AnomalyPipelineResult
     from .planet_signal import PlanetSignalConfig
 
 
@@ -992,7 +993,7 @@ class Finder:
                     reason_codes.append("fallback_accepted")
                 else:
                     reason_codes.append("fallback_rejected")
-            except Exception as exc:
+            except Exception:
                 reason_codes.append("fallback_failed")
                 fallback_result = None
                 logger.debug("effect-aware fallback failed", exc_info=True)
@@ -1042,6 +1043,205 @@ class Finder:
             planet_after=planet_after,
             candidate_matches=matches,
             final_candidates=final_candidates,
+            reason_codes=tuple(reason_codes),
+            diagnostics=diagnostics,
+        )
+
+    def run_anomaly_pipeline(
+        self,
+        time,
+        flux,
+        ferr,
+        x0=None,
+        *,
+        data_kind: Literal["flux", "mag"] = "flux",
+        config: Optional["AnomalyPipelineConfig"] = None,
+        verbose: bool = False,
+    ) -> "AnomalyPipelineResult":
+        """Run model selection through final frozen-residual measurement.
+
+        This is the high-level, one-line anomaly API.  It preserves
+        :meth:`run_effect_aware` as the lower-level before/router/fallback/after
+        primitive, then guarantees that feature measurement is repeated with
+        the adopted single-lens fit frozen.  A rejected post-physical refit can
+        therefore clear the display/exclusion mask without erasing a genuine
+        feature from the final raw residual.
+        """
+        from .anomaly_pipeline import (
+            AnomalyPipelineConfig,
+            AnomalyPipelineResult,
+            build_anomaly_candidates,
+        )
+        from .planet_signal import PlanetSignalExtractor
+
+        resolved = AnomalyPipelineConfig() if config is None else config
+        effect_aware = self.run_effect_aware(
+            time,
+            flux,
+            ferr,
+            x0,
+            data_kind=data_kind,
+            run_planet_before=True,
+            run_planet_after=True,
+            planet_config=resolved.planet,
+            planet_fast_mode=bool(resolved.planet_fast_mode),
+            post_physical_max_refits=max(
+                0, int(resolved.post_physical_max_refits)
+            ),
+            routing_thresholds=resolved.routing_thresholds,
+            fallback_config=resolved.fallback,
+            verbose=verbose,
+        )
+        _, _, _, _, time_np, flux_np, ferr_np = self._to_arrays(
+            time,
+            flux,
+            ferr,
+            x0,
+            data_kind=data_kind,
+        )
+
+        fallback_accepted = bool(
+            effect_aware.fallback_result is not None
+            and effect_aware.fallback_result.success
+        )
+        refinement_source = (
+            effect_aware.planet_after
+            if fallback_accepted
+            else effect_aware.planet_before
+        )
+        adopted_fit = effect_aware.selected_fit
+        post_refinement_reset = False
+        post_refits_completed = 0
+        if refinement_source is not None:
+            refinement_iterations = len(tuple(refinement_source.iterations))
+            if fallback_accepted:
+                post_refits_completed = refinement_iterations
+            candidate_fit = refinement_source.refined_fit
+            if fallback_accepted:
+                parent_chi2 = float(np.asarray(effect_aware.selected_fit.chi2_dof))
+                candidate_chi2 = float(np.asarray(candidate_fit.chi2_dof))
+                allowed = max(
+                    parent_chi2
+                    * float(resolved.post_refinement_max_chi2_ratio),
+                    parent_chi2
+                    + float(resolved.post_refinement_max_chi2_delta),
+                )
+                if not np.isfinite(candidate_chi2) or candidate_chi2 > allowed:
+                    post_refinement_reset = True
+                    post_refits_completed = 0
+                else:
+                    adopted_fit = candidate_fit
+            else:
+                adopted_fit = candidate_fit
+
+        fit_exclusion_mask = np.zeros(time_np.shape, dtype=bool)
+        if (
+            refinement_source is not None
+            and not post_refinement_reset
+            and tuple(refinement_source.iterations)
+        ):
+            signal_mask = np.asarray(
+                refinement_source.signal_mask, dtype=bool
+            ).reshape(-1)
+            point_weight = np.asarray(
+                refinement_source.point_weight, dtype=float
+            ).reshape(-1)
+            if signal_mask.size != time_np.size:
+                raise RuntimeError(
+                    "Refinement signal mask does not match the input light curve."
+                )
+            fit_exclusion_mask = (
+                signal_mask & (point_weight <= 0.0)
+                if point_weight.size == signal_mask.size
+                else signal_mask.copy()
+            )
+
+        # Enforce the invariant even when a caller supplies a custom final
+        # measurement configuration: this stage may measure windows but must
+        # never change the adopted model or cap them by its tE.
+        measurement_config = replace(
+            resolved.final_measurement,
+            max_signal_span_over_tE=float("inf"),
+            frozen_measurement_windows=True,
+        )
+        final_measurement = PlanetSignalExtractor(
+            self, measurement_config
+        ).run(
+            time_np,
+            flux_np,
+            ferr_np,
+            initial_fit=adopted_fit,
+            refit=False,
+            freeze_baseline=True,
+            verbose=verbose,
+        )
+        adopted_params = np.asarray(adopted_fit.params, dtype=float)
+        measured_params = np.asarray(
+            final_measurement.refined_fit.params, dtype=float
+        )
+        if (
+            str(getattr(final_measurement.refined_fit, "model_kind", ""))
+            != str(getattr(adopted_fit, "model_kind", ""))
+            or not np.array_equal(measured_params, adopted_params)
+        ):
+            raise RuntimeError(
+                "Final residual measurement changed the adopted single-lens fit."
+            )
+
+        features = final_measurement.measure_features(resolved.features)
+        template_free = self.run_template_free(
+            time_np,
+            flux_np,
+            ferr_np,
+            data_kind="flux",
+            fit=adopted_fit,
+            config=resolved.template_free,
+        )
+        candidates = build_anomaly_candidates(
+            features,
+            template_free,
+            time=time_np,
+            fit_exclusion_mask=fit_exclusion_mask,
+            adopted_model=str(getattr(adopted_fit, "model_kind", "unknown")),
+            cadence_factor=resolved.candidate_merge_cadence_factor,
+        )
+        reason_codes = list(effect_aware.reason_codes)
+        if post_refinement_reset:
+            reason_codes.append("post_physical_refinement_reset")
+        reason_codes.extend(
+            (
+                "final_residual_measurement_completed",
+                "template_free_search_completed",
+            )
+        )
+        diagnostics = {
+            **dict(effect_aware.diagnostics),
+            "planet_before_refits_completed": int(
+                len(tuple(effect_aware.planet_before.iterations))
+                if effect_aware.planet_before is not None
+                else 0
+            ),
+            "post_physical_refits_completed": int(post_refits_completed),
+            "post_physical_mask_points": int(
+                np.sum(fit_exclusion_mask) if fallback_accepted else 0
+            ),
+            "fit_exclusion_mask_points": int(np.sum(fit_exclusion_mask)),
+            "post_physical_refinement_reset": bool(post_refinement_reset),
+            "final_measurement_mask_points": int(
+                np.sum(final_measurement.signal_mask)
+            ),
+            "final_feature_count": int(features.n_peaks + features.n_dips),
+            "anomaly_candidate_count": len(candidates),
+        }
+        return AnomalyPipelineResult(
+            effect_aware=effect_aware,
+            adopted_fit=adopted_fit,
+            post_physical_result=effect_aware.planet_after,
+            fit_exclusion_mask=fit_exclusion_mask,
+            final_measurement=final_measurement,
+            features=features,
+            template_free=template_free,
+            candidates=candidates,
             reason_codes=tuple(reason_codes),
             diagnostics=diagnostics,
         )

@@ -35,6 +35,9 @@
        → 局所マスク
        → 同じモデル族をwarm-start LM（最大3回）
        → 悪化時は物理解へrollback
+  → final residual measurement:
+       adopted single-lens modelを固定
+       → raw residualからpeak/dipを測定（baselineの再fitはしない）
   → 既存の adopted-model HTML event/index を更新
   → portal sync request
   → Ragan公開
@@ -84,6 +87,11 @@ router→physical fallbackのボトルネックではない。
 - `run_post_physical_planet_refinement.py`
   - 採用物理解の再構成後に惑星探索・局所マスク・同モデル族の再fitを実行。
   - post fitの `chi2/dof` が親の物理解より `max(1.25倍, +0.5)` を超えて悪化、または非有限なら、親モデルにrollbackして空maskを採用する。
+
+- `run_final_residual_measurement.py`
+  - scanまたは採用済みphysical/post-physical fitを再構成し、全イベントでfrozen residual measurementを実行する。
+  - 局所maskはpeak/dipの測定にだけ使い、single-lens baselineを再fitしない。そのため、mask後の
+    `tE` compactnessや継続fitの失敗が、実在するraw residual featureを消すことはない。
 
 - `make_html.py`
   - 既存公開URLの生成器。
@@ -144,7 +152,7 @@ env PYTHONPATH=/rogue1_8/nunota/jacscanomaly/src \
 ローカル生成だけをしたい場合は `--no-request-sync` を使う。
 
 このrunnerはイベントごとに最後まで流すのではなく、survey全体で
-`scan → router → physical → post-physical → HTML → sync` の順にstageを完了する。
+`scan → router → physical → post-physical → final residual measurement → HTML → sync` の順にstageを完了する。
 従ってphysicalの進捗はscan完了後に現れる。`--jobs` は他の利用者のCPUを優先して設定し、
 上記の12は空きCPUが十分あるときの低優先度実行例である。
 

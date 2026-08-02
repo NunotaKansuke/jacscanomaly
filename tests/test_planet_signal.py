@@ -336,6 +336,14 @@ def test_default_beam_uses_three_adaptive_single_branch_iterations():
     assert config.beam_candidates_per_iter == 1
 
 
+def test_residual_measurement_config_does_not_cap_intervals_by_te():
+    config = PlanetSignalConfig.residual_measurement()
+
+    assert config.baseline_mode == "beam_interval"
+    assert np.isinf(config.max_signal_span_over_tE)
+    assert config.frozen_measurement_windows is True
+
+
 def test_beam_rejects_a_new_pspl_u0_boundary_solution():
     extractor = PlanetSignalExtractor(Finder())
     reference = SimpleNamespace(
