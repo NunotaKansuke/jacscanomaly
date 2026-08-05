@@ -1016,6 +1016,94 @@ class FoldCausticDetector:
         return longest
 
 
+@dataclass(frozen=True)
+class SmoothDepartureMasker:
+    """Join feature intervals until the residual returns to its noise floor.
+
+    Feature widths provide the seeds. Adjacent seeds belong to one departure
+    when the samples between them never contain a sustained return to the
+    ordinary single-lens residual. The return threshold and duration are
+    inherited from the feature detector, so this adds no event-width, gap, or
+    peak-ratio tuning parameters.
+    """
+
+    feature_config: PlanetFeatureConfig = PlanetFeatureConfig()
+
+    def run_arrays(
+        self,
+        *,
+        time: np.ndarray,
+        residual: np.ndarray,
+        ferr: np.ndarray,
+        features: PlanetFeatureResult,
+        pad_fraction: float = 0.0,
+    ) -> np.ndarray:
+        time = np.asarray(time, dtype=float).reshape(-1)
+        residual = np.asarray(residual, dtype=float).reshape(-1)
+        ferr = np.asarray(ferr, dtype=float).reshape(-1)
+        if not (time.size == residual.size == ferr.size):
+            raise ValueError("time, residual, and ferr must have matching sizes")
+        mask = np.zeros(time.shape, dtype=bool)
+        ordered = features.features
+        if not ordered:
+            return mask
+
+        padding = max(float(pad_fraction), 0.0)
+        for feature in ordered:
+            pad = padding * max(float(feature.timescale), 0.0)
+            mask |= (
+                (time >= float(feature.t_start) - pad)
+                & (time <= float(feature.t_end) + pad)
+            )
+
+        positive_dt = np.diff(time)
+        positive_dt = positive_dt[
+            np.isfinite(positive_dt) & (positive_dt > 0.0)
+        ]
+        if positive_dt.size == 0:
+            return mask
+        cadence = float(np.median(positive_dt))
+        return_points = max(int(self.feature_config.smooth_points) // 3, 2)
+        baseline_limit = max(
+            float(self.feature_config.duration_min_abs_z), 0.0
+        )
+        z = residual / np.maximum(ferr, 1.0e-12)
+
+        for left, right in zip(ordered, ordered[1:]):
+            # Crossing the fitted baseline changes the character of the
+            # departure. Keep opposite-sign features separate; the independent
+            # fold-caustic detector is diagnostic and must not enlarge the fit
+            # mask by itself.
+            if left.kind != right.kind:
+                continue
+            between = (
+                (time > float(left.t_end))
+                & (time < float(right.t_start))
+            )
+            indices = np.flatnonzero(between)
+            if indices.size == 0:
+                continue
+            local_indices = np.unique(
+                np.r_[
+                    max(int(indices[0]) - 1, 0),
+                    indices,
+                    min(int(indices[-1]) + 1, time.size - 1),
+                ]
+            )
+            local_dt = np.diff(time[local_indices])
+            if np.any(
+                local_dt
+                > float(max(int(self.feature_config.smooth_points), 1))
+                * cadence
+            ):
+                continue
+            returned = np.abs(z[indices]) < baseline_limit
+            if FoldCausticDetector._longest_true_run(returned) >= return_points:
+                continue
+            mask[indices] = True
+        return mask
+
+
 @dataclass
 class _PlanetFeatureDetector:
     """Measure prominent peaks and dips in an extracted residual signal."""
@@ -2628,16 +2716,20 @@ class PlanetSignalExtractor:
             fit=current_fit,
             mask=support,
         )
-        feature_mask = np.zeros(time_np.shape, dtype=bool)
         pad_fraction = max(
             float(self.config.fit_mask_feature_pad_fraction), 0.0
         )
-        for feature in features.features:
-            pad = pad_fraction * max(float(feature.timescale), 0.0)
-            feature_mask |= (
-                (time_np >= float(feature.t_start) - pad)
-                & (time_np <= float(feature.t_end) + pad)
-            )
+        residual_np = np.asarray(
+            jax.device_get(current_fit.residual), dtype=float
+        )
+        feature_config = PlanetFeatureConfig()
+        feature_mask = SmoothDepartureMasker(feature_config).run_arrays(
+            time=time_np,
+            residual=residual_np,
+            ferr=ferr_np,
+            features=features,
+            pad_fraction=pad_fraction,
+        )
         feature_mask = self._exclude_mask_protection(feature_mask)
         combined = current_mask | feature_mask
 

@@ -10,6 +10,7 @@ from jacscanomaly import (
     FlatBaselineDiagnostic,
     FoldCausticDetector,
     FoldCausticResult,
+    SmoothDepartureMasker,
     PlanetFeatureConfig,
     PlanetFeature,
     PlanetFeatureResult,
@@ -606,6 +607,95 @@ def test_fold_caustic_detector_rejects_symmetric_or_disconnected_peaks():
     assert symmetric.edges == ()
     assert not split.detected
     assert len(split.edges) == 2
+
+
+def test_smooth_departure_masker_bridges_until_sustained_baseline_return():
+    time = np.arange(30, dtype=float)
+    ferr = np.ones(time.shape, dtype=float)
+    features = PlanetFeatureResult(
+        peaks=(
+            _fold_peak(8.0, 7.0, 9.0),
+            _fold_peak(21.0, 20.0, 22.0),
+        ),
+        dips=(),
+    )
+    connected_residual = np.zeros(time.shape, dtype=float)
+    connected_residual[7:23] = 10.0
+    returned_residual = connected_residual.copy()
+    returned_residual[14:16] = 0.0
+    masker = SmoothDepartureMasker()
+
+    connected = masker.run_arrays(
+        time=time,
+        residual=connected_residual,
+        ferr=ferr,
+        features=features,
+    )
+    returned = masker.run_arrays(
+        time=time,
+        residual=returned_residual,
+        ferr=ferr,
+        features=features,
+    )
+    opposite = masker.run_arrays(
+        time=time,
+        residual=connected_residual,
+        ferr=ferr,
+        features=PlanetFeatureResult(
+            peaks=(features.peaks[0],),
+            dips=(
+                replace(
+                    features.peaks[1],
+                    kind="dip",
+                    signed_z=-features.peaks[1].signed_z,
+                ),
+            ),
+        ),
+    )
+
+    assert np.all(connected[7:23])
+    assert np.all(returned[7:10])
+    assert np.all(returned[20:23])
+    assert not np.any(returned[10:20])
+    assert not np.any(opposite[10:20])
+
+
+def test_smooth_departure_masker_tolerates_short_holes_but_not_long_gaps():
+    masker = SmoothDepartureMasker()
+    ferr = np.ones(29, dtype=float)
+    short_hole_time = np.r_[np.arange(14), np.arange(15, 30)].astype(float)
+    short_hole_features = PlanetFeatureResult(
+        peaks=(
+            _fold_peak(8.0, 7.0, 9.0),
+            _fold_peak(21.0, 20.0, 22.0),
+        ),
+        dips=(),
+    )
+
+    short_hole = masker.run_arrays(
+        time=short_hole_time,
+        residual=np.full(short_hole_time.shape, 10.0),
+        ferr=ferr,
+        features=short_hole_features,
+    )
+
+    long_gap_time = np.r_[np.arange(14), np.arange(30, 45)].astype(float)
+    long_gap_features = PlanetFeatureResult(
+        peaks=(
+            _fold_peak(8.0, 7.0, 9.0),
+            _fold_peak(35.0, 34.0, 36.0),
+        ),
+        dips=(),
+    )
+    long_gap = masker.run_arrays(
+        time=long_gap_time,
+        residual=np.full(long_gap_time.shape, 10.0),
+        ferr=ferr,
+        features=long_gap_features,
+    )
+
+    assert np.all(short_hole[(short_hole_time >= 7.0) & (short_hole_time <= 22.0)])
+    assert not np.any(long_gap[(long_gap_time > 9.0) & (long_gap_time < 34.0)])
 
 
 def test_residual_measurement_config_marks_frozen_characterization_pass():
