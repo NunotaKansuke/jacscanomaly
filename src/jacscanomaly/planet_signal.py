@@ -82,6 +82,13 @@ class PlanetSignalConfig:
     # multiply both full-grid scans and LM fits.
     beam_width: int = 1
     beam_candidates_per_iter: int = 1
+    # Add one fit-mask proposal built from the closed peak/dip widths measured
+    # inside every accepted Finder component.  This keeps weak disconnected
+    # caustics from being compared with the strongest peak, while avoiding the
+    # dangerous alternative of masking an entire broad Finder support.
+    fit_mask_from_features: bool = True
+    fit_mask_feature_pad_fraction: float = 0.0
+    fit_mask_feature_max_fraction: float = 0.02
     beam_probe_only: bool = False
     beam_teff_factors: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 32.0)
     beam_min_half_width: float = 0.0
@@ -799,20 +806,49 @@ class _PlanetFeatureDetector:
     config: PlanetFeatureConfig = PlanetFeatureConfig()
 
     def run(self, result: PlanetSignalResult) -> PlanetFeatureResult:
-        time = np.asarray(result.time, dtype=float)
-        flux = np.asarray(result.flux, dtype=float)
-        ferr = np.asarray(result.ferr, dtype=float)
-        residual = np.asarray(result.refined_residual, dtype=float)
         # Characterization follows the independent final Finder detection,
         # not the mask that may previously have been used to improve a fit.
-        mask = result.anomaly_support_mask()
+        return self.run_arrays(
+            time=np.asarray(result.time, dtype=float),
+            flux=np.asarray(result.flux, dtype=float),
+            ferr=np.asarray(result.ferr, dtype=float),
+            residual=np.asarray(result.refined_residual, dtype=float),
+            model_flux=np.asarray(result.refined_fit.model_flux, dtype=float),
+            fit=result.refined_fit,
+            mask=result.anomaly_support_mask(),
+        )
+
+    def run_arrays(
+        self,
+        *,
+        time: np.ndarray,
+        flux: np.ndarray,
+        ferr: np.ndarray,
+        residual: np.ndarray,
+        model_flux: np.ndarray,
+        fit: SingleLensFitResult,
+        mask: np.ndarray,
+        require_closed_peaks: bool = False,
+    ) -> PlanetFeatureResult:
+        """Measure features from explicit arrays and one support mask.
+
+        The public characterization path delegates here.  Baseline fitting
+        can therefore reuse exactly the same extrema and duration logic
+        without constructing a provisional :class:`PlanetSignalResult` or
+        treating the Finder support itself as a fit exclusion.
+        """
+        time = np.asarray(time, dtype=float)
+        flux = np.asarray(flux, dtype=float)
+        ferr = np.asarray(ferr, dtype=float)
+        residual = np.asarray(residual, dtype=float)
+        model_flux = np.asarray(model_flux, dtype=float)
+        mask = np.asarray(mask, dtype=bool)
 
         if not np.any(mask):
             return PlanetFeatureResult(peaks=(), dips=())
 
         z = residual / np.maximum(ferr, 1e-12)
         z_smooth = self._smooth(z, int(self.config.smooth_points))
-        model_flux = np.asarray(result.refined_fit.model_flux, dtype=float)
         peaks: list[PlanetFeature] = []
         for start, end in self._mask_slices(mask, time):
             indices = self._prominent_extrema(
@@ -843,7 +879,8 @@ class _PlanetFeatureDetector:
                     component_start=start,
                     component_end=end,
                     sign=1.0,
-                    result=result,
+                    fit=fit,
+                    require_closed=bool(require_closed_peaks),
                 )
             )
 
@@ -869,7 +906,7 @@ class _PlanetFeatureDetector:
                     component_start=start,
                     component_end=end,
                     sign=-1.0,
-                    result=result,
+                    fit=fit,
                     require_closed=True,
                 )
             )
@@ -1020,7 +1057,7 @@ class _PlanetFeatureDetector:
         self,
         *,
         kind: str,
-        result: PlanetSignalResult,
+        fit: SingleLensFitResult,
         time: np.ndarray,
         flux: np.ndarray,
         residual: np.ndarray,
@@ -1051,7 +1088,7 @@ class _PlanetFeatureDetector:
         for cell_start, cell_end in cells:
             feature = self._feature_from_index(
                 kind=kind,
-                result=result,
+                fit=fit,
                 time=time,
                 flux=flux,
                 residual=residual,
@@ -1091,7 +1128,7 @@ class _PlanetFeatureDetector:
         self,
         *,
         kind: str,
-        result: PlanetSignalResult,
+        fit: SingleLensFitResult,
         time: np.ndarray,
         flux: np.ndarray,
         residual: np.ndarray,
@@ -1134,7 +1171,7 @@ class _PlanetFeatureDetector:
         )
 
         magnification_ratio = self._magnification_ratio(
-            result=result,
+            fit=fit,
             flux=float(flux[index]),
             model_flux=float(model_flux[index]),
         )
@@ -1197,12 +1234,12 @@ class _PlanetFeatureDetector:
     @staticmethod
     def _magnification_ratio(
         *,
-        result: PlanetSignalResult,
+        fit: SingleLensFitResult,
         flux: float,
         model_flux: float,
     ) -> float:
-        fs = float(np.asarray(result.refined_fit.fs))
-        fb = float(np.asarray(result.refined_fit.fb))
+        fs = float(np.asarray(fit.fs))
+        fb = float(np.asarray(fit.fb))
         if np.isfinite(fs) and abs(fs) > 1e-12:
             pspl_mag = (model_flux - fb) / fs
             observed_mag = (flux - fb) / fs
@@ -1435,6 +1472,27 @@ class PlanetSignalExtractor:
                 verbose=verbose,
                 initial_seed=initial_seed,
             )
+            if (
+                bool(self.config.fit_mask_from_features)
+                and not bool(self.config.beam_probe_only)
+            ):
+                (
+                    current_fit,
+                    signal_mask,
+                    point_weight,
+                    iterations,
+                ) = self._run_feature_mask_refinement(
+                    current_fit=current_fit,
+                    signal_mask=signal_mask,
+                    iterations=iterations,
+                    time_j=time_j,
+                    flux_j=flux_j,
+                    ferr_j=ferr_j,
+                    time_np=time_np,
+                    flux_np=flux_np,
+                    ferr_np=ferr_np,
+                    verbose=verbose,
+                )
         else:
             raise ValueError(
                 "PlanetSignalConfig.baseline_mode must be 'mask', 'robust', or 'beam_interval'."
@@ -2036,26 +2094,14 @@ class PlanetSignalExtractor:
             grid_metrics_all,
             seasons=seasons,
         )
-        accepted = self.finder._accepted_candidates(
-            np.asarray(clusters_all, dtype=float),
-            np.asarray(grid_metrics_all, dtype=float),
-        )
-        if accepted.size:
-            accepted = accepted[
-                np.isfinite(accepted).all(axis=1)
-                & (accepted[:, 2] >= float(self.config.seed_min_dchi2))
-            ]
         # These are the Finder's own template supports, evaluated across the
         # whole light curve.  There is deliberately no tE/u0 cap, event window,
         # prior mask, or iterative suppression in this final detection pass.
-        for candidate_t0, candidate_teff, _candidate_dchi2 in accepted:
-            half_width = (
-                max(float(self.finder.config.teff_coeff), 0.0)
-                * abs(float(candidate_teff))
-            )
-            detection_mask |= (
-                np.abs(time_np - float(candidate_t0)) <= half_width
-            )
+        detection_mask = self._detection_mask_from_scan(
+            time_np=time_np,
+            clusters_all=clusters_all,
+            grid_metrics_all=grid_metrics_all,
+        )
 
         return (
             initial_fit,
@@ -2184,7 +2230,9 @@ class PlanetSignalExtractor:
                 if iteration == 0 and branch is branches[0] and initial_seed is not None:
                     seed = initial_seed
                 else:
-                    residual_for_seed = self._suppress_masked_residual(branch.fit.residual, branch.mask)
+                    residual_for_seed = self._suppress_masked_residual(
+                        branch.fit.residual, branch.mask
+                    )
                     seed = self._scan_best(time_j, residual_for_seed, ferr_j, time_np, verbose=verbose)
                     if iteration == 0 and branch is branches[0]:
                         observed_initial_seed = seed
@@ -2295,6 +2343,150 @@ class PlanetSignalExtractor:
         best_branch = min(branches, key=lambda b: b.score)
         point_weight = np.where(best_branch.mask, 0.0, 1.0)
         return best_branch.fit, best_branch.mask, point_weight, list(best_branch.iterations), observed_initial_seed
+
+    def _run_feature_mask_refinement(
+        self,
+        *,
+        current_fit: SingleLensFitResult,
+        signal_mask: np.ndarray,
+        iterations: list[PlanetSignalIteration],
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        time_np: np.ndarray,
+        flux_np: np.ndarray,
+        ferr_np: np.ndarray,
+        verbose: bool,
+    ) -> tuple[
+        SingleLensFitResult,
+        np.ndarray,
+        np.ndarray,
+        list[PlanetSignalIteration],
+    ]:
+        """Run one feature-derived widening pass after conservative beam fit.
+
+        Finder support can legitimately cover a broad physical mismatch or a
+        long residual wing.  The ordinary beam fit first establishes a safe
+        compact core and a less biased baseline.  One fresh all-residual scan
+        then supplies support to the existing feature detector; only measured
+        peak/dip durations, rather than the support itself, are added to the
+        fit exclusion.  This pass is deliberately bounded to one refit.
+        """
+        current_mask = np.asarray(signal_mask, dtype=bool)
+        point_weight = np.where(current_mask, 0.0, 1.0)
+        if not np.any(current_mask):
+            return current_fit, current_mask, point_weight, iterations
+
+        scan_started = perf_counter()
+        try:
+            seasons, clusters_all, grid_metrics_all = self.finder.runner.run(
+                time_j=time_j,
+                residual_j=current_fit.residual,
+                ferr_j=ferr_j,
+                time_np=time_np,
+                verbose=verbose,
+            )
+        finally:
+            self._scan_seconds = getattr(self, "_scan_seconds", 0.0) + (
+                perf_counter() - scan_started
+            )
+            self._n_scans = getattr(self, "_n_scans", 0) + 1
+
+        support = self._detection_mask_from_scan(
+            time_np=time_np,
+            clusters_all=clusters_all,
+            grid_metrics_all=grid_metrics_all,
+        )
+        if not np.any(support):
+            return current_fit, current_mask, point_weight, iterations
+
+        features = _PlanetFeatureDetector(PlanetFeatureConfig()).run_arrays(
+            time=np.asarray(time_np, dtype=float),
+            flux=np.asarray(flux_np, dtype=float),
+            ferr=np.asarray(ferr_np, dtype=float),
+            residual=np.asarray(
+                jax.device_get(current_fit.residual), dtype=float
+            ),
+            model_flux=np.asarray(current_fit.model_flux, dtype=float),
+            fit=current_fit,
+            mask=support,
+        )
+        feature_mask = np.zeros(time_np.shape, dtype=bool)
+        pad_fraction = max(
+            float(self.config.fit_mask_feature_pad_fraction), 0.0
+        )
+        for feature in features.features:
+            pad = pad_fraction * max(float(feature.timescale), 0.0)
+            feature_mask |= (
+                (time_np >= float(feature.t_start) - pad)
+                & (time_np <= float(feature.t_end) + pad)
+            )
+        feature_mask = self._exclude_mask_protection(feature_mask)
+        combined = current_mask | feature_mask
+
+        max_fraction = min(
+            max(float(self.config.fit_mask_feature_max_fraction), 0.0),
+            max(float(self.config.max_mask_fraction), 0.0),
+        )
+        if (
+            np.array_equal(combined, current_mask)
+            or float(np.mean(combined)) > max_fraction
+        ):
+            return current_fit, current_mask, point_weight, iterations
+
+        try:
+            candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                keep_mask_np=~combined,
+                x0_j=self._seed_for_refit(current_fit),
+                model_kind=getattr(current_fit, "model_kind", None),
+            )
+        except ValueError:
+            return current_fit, current_mask, point_weight, iterations
+        if not self._continuation_fit_is_usable(candidate_fit):
+            return current_fit, current_mask, point_weight, iterations
+        if self._continuation_hit_new_pspl_u0_bound(
+            current_fit, candidate_fit
+        ):
+            return current_fit, current_mask, point_weight, iterations
+        old_unmasked = self._masked_chi2_dof(current_fit, ~combined)
+        new_unmasked = self._masked_chi2_dof(candidate_fit, ~combined)
+        allowed = old_unmasked * (
+            1.0 + float(self.config.max_unmasked_chi2_dof_increase)
+        )
+        if np.isfinite(old_unmasked) and new_unmasked > allowed:
+            return current_fit, current_mask, point_weight, iterations
+        if self._fit_is_catastrophically_worse(current_fit, candidate_fit):
+            return current_fit, current_mask, point_weight, iterations
+        if self._beam_score(candidate_fit, combined) >= self._beam_score(
+            current_fit, current_mask
+        ):
+            return current_fit, current_mask, point_weight, iterations
+
+        seed = self.finder._pick_best_candidate(
+            clusters_all,
+            grid_metrics_all,
+            seasons=seasons,
+        )
+        widened_iterations = list(iterations)
+        widened_iterations.append(
+            PlanetSignalIteration(
+                iteration=len(widened_iterations),
+                seed=seed,
+                n_masked_before=int(np.sum(current_mask)),
+                n_masked_after=int(np.sum(combined)),
+                added_points=int(np.sum(combined) - np.sum(current_mask)),
+                fit=candidate_fit,
+            )
+        )
+        return (
+            candidate_fit,
+            combined,
+            np.where(combined, 0.0, 1.0),
+            widened_iterations,
+        )
 
     def _beam_seed_repeats_history(
         self,
@@ -2564,6 +2756,35 @@ class PlanetSignalExtractor:
             grid_metrics_all,
             seasons=seasons,
         )
+
+    def _detection_mask_from_scan(
+        self,
+        *,
+        time_np: np.ndarray,
+        clusters_all: np.ndarray,
+        grid_metrics_all: np.ndarray,
+    ) -> np.ndarray:
+        """Build full Finder support for local feature measurement."""
+        detection_mask = np.zeros(np.asarray(time_np).shape, dtype=bool)
+        accepted = self.finder._accepted_candidates(
+            np.asarray(clusters_all, dtype=float),
+            np.asarray(grid_metrics_all, dtype=float),
+        )
+        if accepted.size:
+            accepted = accepted[
+                np.isfinite(accepted).all(axis=1)
+                & (accepted[:, 2] >= float(self.config.seed_min_dchi2))
+            ]
+        for candidate_t0, candidate_teff, _candidate_dchi2 in accepted:
+            half_width = (
+                max(float(self.finder.config.teff_coeff), 0.0)
+                * abs(float(candidate_teff))
+            )
+            detection_mask |= (
+                np.abs(np.asarray(time_np, dtype=float) - float(candidate_t0))
+                <= half_width
+            )
+        return detection_mask
 
     def _unimodal_scan_clusters(
         self,

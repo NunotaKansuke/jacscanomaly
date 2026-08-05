@@ -431,6 +431,92 @@ def test_default_beam_uses_three_adaptive_single_branch_iterations():
     assert config.beam_max_iter == 3
     assert config.beam_width == 1
     assert config.beam_candidates_per_iter == 1
+    assert config.fit_mask_from_features is True
+    assert config.fit_mask_feature_pad_fraction == 0.0
+    assert config.fit_mask_feature_max_fraction == 0.02
+
+
+def test_feature_mask_refinement_masks_local_features_not_finder_support(
+    monkeypatch,
+):
+    time = np.linspace(0.0, 20.0, 401)
+    ferr = np.full_like(time, 0.01)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = (
+        0.18 * np.exp(-0.5 * ((time - 7.0) / 0.10) ** 2)
+        + 0.32 * np.exp(-0.5 * ((time - 13.0) / 0.12) ** 2)
+    )
+    flux = model + residual
+    current_mask = np.abs(time - 13.0) <= 0.10
+    current_fit = _feature_result(
+        time,
+        flux,
+        ferr,
+        residual,
+        current_mask,
+    ).refined_fit
+    finder = Finder(
+        FinderConfig(
+            grid_backend="jax",
+            single_fit_backend="jax",
+            teff_coeff=4.0,
+        )
+    )
+    extractor = PlanetSignalExtractor(
+        finder,
+        PlanetSignalConfig(fit_mask_feature_max_fraction=0.20),
+    )
+    extractor._scan_seconds = 0.0
+    extractor._n_scans = 0
+    extractor._time_cadence = float(np.median(np.diff(time)))
+    extractor._mask_protection = None
+    extractor._baseline_refit_fitter = None
+
+    clusters = np.asarray(
+        [[7.0, 0.50, 1200.0], [13.0, 0.50, 1800.0]],
+        dtype=float,
+    )
+    metrics = np.asarray(
+        [
+            [7.0, 0.50, 1200.0, 25.0, 8.0, 6.0, 0.2, 0.8, 6.0],
+            [13.0, 0.50, 1800.0, 25.0, 8.0, 6.0, 0.2, 0.8, 6.0],
+        ],
+        dtype=float,
+    )
+    monkeypatch.setattr(
+        finder.runner,
+        "run",
+        lambda **_kwargs: ([], clusters, metrics),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_fit_masked_single_lens_and_evaluate_full",
+        lambda **_kwargs: current_fit,
+    )
+
+    fit, mask, weights, iterations = extractor._run_feature_mask_refinement(
+        current_fit=current_fit,
+        signal_mask=current_mask,
+        iterations=[],
+        time_j=time,
+        flux_j=flux,
+        ferr_j=ferr,
+        time_np=time,
+        flux_np=flux,
+        ferr_np=ferr,
+        verbose=False,
+    )
+
+    assert fit is current_fit
+    assert mask[np.argmin(np.abs(time - 7.0))]
+    assert mask[np.argmin(np.abs(time - 13.0))]
+    assert not mask[np.argmin(np.abs(time - 8.0))]
+    assert not mask[np.argmin(np.abs(time - 12.0))]
+    assert np.sum(mask) < 40
+    assert np.array_equal(weights, np.where(mask, 0.0, 1.0))
+    assert len(iterations) == 1
+    assert iterations[0].added_points > 0
 
 
 def test_residual_measurement_config_marks_frozen_characterization_pass():
