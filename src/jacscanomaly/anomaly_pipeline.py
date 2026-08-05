@@ -16,6 +16,7 @@ from .planet_signal import (
 )
 from .singlelens_fallback import FallbackConfig
 from .template_free import TemplateFreeSearchConfig, TemplateFreeSearchResult
+from .signal_scale import ObservedSignalScale
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class AnomalyPipelineResult:
     candidates: tuple[AnomalyCandidate, ...]
     reason_codes: tuple[str, ...]
     diagnostics: dict[str, object]
+    observed_signal_scale: ObservedSignalScale | None = None
 
     @property
     def has_anomaly_candidate(self) -> bool:
@@ -140,6 +142,12 @@ class AnomalyPipelineResult:
         """Final frozen-residual window used only for feature measurement."""
 
         return np.asarray(self.final_measurement.signal_mask, dtype=bool)
+
+    @property
+    def final_detection(self):
+        """The final frozen-scan decision, independent of characterization."""
+
+        return getattr(self.final_measurement, "scan_decision", None)
 
 
 def build_anomaly_candidates(

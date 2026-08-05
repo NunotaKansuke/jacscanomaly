@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from .signal_scale import ObservedSignalScale
+
 
 @dataclass(frozen=True)
 class CandidateQuality:
@@ -151,6 +153,7 @@ class AnomalyResult:
 
     # best candidate
     best: Optional[BestCandidate]
+    observed_signal_scale: Optional[ObservedSignalScale] = None
 
     def summary_dict(self) -> Dict[str, Any]:
         """
@@ -163,6 +166,11 @@ class AnomalyResult:
             "n_grid_total": int(sum(s.n_grid for s in self.seasons)),
             "chi2_dof": float(self.chi2_dof),
             "has_best": bool(self.best is not None),
+            "observed_signal_scale": (
+                None
+                if self.observed_signal_scale is None
+                else self.observed_signal_scale.summary_dict()
+            ),
         }
         if self.best is None:
             return out

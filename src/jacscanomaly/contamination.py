@@ -7,6 +7,8 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+from .signal_scale import ObservedSignalScale
+
 
 @dataclass(frozen=True)
 class ContaminationConfig:
@@ -24,6 +26,9 @@ class ContaminationConfig:
     protected_anomaly_penalty: float = 2.0
     max_protected_anomaly_fraction: float = 0.35
     anomaly_weight: float = 0.05
+    # Ambiguous planet wings are not deleted, but must not steer a physical
+    # fit as if they were clean baseline data.
+    soft_anomaly_weight: float = 0.15
     min_weight: float = 0.02
     forced_anomaly_weight: float = 1.0e-4
     weight_damping: float = 0.5
@@ -389,6 +394,7 @@ def protected_support_mask(
     *,
     fspl_support_sigma: float = 3.0,
     parallax_peak_exclusion: float = 3.0,
+    observed_scale: Optional[ObservedSignalScale] = None,
 ) -> np.ndarray:
     """Return points that must remain available to the physical model.
 
@@ -407,15 +413,37 @@ def protected_support_mask(
     effect_name = str(effect).lower()
     fspl_mask = np.zeros(t.size, dtype=bool)
     if "fspl" in effect_name and p.size >= 4:
-        raw_rho = float(p[3])
-        rho = np.exp(raw_rho) if raw_rho < 0.0 else raw_rho
-        t_star = max(rho * tE, 1.0e-6)
-        width = max(float(fspl_support_sigma) * t_star, 0.25 * u0 * tE, 1.0e-6)
-        fspl_mask = np.abs(t - t0) <= width
+        if observed_scale is not None and observed_scale.valid:
+            center = float(observed_scale.t_center)
+            width = max(
+                float(fspl_support_sigma) * float(observed_scale.half_width),
+                float(observed_scale.cadence)
+                if np.isfinite(observed_scale.cadence)
+                else 1.0e-6,
+                1.0e-6,
+            )
+        else:
+            raw_rho = float(p[3])
+            rho = np.exp(raw_rho) if raw_rho < 0.0 else raw_rho
+            t_star = max(rho * tE, 1.0e-6)
+            center = t0
+            width = max(float(fspl_support_sigma) * t_star, 0.25 * u0 * tE, 1.0e-6)
+        fspl_mask = np.abs(t - center) <= width
     parallax_mask = np.zeros(t.size, dtype=bool)
     if "parallax" in effect_name:
-        width = max(float(parallax_peak_exclusion) * max(u0 * tE, 1.0e-6), 1.0e-6)
-        parallax_mask = np.abs(t - t0) > width
+        if observed_scale is not None and observed_scale.valid:
+            pad = float(parallax_peak_exclusion) * max(
+                float(observed_scale.cadence)
+                if np.isfinite(observed_scale.cadence)
+                else 0.0,
+                1.0e-6,
+            )
+            left = float(observed_scale.t_left) - pad
+            right = float(observed_scale.t_right) + pad
+            parallax_mask = (t < left) | (t > right)
+        else:
+            width = max(float(parallax_peak_exclusion) * max(u0 * tE, 1.0e-6), 1.0e-6)
+            parallax_mask = np.abs(t - t0) > width
     if "mixed" in effect_name or (fspl_mask.any() and parallax_mask.any()):
         return fspl_mask | parallax_mask
     if fspl_mask.any():
@@ -543,6 +571,7 @@ def robust_refine_with_fitter(
     config: ContaminationConfig = ContaminationConfig(),
     protected_mask: Optional[np.ndarray] = None,
     protected_masks: Optional[Sequence[np.ndarray]] = None,
+    soft_anomaly_mask: Optional[np.ndarray] = None,
     initial_standardized_residual: Optional[np.ndarray] = None,
     initial_anomaly_mask: Optional[np.ndarray] = None,
     forced_anomaly_mask: Optional[np.ndarray] = None,
@@ -551,8 +580,9 @@ def robust_refine_with_fitter(
 
     The fitter is intentionally supplied by the caller, so the fallback works
     with the existing PSPL, FSPL, and parallax classes without replacing their
-    low-level model implementations.  Anomaly points are represented by
-    inflated errors during the next fit; no fixed PSPL planet mask is used.
+    low-level model implementations.  Hard anomaly points are represented by
+    strongly inflated errors, while ``soft_anomaly_mask`` keeps ambiguous
+    planet wings in the fit with a capped weight instead of deleting them.
     """
     t = np.asarray(time, dtype=float)
     f = np.asarray(flux, dtype=float)
@@ -565,9 +595,27 @@ def robust_refine_with_fitter(
     )
     if forced_mask.size != t.size:
         raise ValueError("forced_anomaly_mask must match time.")
+    soft_mask = (
+        np.zeros(t.size, dtype=bool)
+        if soft_anomaly_mask is None
+        else np.asarray(soft_anomaly_mask, dtype=bool).reshape(-1)
+    )
+    if soft_mask.size != t.size:
+        raise ValueError("soft_anomaly_mask must match time.")
     forced_weight = float(
         np.clip(config.forced_anomaly_weight, 1.0e-12, 1.0)
     )
+    soft_mask &= ~forced_mask
+    soft_weight = float(
+        np.clip(config.soft_anomaly_weight, config.min_weight, 1.0)
+    )
+
+    def apply_soft_floor(weights: np.ndarray) -> np.ndarray:
+        value = np.asarray(weights, dtype=float).copy()
+        value[soft_mask] = np.minimum(value[soft_mask], soft_weight)
+        value = np.clip(value, float(config.min_weight), 1.0)
+        value[forced_mask] = forced_weight
+        return value
     if initial_anomaly_mask is not None:
         initial_mask = np.asarray(initial_anomaly_mask, dtype=bool).reshape(-1)
         if initial_mask.size != t.size:
@@ -575,10 +623,10 @@ def robust_refine_with_fitter(
         initial_mask |= forced_mask
         weights = np.where(initial_mask, float(config.anomaly_weight), 1.0)
         weights = np.clip(weights, float(config.min_weight), 1.0)
-        weights[forced_mask] = forced_weight
+        weights = apply_soft_floor(weights)
     elif initial_standardized_residual is None:
         weights = np.where(forced_mask, float(config.anomaly_weight), 1.0)
-        weights[forced_mask] = forced_weight
+        weights = apply_soft_floor(weights)
     else:
         initial_z = np.asarray(initial_standardized_residual, dtype=float).reshape(-1)
         if initial_z.size != t.size or not np.all(np.isfinite(initial_z)):
@@ -598,7 +646,7 @@ def robust_refine_with_fitter(
             anomaly_weight=config.anomaly_weight,
             min_weight=config.min_weight,
         )
-        weights[forced_mask] = forced_weight
+        weights = apply_soft_floor(weights)
     initial_fit = _canonicalize_fit(
         fitter.fit(t, f, fe / np.sqrt(weights), current_x0),
         fe,
@@ -632,6 +680,7 @@ def robust_refine_with_fitter(
         raw_next_weights[forced_mask] = forced_weight
         damping = float(np.clip(config.weight_damping, 0.0, 1.0))
         next_weights = weights + damping * (raw_next_weights - weights)
+        next_weights = apply_soft_floor(next_weights)
         next_x0 = _parameter_vector(current_fit)
         next_fit = _canonicalize_fit(
             fitter.fit(t, f, fe / np.sqrt(next_weights), next_x0),
@@ -680,7 +729,7 @@ def robust_refine_with_fitter(
         anomaly_weight=config.anomaly_weight,
         min_weight=config.min_weight,
     )
-    final_weights[forced_mask] = forced_weight
+    final_weights = apply_soft_floor(final_weights)
     final_state_change = float(
         np.mean(final_segmentation.state != segmentation.state)
     )

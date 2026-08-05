@@ -529,11 +529,19 @@ def run_robust_fallback(
     protected_mask: Optional[np.ndarray] = None,
     protected_masks: Optional[Sequence[np.ndarray]] = None,
     known_anomaly_mask: Optional[np.ndarray] = None,
+    soft_anomaly_mask: Optional[np.ndarray] = None,
+    selection_exclusion_mask: Optional[np.ndarray] = None,
     baseline_fit: Optional[object] = None,
     effect_score_fn=None,
     model_spec: Optional[EffectFitterSpec] = None,
 ) -> FallbackResult:
-    """Run robust alternating fits from detector and degeneracy seeds."""
+    """Run robust alternating fits from detector and degeneracy seeds.
+
+    ``soft_anomaly_mask`` protects ambiguous planet wings through capped fit
+    weights.  ``selection_exclusion_mask`` additionally keeps those points
+    out of the physical-model ranking, so a model cannot win by explaining the
+    very contamination it is meant to be protected from.
+    """
     candidate_tuple = tuple(candidates)
     generated_seeds = detector_seed_parameters(base_seed, candidate_tuple, config=config)
     seeds: list[np.ndarray] = []
@@ -573,13 +581,40 @@ def run_robust_fallback(
             if initial_anomaly_mask is None
             else np.asarray(initial_anomaly_mask, dtype=bool) | known
         )
+    soft = None
+    if soft_anomaly_mask is not None:
+        soft = np.asarray(soft_anomaly_mask, dtype=bool).reshape(-1)
+        if soft.size != t.size:
+            raise ValueError("soft_anomaly_mask must match the light curve.")
+        if initial_anomaly_mask is None:
+            initial_anomaly_mask = soft.copy()
+        else:
+            initial_anomaly_mask = (
+                np.asarray(initial_anomaly_mask, dtype=bool) | soft
+            )
+    selection_exclusion = (
+        np.zeros(t.size, dtype=bool)
+        if selection_exclusion_mask is None
+        else np.asarray(selection_exclusion_mask, dtype=bool).reshape(-1)
+    )
+    if selection_exclusion.size != t.size:
+        raise ValueError("selection_exclusion_mask must match the light curve.")
+    if known is not None:
+        selection_exclusion |= known
+    if soft is not None:
+        selection_exclusion |= soft
     if "parallax" not in effect:
         # A compact FSPL peak is itself the physical signal; do not pre-mask it.
         initial_standardized_residual = None
     for seed in seeds:
         if protected_mask is None and protected_masks is None:
             masks = tuple(
-                protected_support_mask(t, candidate.effect, candidate.seed_parameters)
+                protected_support_mask(
+                    t,
+                    candidate.effect,
+                    candidate.seed_parameters,
+                    observed_scale=getattr(candidate, "observed_signal_scale", None),
+                )
                 for candidate in candidate_tuple
                 if candidate.seed_parameters is not None
                 and (
@@ -601,6 +636,7 @@ def run_robust_fallback(
                 seed,
                 config=config.contamination,
                 protected_masks=masks,
+                soft_anomaly_mask=soft,
                 initial_standardized_residual=initial_standardized_residual,
                 initial_anomaly_mask=initial_anomaly_mask,
                 forced_anomaly_mask=known_anomaly_mask,
@@ -643,14 +679,10 @@ def run_robust_fallback(
         detail = errors[0] if errors else "no valid seeds"
         raise RuntimeError(f"All robust fallback seeds failed: {detail}")
 
-    selection_keep = (
-        ~known
-        if known is not None and np.any(known)
-        else np.ones(t.size, dtype=bool)
-    )
+    selection_keep = ~selection_exclusion
 
     def selection_chi2(attempt: FallbackAttempt) -> float:
-        if known is None or not np.any(known):
+        if not np.any(selection_exclusion):
             return float(attempt.original_chi2)
         residual = np.asarray(
             getattr(attempt.result.fit, "residual", ()),
@@ -809,7 +841,7 @@ def run_robust_fallback(
     n_selection = max(int(np.count_nonzero(selection_keep)), 1)
     delta_chi2 = baseline_original_chi2 - best.original_chi2
     baseline_selection_chi2 = baseline_original_chi2
-    if baseline_fit is not None and known is not None and np.any(known):
+    if baseline_fit is not None and np.any(selection_exclusion):
         baseline_residual_for_selection = np.asarray(
             getattr(baseline_fit, "residual", ()),
             dtype=float,
@@ -845,7 +877,7 @@ def run_robust_fallback(
         and bic_improvement > float(config.min_bic_improvement)
     )
     clean_region_improved = True
-    if known is not None and np.any(known):
+    if np.any(selection_exclusion):
         baseline_residual = np.asarray(
             getattr(baseline_fit, "residual", np.full(t.size, np.nan)),
             dtype=float,
@@ -854,7 +886,7 @@ def run_robust_fallback(
             getattr(best.result.fit, "residual", np.full(t.size, np.nan)),
             dtype=float,
         ).reshape(-1)
-        clean = ~known
+        clean = ~selection_exclusion
         if (
             baseline_residual.size != t.size
             or selected_residual.size != t.size
@@ -1171,6 +1203,8 @@ def run_staged_joint_fallback(
     protected_mask: Optional[np.ndarray] = None,
     protected_masks: Optional[Sequence[np.ndarray]] = None,
     known_anomaly_mask: Optional[np.ndarray] = None,
+    soft_anomaly_mask: Optional[np.ndarray] = None,
+    selection_exclusion_mask: Optional[np.ndarray] = None,
     baseline_fit: Optional[object] = None,
     effect_score_fn=None,
 ) -> FallbackResult:
@@ -1192,6 +1226,8 @@ def run_staged_joint_fallback(
                 effect=stage_effect, config=stage_cfg, protected_mask=protected_mask,
                 protected_masks=protected_masks,
                 known_anomaly_mask=known_anomaly_mask,
+                soft_anomaly_mask=soft_anomaly_mask,
+                selection_exclusion_mask=selection_exclusion_mask,
                 baseline_fit=baseline_fit, effect_score_fn=score_fn, model_spec=stage_spec,
             )
             stage_results.append(stage_result)
@@ -1238,6 +1274,8 @@ def run_staged_joint_fallback(
             protected_masks=protected_masks,
             baseline_fit=baseline_fit,
             known_anomaly_mask=known_anomaly_mask,
+            soft_anomaly_mask=soft_anomaly_mask,
+            selection_exclusion_mask=selection_exclusion_mask,
             effect_score_fn=score_fn,
             model_spec=joint_spec,
         )

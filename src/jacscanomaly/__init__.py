@@ -36,12 +36,20 @@ from .planet_signal import (
     PlanetSignalIteration,
     PlanetSignalResult,
     PlanetSignalTiming,
+    PlanetScanDecision,
 )
 from .anomaly_pipeline import (
     AnomalyCandidate,
     AnomalyPipelineConfig,
     AnomalyPipelineResult,
     build_anomaly_candidates,
+)
+from .signal_scale import (
+    ObservedSignalScale,
+    ResolvedSignalScale,
+    interval_mask,
+    measure_observed_signal_scale,
+    resolve_event_signal_scale,
 )
 from .pspl_fft import (
     PSPLFFTCandidate,
@@ -139,10 +147,16 @@ __all__ = [
     "PlanetSignalIteration",
     "PlanetSignalResult",
     "PlanetSignalTiming",
+    "PlanetScanDecision",
     "AnomalyPipelineConfig",
     "AnomalyPipelineResult",
     "AnomalyCandidate",
     "build_anomaly_candidates",
+    "ObservedSignalScale",
+    "ResolvedSignalScale",
+    "interval_mask",
+    "measure_observed_signal_scale",
+    "resolve_event_signal_scale",
     "PSPLFFTCandidate",
     "PSPLFFTProfile",
     "PSPLFFTScanner",

@@ -14,6 +14,12 @@ from .anomaly_models import get_chi2_anom_masked, get_chi2_flat_masked
 from .models import BestCandidate
 from .plot import _adaptive_single_lens_curve, _single_lens_model_flux
 from .singlelens_fit import SingleLensFitResult
+from .signal_scale import (
+    ObservedSignalScale,
+    measure_observed_magnification_scale,
+    measure_observed_signal_scale,
+    resolve_event_signal_scale,
+)
 
 try:
     from . import _cpp_grid
@@ -51,6 +57,9 @@ class PlanetSignalConfig:
     mask_halo_max_gap_points: int = 2
     max_mask_fraction: float = 0.5
     max_signal_span_over_tE: float = 0.25
+    """Deprecated compatibility field retained for configuration loading."""
+    max_signal_half_width_over_event_scale: float = 1.0
+    """Maximum planet half-width in units of the resolved ``|tE*u0|`` scale."""
     min_signal_span: float = 0.0
     max_unmasked_chi2_dof_increase: float = 0.05
     max_refined_chi2_dof_ratio: float = 1000.0
@@ -134,14 +143,13 @@ class PlanetSignalConfig:
         """Return the frozen, final-residual measurement configuration.
 
         This pass never changes the adopted single-lens model.  Its intervals
-        are measurements of residual structure, rather than exclusions used
-        to improve a fit, so they must not be capped by the model timescale.
-        In particular, a poor or nearly-flat PSPL null must not erase a real
-        residual peak merely because its fitted ``tE`` is short.
+        are measurements of residual structure rather than fit exclusions,
+        but they must still remain local to the resolved event.  The normal
+        scale is ``|tE*u0|``; the shared resolver falls back to the observed
+        magnification envelope only when the fitted scale is untrustworthy.
         """
         values = {
             "baseline_mode": "beam_interval",
-            "max_signal_span_over_tE": float("inf"),
             "frozen_measurement_windows": True,
         }
         values.update(overrides)
@@ -215,6 +223,96 @@ class PlanetSignalTiming:
 
 
 @dataclass(frozen=True)
+class PlanetScanDecision:
+    """Detection decision from the scan that feeds one signal extraction.
+
+    This is intentionally separate from :class:`PlanetFeatureResult`.  The
+    scan answers whether a localized residual was found; peak/dip measurement
+    is a later characterization step and must not retroactively change this
+    decision.
+    """
+
+    stage: str
+    detected: bool
+    dchi2_threshold: float
+    seed: Optional[BestCandidate] = None
+    reason_codes: Tuple[str, ...] = ()
+
+    @classmethod
+    def from_seed(
+        cls,
+        seed: Optional[BestCandidate],
+        *,
+        stage: str,
+        dchi2_threshold: float,
+    ) -> "PlanetScanDecision":
+        detected = bool(
+            seed is not None
+            and np.isfinite(float(seed.dchi2))
+            and float(seed.dchi2) >= float(dchi2_threshold)
+        )
+        reasons = (
+            ("scan_threshold_passed",)
+            if detected
+            else ("scan_threshold_not_reached",)
+        )
+        return cls(
+            stage=str(stage),
+            detected=detected,
+            dchi2_threshold=float(dchi2_threshold),
+            seed=seed,
+            reason_codes=reasons,
+        )
+
+    @classmethod
+    def none(
+        cls,
+        *,
+        stage: str,
+        dchi2_threshold: float,
+        reason: str = "scan_not_run",
+    ) -> "PlanetScanDecision":
+        return cls(
+            stage=str(stage),
+            detected=False,
+            dchi2_threshold=float(dchi2_threshold),
+            seed=None,
+            reason_codes=(str(reason),),
+        )
+
+    def summary_dict(self) -> dict[str, object]:
+        """Return JSON-ready detection provenance without feature values."""
+
+        row: dict[str, object] = {
+            "stage": self.stage,
+            "detected": bool(self.detected),
+            "dchi2_threshold": float(self.dchi2_threshold),
+            "reason_codes": list(self.reason_codes),
+        }
+        if self.seed is None:
+            return row
+        quality = self.seed.quality
+        row.update(
+            {
+                "t0": float(self.seed.t0),
+                "teff": float(self.seed.teff),
+                "dchi2": float(self.seed.dchi2),
+                "score": float(self.seed.score),
+                "n_score_reference": int(self.seed.n_score_reference),
+                "quality": {
+                    "n_window": int(quality.n_window),
+                    "n_contrib": int(quality.n_contrib),
+                    "n_eff": float(quality.n_eff),
+                    "peak_frac": float(quality.peak_frac),
+                    "rho1": float(quality.rho1),
+                    "longest_run": int(quality.longest_run),
+                },
+            }
+        )
+        return row
+
+
+@dataclass(frozen=True)
 class _BeamBranch:
     score: float
     fit: SingleLensFitResult
@@ -252,9 +350,9 @@ class PlanetFeatureConfig:
     min_separation: float = 0.15
     duration_min_abs_z: float = 3.0
     duration_relative_height: float = 0.5
-    # Keep a negative feature only when it is a deep, closed trough bracketed
-    # by positive recoveries.  This rejects one-sided caustic wings while
-    # retaining bump--dip--bump structures.
+    # Compatibility controls for the closer peak separation used by
+    # peak--dip--peak structures. Closed dips themselves are always retained;
+    # ``require_closed=True`` rejects one-sided negative tails.
     allow_bracketed_dips: bool = True
     dip_bracket_min_peak_frac: float = 0.1
     dip_bracket_min_depth_ratio: float = 1.5
@@ -378,6 +476,8 @@ class PlanetSignalResult:
     best: Optional[PlanetSignalCandidate]
     initial_seed: Optional[BestCandidate] = None
     timing: PlanetSignalTiming = PlanetSignalTiming()
+    observed_signal_scale: Optional[ObservedSignalScale] = None
+    scan_decision: Optional[PlanetScanDecision] = None
 
     def measure_features(
         self,
@@ -534,16 +634,51 @@ class PlanetSignalResult:
     ) -> tuple[float, float]:
         """
         Return the default full-event window used by :meth:`plot_signal`.
+
+        This is the event-scale view, not the compact planetary-signal view.
+        Its normal width is ``peak_tE_width * |tE*u0|`` around the fitted
+        ``t0``.  If that fitted scale is unresolved, the observed broad
+        magnification envelope is used as a fallback, with its censoring kept
+        in the scale diagnostics.  The compact planetary-signal view uses
+        ``observed_signal_scale`` in ``_default_signal_xlim``.
         """
-        t0, tE, u0 = map(float, np.asarray(self.refined_fit.params)[:3])
-        effective_width = abs(tE) * max(abs(u0), 1.0)
-        hw = max(float(peak_tE_width) * effective_width, float(min_half_width))
+        t0 = float(np.asarray(self.refined_fit.params)[0])
+        magnification_scale = measure_observed_magnification_scale(
+            np.asarray(self.time, dtype=float),
+            np.asarray(self.flux, dtype=float),
+            center=t0,
+            valid_mask=~np.asarray(self.signal_mask, dtype=bool),
+            source="planet_signal_magnification",
+        )
+        resolved = resolve_event_signal_scale(
+            self.refined_fit,
+            observed_scale=magnification_scale,
+            time=np.asarray(self.time, dtype=float),
+            minimum_half_width=float(min_half_width),
+        )
+        if resolved.source == "model_tE_u0":
+            hw = max(
+                float(min_half_width),
+                float(peak_tE_width) * float(resolved.half_width),
+            ) + max(float(signal_pad), 0.0)
+        else:
+            # The fallback is allowed to be asymmetric internally, but the
+            # overview remains centred on t0.  This widens only to the
+            # observed side; it does not claim that an unseen side exists.
+            left, right = resolved.bounds(symmetric=False)
+            hw = max(
+                float(min_half_width),
+                abs(t0 - left),
+                abs(right - t0),
+            ) + max(float(signal_pad), 0.0)
         xlim = (t0 - hw, t0 + hw)
         if self.best is not None:
-            xlim = (
-                min(float(xlim[0]), self.best.t_start - float(signal_pad)),
-                max(float(xlim[1]), self.best.t_end + float(signal_pad)),
+            hw = max(
+                0.5 * (float(xlim[1]) - float(xlim[0])),
+                abs(t0 - (float(self.best.t_start) - float(signal_pad))),
+                abs((float(self.best.t_end) + float(signal_pad)) - t0),
             )
+            xlim = (t0 - hw, t0 + hw)
         return xlim
 
     def _default_signal_xlim(
@@ -555,6 +690,15 @@ class PlanetSignalResult:
     ) -> tuple[float, float]:
         if self.best is None:
             return (float(np.min(self.time)), float(np.max(self.time)))
+
+        scale = self.observed_signal_scale
+        if scale is not None and scale.valid:
+            lo, hi = scale.bounds(padding=float(pad) / max(scale.half_width, 1.0e-12))
+            if max_width > 0.0 and hi - lo > max_width:
+                center = float(scale.t_center)
+                half = 0.5 * float(max_width)
+                lo, hi = center - half, center + half
+            return (float(lo), float(hi))
 
         in_best = (
             self.signal_mask
@@ -652,7 +796,7 @@ class _PlanetFeatureDetector:
         z_smooth = self._smooth(z, int(self.config.smooth_points))
         model_flux = np.asarray(result.refined_fit.model_flux, dtype=float)
         peaks: list[PlanetFeature] = []
-        for start, end in self._mask_slices(mask):
+        for start, end in self._mask_slices(mask, time):
             indices = self._prominent_extrema(
                 time,
                 z_smooth,
@@ -686,7 +830,7 @@ class _PlanetFeatureDetector:
             )
 
         dips: list[PlanetFeature] = []
-        for start, end in self._mask_slices(mask):
+        for start, end in self._mask_slices(mask, time):
             indices = self._prominent_extrema(
                 time,
                 z_smooth,
@@ -712,12 +856,10 @@ class _PlanetFeatureDetector:
                 )
             )
 
-        if peaks and dips and bool(self.config.allow_bracketed_dips):
-            dips = [dip for dip in dips if self._is_bracketed_dip(dip, peaks, result)]
-
-        # Positive caustic/bump features still take precedence over ordinary
-        # negative wings.  The explicit bracketed-dip exception above keeps a
-        # genuine bump--dip--bump structure without reopening every dip.
+        # Peak and dip extrema are independent measurements. Negative tails
+        # that run into a mask boundary were already rejected by
+        # ``require_closed=True``; the presence of an unrelated positive peak
+        # must not erase an otherwise closed dip.
         if peaks or dips:
             return PlanetFeatureResult(
                 peaks=tuple(sorted(peaks, key=lambda feature: feature.time)),
@@ -727,47 +869,6 @@ class _PlanetFeatureDetector:
         return PlanetFeatureResult(
             peaks=(),
             dips=tuple(sorted(dips, key=lambda feature: feature.time)),
-        )
-
-    def _is_bracketed_dip(
-        self,
-        dip: PlanetFeature,
-        peaks: list[PlanetFeature],
-        result: PlanetSignalResult,
-    ) -> bool:
-        """Keep only a deep trough with local positive recovery on both sides."""
-        left = [peak for peak in peaks if peak.time < dip.time]
-        right = [peak for peak in peaks if peak.time > dip.time]
-        if not left or not right:
-            return False
-        left_peak = max(left, key=lambda peak: peak.time)
-        right_peak = min(right, key=lambda peak: peak.time)
-
-        peak_floor = max(
-            float(self.config.min_abs_z),
-            float(self.config.dip_bracket_min_peak_frac) * float(dip.strength),
-        )
-        if left_peak.strength < peak_floor or right_peak.strength < peak_floor:
-            return False
-        if dip.strength < float(self.config.dip_bracket_min_depth_ratio) * max(
-            left_peak.strength, right_peak.strength
-        ):
-            return False
-
-        dt = np.diff(np.asarray(result.time, dtype=float))
-        positive_dt = dt[dt > 0.0]
-        cadence = float(np.nanmedian(positive_dt)) if positive_dt.size else 0.0
-        local_scale = max(
-            float(dip.timescale),
-            float(left_peak.timescale),
-            float(right_peak.timescale),
-            3.0 * cadence,
-            np.finfo(float).eps,
-        )
-        max_gap = float(self.config.dip_bracket_max_gap_factor) * local_scale
-        return (
-            float(dip.time) - float(left_peak.time) <= max_gap
-            and float(right_peak.time) - float(dip.time) <= max_gap
         )
 
     def _prominent_extrema(
@@ -1093,11 +1194,38 @@ class _PlanetFeatureDetector:
         return float(ratio)
 
     @staticmethod
-    def _mask_slices(mask: np.ndarray) -> list[tuple[int, int]]:
+    def _mask_slices(
+        mask: np.ndarray,
+        time: Optional[np.ndarray] = None,
+        *,
+        max_gap_cadences: float = 10.0,
+    ) -> list[tuple[int, int]]:
         idx = np.flatnonzero(mask)
         if idx.size == 0:
             return []
-        breaks = np.flatnonzero(np.diff(idx) > 1)
+        disconnected = np.diff(idx) > 1
+        if time is not None and idx.size > 1:
+            t = np.asarray(time, dtype=float).reshape(-1)
+            if t.size != np.asarray(mask).size:
+                raise ValueError("time and mask must have the same length.")
+            dt = np.diff(t)
+            positive = dt[np.isfinite(dt) & (dt > 0.0)]
+            if positive.size:
+                cadence = float(np.median(positive))
+                selected_dt = np.diff(t[idx])
+                time_gap = (
+                    ~np.isfinite(selected_dt)
+                    | (selected_dt <= 0.0)
+                    | (
+                        selected_dt
+                        > max(
+                            float(max_gap_cadences) * cadence,
+                            np.finfo(float).eps,
+                        )
+                    )
+                )
+                disconnected |= time_gap
+        breaks = np.flatnonzero(disconnected)
         starts = np.r_[idx[0], idx[breaks + 1]]
         ends = np.r_[idx[breaks], idx[-1]] + 1
         return [(int(start), int(end)) for start, end in zip(starts, ends)]
@@ -1155,6 +1283,7 @@ class PlanetSignalExtractor:
         initial_fit: Optional[SingleLensFitResult] = None,
         initial_seed: Optional[BestCandidate] = None,
         freeze_baseline: bool = False,
+        detection_stage: Optional[str] = None,
         mask_protection: Optional[np.ndarray] = None,
         baseline_refit_fitter=None,
     ) -> PlanetSignalResult:
@@ -1242,7 +1371,13 @@ class PlanetSignalExtractor:
 
         mode = str(self.config.baseline_mode).lower()
         if freeze_baseline:
-            current_fit, signal_mask, point_weight, iterations = self._run_frozen_baseline(
+            (
+                current_fit,
+                signal_mask,
+                point_weight,
+                iterations,
+                observed_initial_seed,
+            ) = self._run_frozen_baseline(
                 initial_fit=initial_fit,
                 time_j=time_j,
                 flux_j=flux_j,
@@ -1250,7 +1385,6 @@ class PlanetSignalExtractor:
                 time_np=time_np,
                 verbose=verbose,
             )
-            observed_initial_seed = None
         elif mode == "mask":
             current_fit, signal_mask, point_weight, iterations = self._run_mask_baseline(
                 initial_fit=initial_fit,
@@ -1292,6 +1426,7 @@ class PlanetSignalExtractor:
             signal_mask = np.zeros(time_np.shape, dtype=bool)
             point_weight = np.ones(time_np.shape, dtype=float)
             iterations = []
+            observed_initial_seed = None
 
         prior_mask = self._prior_signal_window_mask(
             time_np,
@@ -1347,6 +1482,26 @@ class PlanetSignalExtractor:
         refined_residual = np.asarray(jax.device_get(current_fit.residual), dtype=float)
         candidates = self._candidates_from_mask(time_np, refined_residual, ferr_np, signal_mask)
         best = max(candidates, key=lambda c: c.chi2, default=None)
+        scale_mask = signal_mask if np.any(signal_mask) else np.ones(time_np.size, dtype=bool)
+        observed_scale = measure_observed_signal_scale(
+            time_np,
+            refined_residual / np.maximum(ferr_np, 1.0e-12),
+            valid_mask=scale_mask,
+            source="planet_signal",
+        )
+        scan_decision = PlanetScanDecision.from_seed(
+            observed_initial_seed,
+            stage=(
+                str(detection_stage)
+                if detection_stage is not None
+                else (
+                    "frozen_residual_scan"
+                    if freeze_baseline
+                    else "planet_signal_scan"
+                )
+            ),
+            dchi2_threshold=float(self.config.seed_min_dchi2),
+        )
 
         return PlanetSignalResult(
             time=time_np,
@@ -1368,6 +1523,8 @@ class PlanetSignalExtractor:
                 scan_seconds=float(self._scan_seconds),
                 n_scans=int(self._n_scans),
             ),
+            observed_signal_scale=observed_scale,
+            scan_decision=scan_decision,
         )
 
     def _prior_signal_window_mask(
@@ -1420,18 +1577,65 @@ class PlanetSignalExtractor:
     def _signal_half_width_cap(self, fit: SingleLensFitResult) -> float:
         """Maximum half-width of one planet interval.
 
-        A planet residual must remain compact relative to the adopted
-        single-lens event. Broad peak/wing structure belongs to the baseline
-        model comparison (FSPL/parallax), not to the planet mask.
+        Use the fitted ``|tE*u0|`` scale on the normal path.  Only an
+        untrustworthy fitted scale falls back to the observed magnification
+        envelope.  A residual-derived width cannot cap itself: doing so lets a
+        broad mismatch recursively grow into a planet mask.
         """
+        time = np.asarray(fit.time, dtype=float)
         params = np.asarray(fit.params, dtype=float).reshape(-1)
-        if params.size < 2 or not np.isfinite(params[1]):
-            return float("inf")
-        fraction = float(self.config.max_signal_span_over_tE)
-        if not np.isfinite(fraction) or fraction <= 0.0:
-            return float("inf")
+        center = float(params[0]) if params.size else float("nan")
+        observed_scale = measure_observed_magnification_scale(
+            time,
+            np.asarray(fit.flux, dtype=float),
+            center=center,
+            source="planet_mask_magnification_fallback",
+        )
+        resolved = resolve_event_signal_scale(
+            fit,
+            observed_scale=observed_scale,
+            time=time,
+            minimum_half_width=0.0,
+        )
+        if not resolved.valid or not np.isfinite(resolved.half_width):
+            return max(0.5 * float(self.config.min_signal_span), 0.0)
+        factor = max(
+            float(self.config.max_signal_half_width_over_event_scale),
+            0.0,
+        )
         minimum_span = max(float(self.config.min_signal_span), 0.0)
-        return max(0.5 * fraction * abs(float(params[1])), 0.5 * minimum_span)
+        return max(factor * float(resolved.half_width), 0.5 * minimum_span)
+
+    def _observed_seed_half_width(
+        self,
+        *,
+        time: np.ndarray,
+        fit: SingleLensFitResult,
+        center: float,
+        seed_teff: float,
+        coefficient: float,
+    ) -> float:
+        """Return a candidate window from local observed residual support."""
+        residual = np.asarray(jax.device_get(fit.residual), dtype=float)
+        ferr = np.maximum(np.asarray(fit.ferr, dtype=float), 1.0e-12)
+        time_np = np.asarray(time, dtype=float)
+        local_half_width = max(16.0 * abs(float(seed_teff)), 1.0)
+        local = np.abs(time_np - float(center)) <= local_half_width
+        scale = measure_observed_signal_scale(
+            time_np,
+            residual / ferr,
+            valid_mask=local,
+            source="local_observed_residual",
+        )
+        base = (
+            float(scale.half_width)
+            if scale.valid and not scale.censored
+            else abs(float(seed_teff))
+        )
+        return max(
+            float(coefficient) * base,
+            float(self.config.mask_min_half_width),
+        )
 
     def _cap_signal_interval(
         self,
@@ -1666,9 +1870,12 @@ class PlanetSignalExtractor:
                 break
 
             before = int(np.sum(signal_mask))
-            half_width = max(
-                float(self.config.mask_teff_coeff) * float(seed.teff),
-                float(self.config.mask_min_half_width),
+            half_width = self._observed_seed_half_width(
+                time=time_np,
+                fit=current_fit,
+                center=float(seed.t0),
+                seed_teff=float(seed.teff),
+                coefficient=float(self.config.mask_teff_coeff),
             )
             half_width = min(half_width, self._signal_half_width_cap(current_fit))
             seed_window = np.abs(time_np - float(seed.t0)) <= half_width
@@ -1749,20 +1956,32 @@ class PlanetSignalExtractor:
         ferr_j: jnp.ndarray,
         time_np: np.ndarray,
         verbose: bool,
-    ) -> tuple[SingleLensFitResult, np.ndarray, np.ndarray, list[PlanetSignalIteration]]:
+    ) -> tuple[
+        SingleLensFitResult,
+        np.ndarray,
+        np.ndarray,
+        list[PlanetSignalIteration],
+        Optional[BestCandidate],
+    ]:
         """Find residual intervals without changing the adopted baseline fit."""
         residual_j = initial_fit.residual
         signal_mask = np.zeros(time_np.shape, dtype=bool)
         iterations: list[PlanetSignalIteration] = []
+        observed_initial_seed: Optional[BestCandidate] = None
 
         for iteration in range(max(0, int(self.config.max_iter))):
             residual_for_seed = self._suppress_masked_residual(residual_j, signal_mask)
             seed = self._scan_best(time_j, residual_for_seed, ferr_j, time_np, verbose=verbose)
             if seed is None or not np.isfinite(seed.dchi2) or seed.dchi2 < float(self.config.seed_min_dchi2):
                 break
-            half_width = max(
-                float(self.config.mask_teff_coeff) * float(seed.teff),
-                float(self.config.mask_min_half_width),
+            if observed_initial_seed is None:
+                observed_initial_seed = seed
+            half_width = self._observed_seed_half_width(
+                time=time_np,
+                fit=initial_fit,
+                center=float(seed.t0),
+                seed_teff=float(seed.teff),
+                coefficient=float(self.config.mask_teff_coeff),
             )
             half_width = min(half_width, self._signal_half_width_cap(initial_fit))
             seed_window = np.abs(time_np - float(seed.t0)) <= half_width
@@ -1805,6 +2024,7 @@ class PlanetSignalExtractor:
             signal_mask,
             np.where(signal_mask, 0.0, 1.0),
             iterations,
+            observed_initial_seed,
         )
 
     def _run_robust_baseline(
@@ -2169,17 +2389,23 @@ class PlanetSignalExtractor:
         masks: list[np.ndarray] = []
 
         for factor in tuple(self.config.beam_teff_factors):
-            half_width = max(
-                abs(float(factor)) * abs(float(seed.teff)),
-                float(self.config.beam_min_half_width),
+            half_width = self._observed_seed_half_width(
+                time=time_np,
+                fit=fit,
+                center=float(seed.t0),
+                seed_teff=float(seed.teff),
+                coefficient=abs(float(factor)),
             )
             half_width = min(half_width, self._signal_half_width_cap(fit))
             masks.append(np.abs(time_np - float(seed.t0)) <= half_width)
 
         max_factor = max([abs(float(v)) for v in tuple(self.config.beam_teff_factors)] + [1.0])
-        search_half_width = max(
-            max_factor * abs(float(seed.teff)),
-            float(self.config.beam_min_half_width),
+        search_half_width = self._observed_seed_half_width(
+            time=time_np,
+            fit=fit,
+            center=float(seed.t0),
+            seed_teff=float(seed.teff),
+            coefficient=max_factor,
         )
         search_half_width = min(
             search_half_width,
@@ -2198,7 +2424,13 @@ class PlanetSignalExtractor:
             masks.append(grown)
 
             for pad_factor in (1.0, 2.0, 4.0):
-                pad = pad_factor * abs(float(seed.teff))
+                pad = self._observed_seed_half_width(
+                    time=time_np,
+                    fit=fit,
+                    center=float(seed.t0),
+                    seed_teff=float(seed.teff),
+                    coefficient=pad_factor,
+                )
                 padded = (
                     (time_np >= float(time_np[lo]) - pad)
                     & (time_np <= float(time_np[hi]) + pad)
@@ -2218,7 +2450,13 @@ class PlanetSignalExtractor:
                 time=time_np,
                 abs_z=abs_z,
                 window=proposal,
-                pad=float(self.config.mask_core_pad_teff) * abs(float(seed.teff)),
+                pad=self._observed_seed_half_width(
+                    time=time_np,
+                    fit=fit,
+                    center=float(seed.t0),
+                    seed_teff=float(seed.teff),
+                    coefficient=float(self.config.mask_core_pad_teff),
+                ),
             )
             mask &= ~current_mask
             if not np.any(mask):
@@ -2932,12 +3170,7 @@ class PlanetSignalExtractor:
 
         z = residual / ferr
         candidates: list[PlanetSignalCandidate] = []
-        idx = np.flatnonzero(mask)
-        breaks = np.flatnonzero(np.diff(idx) > 1)
-        starts = np.r_[idx[0], idx[breaks + 1]]
-        ends = np.r_[idx[breaks], idx[-1]] + 1
-
-        for start, end in zip(starts, ends):
+        for start, end in _PlanetFeatureDetector._mask_slices(mask, time):
             sl = slice(int(start), int(end))
             n_points = int(end - start)
             if n_points < int(self.config.candidate_min_points):

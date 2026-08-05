@@ -20,6 +20,8 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
+from .signal_scale import ObservedSignalScale, measure_observed_signal_scale
+
 
 def _json_safe(value):
     """Recursively convert detector diagnostics to JSON-native values."""
@@ -73,6 +75,7 @@ class EffectCandidate:
     score_without_planet: float = float("nan")
     planet_overlap: float = 0.0
     morphology: str = "unclassified"
+    observed_signal_scale: Optional[ObservedSignalScale] = None
 
     def with_decision(self, decision: str, reason_codes: Iterable[str]) -> "EffectCandidate":
         """Return a copy with the routing decision attached."""
@@ -102,6 +105,7 @@ class EffectCandidate:
             score_without_planet=float(self.score_without_planet),
             planet_overlap=float(self.planet_overlap),
             morphology=str(self.morphology),
+            observed_signal_scale=self.observed_signal_scale,
         )
 
     def with_probe(
@@ -133,6 +137,7 @@ class EffectCandidate:
             score_without_planet=self.score_without_planet,
             planet_overlap=self.planet_overlap,
             morphology=self.morphology,
+            observed_signal_scale=self.observed_signal_scale,
         )
 
     def summary_dict(self) -> dict[str, object]:
@@ -150,6 +155,11 @@ class EffectCandidate:
             "score_without_planet": float(self.score_without_planet),
             "planet_overlap": float(self.planet_overlap),
             "morphology": self.morphology,
+            "observed_signal_scale": (
+                None
+                if self.observed_signal_scale is None
+                else self.observed_signal_scale.summary_dict()
+            ),
             "decision": self.decision,
             "reason_codes": list(self.reason_codes),
             "subset_diagnostics": _json_safe(self.subset_diagnostics),
@@ -628,6 +638,18 @@ def _candidate_from_template(
         all_mask & ~planet,
         rtol=rtol,
     )
+    profile_peak = (
+        float(np.nanmax(np.abs(full.fitted[all_mask])))
+        if np.any(all_mask)
+        else 0.0
+    )
+    observed_scale = measure_observed_signal_scale(
+        time,
+        full.fitted,
+        valid_mask=all_mask,
+        threshold=max(1.0e-3, 0.05 * profile_peak),
+        source=f"{effect}_profile",
+    )
     subset_rows: list[dict[str, object]] = []
     for index, mask in enumerate(subset_masks):
         use = all_mask & mask
@@ -663,7 +685,24 @@ def _candidate_from_template(
         seed = np.asarray(seed_parameters, dtype=float)
         t0, tE, u0 = float(seed[0]), abs(float(seed[1])), abs(float(seed[2]))
         rho = float(np.exp(seed[3])) if seed[3] < 0.0 else float(seed[3])
-        width = max(3.0 * rho * tE, 0.25 * u0 * tE, 1.0e-12)
+        if observed_scale.valid:
+            # Morphology is measured in observed time, not from the
+            # ``tE*u0`` or ``rho*tE`` parameter products.  Keep a cadence-sized
+            # floor so sparse events do not collapse to one sample.
+            cadence = (
+                observed_scale.cadence
+                if np.isfinite(observed_scale.cadence)
+                else 0.0
+            )
+            width = max(observed_scale.half_width, cadence, 1.0e-12)
+            topology_half_width = max(0.35 * width, cadence, 1.0e-12)
+            t0 = float(observed_scale.t_center)
+        else:
+            # Compatibility fallback for a detector with too little usable
+            # residual support.  A valid observed scale is required for an
+            # automatic physical classification below.
+            width = max(3.0 * rho * tE, 0.25 * u0 * tE, 1.0e-12)
+            topology_half_width = max(3.0 * rho * tE, 1.0e-12)
         central = np.abs(time - t0) <= width
         left = central & (time <= t0)
         right = central & (time >= t0)
@@ -690,7 +729,7 @@ def _candidate_from_template(
             time,
             z,
             t0=t0,
-            t_star=rho * tE,
+            t_star=topology_half_width,
             valid_mask=all_mask,
         )
         template_explained_fraction = float(
@@ -716,12 +755,16 @@ def _candidate_from_template(
             template_explained_fraction=template_explained_fraction,
         )
         fspl_shape_ok = bool(
-            symmetry >= 0.95
+            observed_scale.valid
+            and not observed_scale.censored
+            and symmetry >= 0.95
             and template_explained_fraction >= 0.20
             and (topology["valid"] or sparse_high_snr_topology)
         )
         fspl_flattened_peak = bool(
-            symmetry >= 0.95
+            observed_scale.valid
+            and not observed_scale.censored
+            and symmetry >= 0.95
             and template_explained_fraction >= 0.40
             and np.all(np.isfinite(shoulder_values))
             and float(topology.get("core_mean_z", 0.0)) <= -5.0
@@ -768,6 +811,10 @@ def _candidate_from_template(
         reasons.append("insufficient_coverage")
     if full.score <= 0.0:
         reasons.append("non_positive_score")
+    if not observed_scale.valid:
+        reasons.append("signal_scale_unmeasurable")
+    elif observed_scale.censored:
+        reasons.append("signal_scale_censored")
     if compact_mask.any() and full.score > 0.0 and without.score < 0.5 * full.score:
         reasons.append("compact_block_dominated")
     planet_overlap = _energy_overlap(full.fitted, planet)
@@ -821,6 +868,7 @@ def _candidate_from_template(
             if "planet_morphology_dominated" in reasons
             else "ambiguous"
         ),
+        observed_signal_scale=observed_scale,
     )
 
 
@@ -840,6 +888,7 @@ def _time_subsets(time: np.ndarray) -> tuple[np.ndarray, ...]:
 def _named_time_subsets(
     time: np.ndarray,
     seed_parameters: Optional[np.ndarray] = None,
+    observed_scale: Optional[ObservedSignalScale] = None,
 ) -> tuple[tuple[str, np.ndarray], ...]:
     """Return physically interpretable, ordered subsets."""
     n = time.size
@@ -857,7 +906,14 @@ def _named_time_subsets(
         mask = np.zeros(n, dtype=bool)
         mask[order[lo:hi]] = True
         masks.append((name, mask))
-    if seed_parameters is not None and np.asarray(seed_parameters).size >= 3:
+    if observed_scale is not None and observed_scale.valid:
+        masks.extend(
+            [
+                ("pre_event_wing", time < float(observed_scale.t_left)),
+                ("post_event_wing", time > float(observed_scale.t_right)),
+            ]
+        )
+    elif seed_parameters is not None and np.asarray(seed_parameters).size >= 3:
         t0, tE, u0 = (
             float(value)
             for value in np.asarray(seed_parameters, dtype=float).reshape(-1)[:3]
@@ -933,6 +989,18 @@ def parallax_score_test(
     fitted[indices] = Hp @ beta
     score = float(b @ beta)
     energy = fitted * fitted
+    observed_scale = measure_observed_signal_scale(
+        t,
+        fitted,
+        valid_mask=all_mask,
+        threshold=max(
+            1.0e-3,
+            0.05 * float(np.nanmax(np.abs(fitted[all_mask])))
+            if np.any(all_mask)
+            else 1.0e-3,
+        ),
+        source=f"{effect}_profile",
+    )
     max_point = float(np.max(energy) / np.sum(energy)) if np.sum(energy) > 0 else 0.0
     support = np.abs(fitted) >= max(float(np.max(np.abs(fitted))) * 1.0e-3, 1.0e-12)
     coverage = float(np.count_nonzero(support) / max(indices.size, 1))
@@ -956,7 +1024,11 @@ def parallax_score_test(
     condition_number = float(h_nonzero[0] / h_nonzero[-1]) if h_nonzero.size else float("inf")
     full_information = float(np.trace(gram))
     subset_rows: list[dict[str, object]] = []
-    for name, mask in _named_time_subsets(t, seed_parameters):
+    for name, mask in _named_time_subsets(
+        t,
+        seed_parameters,
+        observed_scale=observed_scale,
+    ):
         use = all_mask & mask & ~planet
         if np.count_nonzero(use) < max(3, J.shape[1] + 1):
             subset_rows.append({"name": name, "valid": False, "reason": "too_few_points"})
@@ -1038,15 +1110,32 @@ def parallax_score_test(
         duration_te = _weighted_span(t, energy) / event_tE
     else:
         duration_te = float("nan")
+    duration = _weighted_span(t, energy)
+    duration_over_signal_scale = (
+        float(duration / max(observed_scale.width, 1.0e-12))
+        if observed_scale.valid and observed_scale.width > 0.0
+        else float("nan")
+    )
+    signal_scale_ok = bool(
+        observed_scale.valid
+        and not observed_scale.censored
+        and np.isfinite(observed_scale.points_per_width)
+        and observed_scale.points_per_width >= 6.0
+    )
     subset_rows.append(
         {
             "name": "parallax_morphology",
             "duration_over_tE": duration_te,
+            "duration_over_signal_scale": duration_over_signal_scale,
+            "signal_scale_points_per_width": observed_scale.points_per_width,
+            "signal_scale_censored": observed_scale.censored,
             "wing_coherent": wing_coherent,
-            "valid": bool(wing_coherent and duration_te >= 0.75),
+            "valid": bool(wing_coherent and signal_scale_ok),
             "reason": (
                 "broad_coherent_distortion"
-                if wing_coherent and duration_te >= 0.75
+                if wing_coherent and signal_scale_ok
+                else "signal_scale_censored"
+                if observed_scale.censored
                 else "local_or_incoherent_distortion"
             ),
         }
@@ -1070,7 +1159,11 @@ def parallax_score_test(
         reasons.append("planet_morphology_dominated")
     if seed_parameters is not None and not wing_coherent:
         reasons.append("parallax_wings_incoherent")
-    if np.isfinite(duration_te) and duration_te < 0.75:
+    if observed_scale.censored:
+        reasons.append("signal_scale_censored")
+    elif not observed_scale.valid:
+        reasons.append("signal_scale_unmeasurable")
+    elif not signal_scale_ok:
         reasons.append("parallax_too_local")
     if stability < 0.25:
         reasons.append("subset_unstable")
@@ -1102,7 +1195,7 @@ def parallax_score_test(
         planet_overlap=planet_overlap,
         morphology=(
             "parallax_coherent_wings"
-            if wing_coherent and duration_te >= 0.75
+            if wing_coherent and signal_scale_ok
             else "planet_like"
             if (
                 "planet_morphology_dominated" in reasons
@@ -1112,6 +1205,7 @@ def parallax_score_test(
             if "planet_morphology_dominated" in reasons
             else "ambiguous"
         ),
+        observed_signal_scale=observed_scale,
     )
 
 

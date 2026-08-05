@@ -113,6 +113,17 @@ class FinderConfig:
     ``earth_geocentric_offset`` convention.
     """
 
+    parallax_geometry: Literal["auto", "none", "annual", "space", "both"] = "auto"
+    """
+    Observer geometry used by the physical-effect detector.
+
+    ``"auto"`` chooses ``"space"`` when a satellite ephemeris is available,
+    otherwise ``"annual"`` when sky coordinates are available.  This is a
+    geometry decision, not a model-selection score: annual and space
+    parallax are not compared against each other.  ``"both"`` is retained for
+    explicit mixed/legacy analyses.
+    """
+
     max_piE: float = 1.0
     """Symmetric bound applied to fitted ``piEN`` and ``piEE`` when supported."""
 

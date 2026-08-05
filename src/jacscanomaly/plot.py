@@ -19,6 +19,10 @@ from .singlelens_model import (
     A_fspl_space_parallax_func,
     A_cv_asymexp_logtau_func,
 )
+from .signal_scale import (
+    measure_observed_signal_scale,
+    resolve_event_signal_scale,
+)
 
 
 def _single_lens_model_flux(fit, time) -> np.ndarray:
@@ -251,8 +255,9 @@ class AnomalyPlotter:
 
     Conventions
     -----------
-    - "pspl": uses PSPL best-fit parameters to define center/width
-    - "anomaly": uses the best anomaly candidate (result.best) to define center/width
+    - "pspl": uses PSPL best-fit ``|tE*u0|`` to define center/width
+    - "anomaly": uses the best anomaly candidate for the center and the
+      same resolved event scale for the width
 
     Notes
     -----
@@ -282,9 +287,9 @@ class AnomalyPlotter:
         center : {"pspl", "anomaly"} (compat: "best")
             Center of the view window.
         width_mode : {"pspl", "anomaly", "custom"} (compat: "best")
-            How to compute window half-width.
-            - "pspl": half_width = a * tE * u0
-            - "anomaly": half_width = a * teff (from result.best)
+            How to compute window half-width.  The normal scale is
+            ``|tE*u0|``; an observed residual scale is used only when the
+            fitted scale is unresolved.  ``a`` is its multiplier.
             - "custom": half_width must be provided.
         a : float
             Multiplier for the default half-width rule.
@@ -315,22 +320,31 @@ class AnomalyPlotter:
         else:
             t_center = float(np.asarray(result.fit.params)[0])
 
-        # width
+        observed_scale = getattr(result, "observed_signal_scale", None)
+        if observed_scale is None or not observed_scale.valid:
+            residual = getattr(result, "residual", None)
+            ferr = getattr(result, "ferr", None)
+            if residual is not None and ferr is not None:
+                observed_scale = measure_observed_signal_scale(
+                    np.asarray(result.time, dtype=float),
+                    np.asarray(residual, dtype=float)
+                    / np.maximum(np.asarray(ferr, dtype=float), 1.0e-12),
+                    source="plot_residual",
+                )
+
         if width_mode == "custom":
             if half_width is None:
                 raise ValueError("When width_mode='custom', half_width must be specified.")
             hw = float(half_width)
-
-        elif width_mode == "anomaly":
-            if getattr(result, "best", None) is None:
-                t0, tE, u0 = map(float, np.asarray(result.fit.params)[:3])
-                hw = float(a * abs(tE * u0))
-            else:
-                hw = float(a * result.best.teff)
-
         else:  # "pspl"
-            t0, tE, u0 = map(float, np.asarray(result.fit.params)[:3])
-            hw = float(a * abs(tE * u0))
+            resolved = resolve_event_signal_scale(
+                result.fit,
+                observed_scale=observed_scale,
+                time=np.asarray(result.time, dtype=float),
+                center=t_center,
+                minimum_half_width=float(min_hw or 0.0),
+            )
+            hw = float(a) * float(resolved.half_width)
 
         # Apply minimum half-width (prevents degenerate u0≈0 from collapsing window)
         if min_hw is not None:
@@ -347,7 +361,12 @@ class AnomalyPlotter:
             if not (xmin <= ano_t0 <= xmax):
                 dist = min(abs(ano_t0 - xmin), abs(ano_t0 - xmax))
                 if dist <= 2.0 * hw:
-                    buf = max(float(best.teff) * 5.0, 5.0)
+                    buf = max(
+                        float(resolved.half_width)
+                        if width_mode != "custom" and resolved.valid
+                        else 5.0,
+                        5.0,
+                    )
                     if ano_t0 < xmin:
                         xmin = ano_t0 - buf
                     else:
@@ -469,16 +488,32 @@ class AnomalyPlotter:
         ONLY inside the chi2 evaluation window.
 
         - Data: residual vs time (optionally errorbar)
-        - Model lines are drawn only within |t - t0| <= teff_coeff * teff
+        - Model lines are drawn only within the observed signal-scale window.
 
         Returns (fig, ax).
         """
         if getattr(result, "best", None) is None:
             return None, None
 
-        t0 = float(result.best.t0)
-        teff = float(result.best.teff)
-        w = teff_coeff * teff
+        observed_scale = getattr(result, "observed_signal_scale", None)
+        if observed_scale is None or not observed_scale.valid:
+            observed_scale = measure_observed_signal_scale(
+                np.asarray(result.time, dtype=float),
+                np.asarray(result.residual, dtype=float)
+                / np.maximum(np.asarray(result.ferr, dtype=float), 1.0e-12),
+                source="anomaly_plot_residual",
+            )
+        t0 = (
+            float(observed_scale.t_center)
+            if observed_scale.valid
+            else float(result.best.t0)
+        )
+        width = (
+            float(observed_scale.half_width)
+            if observed_scale.valid
+            else float(result.best.teff)
+        )
+        w = teff_coeff * width
 
         # CPU arrays
         t_np = np.asarray(result.time)
@@ -505,7 +540,7 @@ class AnomalyPlotter:
             y_flat = np.asarray(jax.device_get(get_flat_plot_model_masked(t_plot, r, w_j, mask_j)))
 
         if show_anom:
-            y_anom_j, _ = get_anom_plot_model_masked(t_plot, t0, teff, t, r, w_j, mask_j)
+            y_anom_j, _ = get_anom_plot_model_masked(t_plot, t0, width, t, r, w_j, mask_j)
             y_anom = np.asarray(jax.device_get(y_anom_j))
 
         if ax is None:
@@ -527,7 +562,7 @@ class AnomalyPlotter:
 
         # range
         if xlim is None:
-            hw = a * teff
+            hw = a * width
             xlim = (t0 - hw, t0 + hw)
         ax.set_xlim(xlim)
 
@@ -634,8 +669,20 @@ class AnomalyPlotter:
         ax.minorticks_on()
 
         if show_anomaly_window and (getattr(result, "best", None) is not None):
-            t0c = float(result.best.t0)
-            w = float(teff_coeff * result.best.teff)
+            observed_scale = getattr(result, "observed_signal_scale", None)
+            t0c = (
+                float(observed_scale.t_center)
+                if observed_scale is not None and observed_scale.valid
+                else float(result.best.t0)
+            )
+            w = float(
+                teff_coeff
+                * (
+                    observed_scale.half_width
+                    if observed_scale is not None and observed_scale.valid
+                    else result.best.teff
+                )
+            )
             ax.axvline(t0c, lw=1)
             ax.axvspan(t0c - w, t0c + w, alpha=0.1)
 
@@ -684,7 +731,7 @@ class SingleLensPlotter:
     -----------
     - center = "pspl" only (kept for API compatibility)
     - width_mode:
-        - "pspl": a * tE * u0
+        - "pspl": a times the resolved ``|tE*u0|`` scale
         - "custom": use half_width
     """
 
@@ -706,14 +753,25 @@ class SingleLensPlotter:
         if xlim is not None:
             return xlim
 
-        t0, tE, u0 = map(float, np.asarray(fit.params)[:3])
+        t0 = float(np.asarray(fit.params)[0])
+        observed_scale = measure_observed_signal_scale(
+            np.asarray(fit.time, dtype=float),
+            np.asarray(fit.residual, dtype=float)
+            / np.maximum(np.asarray(fit.ferr, dtype=float), 1.0e-12),
+            source="single_lens_plot_residual",
+        )
 
         if width_mode == "custom":
             if half_width is None:
                 raise ValueError("width_mode='custom' requires half_width.")
             hw = float(half_width)
         else:
-            hw = float(a * abs(tE * u0))
+            resolved = resolve_event_signal_scale(
+                fit,
+                observed_scale=observed_scale,
+                time=np.asarray(fit.time, dtype=float),
+            )
+            hw = float(a) * float(resolved.half_width)
 
         return (t0 - hw, t0 + hw)
 

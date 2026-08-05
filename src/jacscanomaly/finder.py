@@ -47,6 +47,7 @@ from .exact_probe import run_exact_probe
 from .effect_aware import EffectAwareFinderResult, match_planet_candidates
 from .parallax_backend import native_parallax_effect_score
 from .contamination import protected_support_mask
+from .signal_scale import measure_observed_signal_scale
 
 if TYPE_CHECKING:
     from .anomaly_pipeline import AnomalyPipelineConfig, AnomalyPipelineResult
@@ -338,12 +339,56 @@ class Finder:
             if self._last_result is None or self._last_result.fit is None:
                 raise ValueError("detect_effects requires a PSPL fit or a previous Finder.run result.")
             fit = self._last_result.fit
-        if parallax_projector is None and self.config.fitter_kind == "pspl_parallax":
+        geometry = str(getattr(self.config, "parallax_geometry", "auto")).lower()
+        if geometry not in {"auto", "none", "annual", "space", "both"}:
+            raise ValueError(
+                "parallax_geometry must be one of 'auto', 'none', 'annual', 'space', or 'both'."
+            )
+        if geometry == "auto":
+            fitter_kind = str(self.config.fitter_kind)
+            if fitter_kind in {"pspl_parallax", "fspl_parallax"}:
+                geometry = "annual"
+            elif fitter_kind in {"pspl_space_parallax", "fspl_space_parallax"}:
+                geometry = "space"
+            elif space_parallax_projector is not None:
+                geometry = "space"
+            elif parallax_projector is not None:
+                geometry = "annual"
+            elif (
+                self.config.satellite_ephemeris_path is not None
+                and self.config.ra_deg is not None
+                and self.config.dec_deg is not None
+            ):
+                geometry = "space"
+            elif self.config.ra_deg is not None and self.config.dec_deg is not None:
+                geometry = "annual"
+            else:
+                geometry = "none"
+
+        # Resolve the requested observer geometry before touching any native
+        # fitter or ephemeris.  An unavailable, unselected geometry must not
+        # prevent an otherwise valid detector run from starting.
+        if (
+            geometry in {"annual", "both"}
+            and parallax_projector is None
+            and self.config.fitter_kind in {"pspl_parallax", "fspl_parallax"}
+        ):
             parallax_projector = getattr(self.fitter, "_P", None)
-        if space_parallax_projector is None and self.config.fitter_kind == "pspl_space_parallax":
+        if (
+            geometry in {"space", "both"}
+            and space_parallax_projector is None
+            and self.config.fitter_kind
+            in {"pspl_space_parallax", "fspl_space_parallax"}
+        ):
             space_parallax_projector = getattr(self.fitter, "_P", None)
-        if parallax_projector is None and self.config.ra_deg is not None and self.config.dec_deg is not None:
-            from .trajectory import make_parallax_projector, make_space_parallax_projector
+        if (
+            geometry in {"annual", "both"}
+            and parallax_projector is None
+            and self.config.ra_deg is not None
+            and self.config.dec_deg is not None
+        ):
+            from .trajectory import make_parallax_projector
+
             try:
                 parallax_projector = make_parallax_projector(
                     self.config.ra_deg,
@@ -355,8 +400,15 @@ class Finder:
                 raise ValueError(
                     "annual-parallax detector geometry could not be constructed"
                 ) from exc
-        if space_parallax_projector is None and self.config.satellite_ephemeris_path is not None and self.config.ra_deg is not None and self.config.dec_deg is not None:
+        if (
+            geometry in {"space", "both"}
+            and space_parallax_projector is None
+            and self.config.satellite_ephemeris_path is not None
+            and self.config.ra_deg is not None
+            and self.config.dec_deg is not None
+        ):
             from .trajectory import make_space_parallax_projector
+
             try:
                 space_parallax_projector = make_space_parallax_projector(
                     self.config.ra_deg,
@@ -370,6 +422,16 @@ class Finder:
                 raise ValueError(
                     "space-parallax detector geometry could not be constructed"
                 ) from exc
+        # Annual versus spacecraft parallax is an observer-geometry choice,
+        # not a score-based model comparison.  Keep both only when a caller
+        # explicitly asks for the legacy/mixed diagnostic.
+        if geometry == "none":
+            parallax_projector = None
+            space_parallax_projector = None
+        elif geometry == "annual":
+            space_parallax_projector = None
+        elif geometry == "space":
+            parallax_projector = None
         candidates = _detect_physical_effects(
             fit,
             parallax_projector=parallax_projector,
@@ -416,6 +478,8 @@ class Finder:
         config: FallbackConfig = FallbackConfig(),
         protected_mask=None,
         known_anomaly_mask=None,
+        soft_anomaly_mask=None,
+        selection_exclusion_mask=None,
     ) -> FallbackResult:
         """Run detector-seeded contamination-aware refitting.
 
@@ -587,6 +651,8 @@ class Finder:
                 fallback_config=config,
                 protected_mask=protected_mask,
                 known_anomaly_mask=known_anomaly_mask,
+                soft_anomaly_mask=soft_anomaly_mask,
+                selection_exclusion_mask=selection_exclusion_mask,
                 baseline_fit=fit,
                 effect_score_fn=effect_score_fn,
             )
@@ -605,6 +671,8 @@ class Finder:
             config=config,
             protected_mask=protected_mask,
             known_anomaly_mask=known_anomaly_mask,
+            soft_anomaly_mask=soft_anomaly_mask,
+            selection_exclusion_mask=selection_exclusion_mask,
             baseline_fit=fit,
             effect_score_fn=effect_score_fn,
             model_spec=spec,
@@ -734,6 +802,11 @@ class Finder:
             clusters_all=clusters_all,
             grid_metrics_all=grid_metrics_all,
             best=best_obj,
+            observed_signal_scale=measure_observed_signal_scale(
+                time_np,
+                residual_np / np.maximum(ferr_np, 1.0e-12),
+                source="finder_residual",
+            ),
         )
 
         self._last_result = result
@@ -790,7 +863,13 @@ class Finder:
                     beam_probe_only=True,
                 )
             planet_before = PlanetSignalExtractor(self, resolved_planet_config).run(
-                time_np, flux_np, ferr_np, initial_fit=initial_fit, refit=False, verbose=verbose
+                time_np,
+                flux_np,
+                ferr_np,
+                initial_fit=initial_fit,
+                refit=False,
+                verbose=verbose,
+                detection_stage="initial_planet_scan",
             )
             reason_codes.append("planet_scan_before_completed")
 
@@ -821,6 +900,7 @@ class Finder:
                 time_np,
                 candidate.effect,
                 candidate.seed_parameters,
+                observed_scale=getattr(candidate, "observed_signal_scale", None),
             )
         # A cheap first pass keeps ordinary events fast.  Preserve the full
         # beam search for an event that already looks planetary, or for one
@@ -853,6 +933,7 @@ class Finder:
                 initial_seed=planet_before.initial_seed,
                 refit=False,
                 verbose=verbose,
+                detection_stage="initial_planet_scan",
                 mask_protection=mask_protection,
             )
             reason_codes.append("planet_scan_before_escalated")
@@ -908,7 +989,12 @@ class Finder:
         selected_fit = baseline_fit
         routing_decision = effects
         if fallback_candidates:
-            known_anomaly_mask = np.zeros(time_np.size, dtype=bool)
+            known_anomaly_mask = (
+                np.zeros(time_np.size, dtype=bool)
+                if planet_before is None
+                else np.asarray(planet_before.signal_mask, dtype=bool).copy()
+            )
+            selection_exclusion_mask = known_anomaly_mask.copy()
             if planet_before is not None and planet_before.candidates:
                 cadence = (
                     float(np.median(np.diff(np.sort(time_np))))
@@ -922,10 +1008,18 @@ class Finder:
                         2.0 * cadence,
                         0.25 * max(end - start, 0.0),
                     )
-                    known_anomaly_mask |= (
+                    selection_exclusion_mask |= (
                         (time_np >= start - padding)
                         & (time_np <= end + padding)
                     )
+            # The measured signal samples are hard anomaly states.  Padded
+            # candidate wings are deliberately softer: they are downweighted
+            # during fitting and excluded from model selection, but are not
+            # forced to be contamination.  This prevents marginal physical
+            # shoulders from being erased by the planet mask.
+            soft_anomaly_mask = (
+                selection_exclusion_mask & ~known_anomaly_mask
+            )
             # The planet mask and physical-effect support are complementary.
             # A time-binned low-frequency residual must remain visible to the
             # FSPL/parallax fitter; otherwise the fallback segmenter can label
@@ -994,9 +1088,10 @@ class Finder:
                             time_np,
                             candidate.effect,
                             candidate.seed_parameters,
+                            observed_scale=getattr(candidate, "observed_signal_scale", None),
                         ).astype(float),
                     )
-                smooth_effect_support[known_anomaly_mask] = 0.0
+                smooth_effect_support[selection_exclusion_mask] = 0.0
                 if not np.any(smooth_effect_support > 0.0):
                     smooth_effect_support = None
             try:
@@ -1006,6 +1101,8 @@ class Finder:
                     config=fallback_config,
                     protected_mask=smooth_effect_support,
                     known_anomaly_mask=known_anomaly_mask,
+                    soft_anomaly_mask=soft_anomaly_mask,
+                    selection_exclusion_mask=selection_exclusion_mask,
                 )
                 if fallback_result.success:
                     selected_fit = fallback_result.fit
@@ -1030,6 +1127,7 @@ class Finder:
                 effect=str(fallback_result.effect),
                 planet_config=planet_config,
                 max_refits=post_physical_max_refits,
+                detection_stage="post_physical_scan",
                 verbose=verbose,
             )
             reason_codes.append("planet_after_fixed_family_warm_start")
@@ -1047,6 +1145,9 @@ class Finder:
             "n_effect_candidates": len(effects),
             "n_fallback_candidates": len(fallback_candidates),
             "fallback_accepted": bool(accepted),
+            "parallax_geometry": str(
+                getattr(self.config, "parallax_geometry", "auto")
+            ),
             "before_candidate_count": 0 if planet_before is None else len(planet_before.candidates),
             "after_candidate_count": 0 if planet_after is None else len(planet_after.candidates),
             "candidate_categories": {category: sum(match.category == category for match in matches) for category in {match.category for match in matches}},
@@ -1177,10 +1278,10 @@ class Finder:
 
         # Enforce the invariant even when a caller supplies a custom final
         # measurement configuration: this stage may measure windows but must
-        # never change the adopted model or cap them by its tE.
+        # never change the adopted model. Window caps still use the shared
+        # resolved event scale so a broad residual cannot mask whole seasons.
         measurement_config = replace(
             resolved.final_measurement,
-            max_signal_span_over_tE=float("inf"),
             frozen_measurement_windows=True,
         )
         final_measurement = PlanetSignalExtractor(
@@ -1192,6 +1293,7 @@ class Finder:
             initial_fit=adopted_fit,
             refit=False,
             freeze_baseline=True,
+            detection_stage="final_residual_scan",
             verbose=verbose,
         )
         adopted_params = np.asarray(adopted_fit.params, dtype=float)
@@ -1251,6 +1353,17 @@ class Finder:
             ),
             "final_feature_count": int(features.n_peaks + features.n_dips),
             "anomaly_candidate_count": len(candidates),
+            "final_detection": (
+                None
+                if getattr(final_measurement, "scan_decision", None) is None
+                else final_measurement.scan_decision.summary_dict()
+            ),
+            "observed_signal_scale": (
+                None
+                if getattr(final_measurement, "observed_signal_scale", None)
+                is None
+                else final_measurement.observed_signal_scale.summary_dict()
+            ),
         }
         return AnomalyPipelineResult(
             effect_aware=effect_aware,
@@ -1263,6 +1376,9 @@ class Finder:
             candidates=candidates,
             reason_codes=tuple(reason_codes),
             diagnostics=diagnostics,
+            observed_signal_scale=getattr(
+                final_measurement, "observed_signal_scale", None
+            ),
         )
 
     @staticmethod
@@ -1285,6 +1401,7 @@ class Finder:
         effect: str,
         planet_config: Optional["PlanetSignalConfig"] = None,
         max_refits: int = 3,
+        detection_stage: Optional[str] = None,
         verbose: bool = False,
     ):
         """Re-detect a planet and locally polish one accepted model family.
@@ -1329,6 +1446,7 @@ class Finder:
             verbose=verbose,
             prior_signal_windows=(),
             freeze_baseline=False,
+            detection_stage=detection_stage,
             baseline_refit_fitter=spec.fitter,
         )
 

@@ -89,9 +89,13 @@ duration measurement.
            min_prominence=3.0,
            min_separation=0.15,
            allow_bracketed_dips=True,
-           dip_bracket_min_depth_ratio=1.5,
        )
    )
+
+Closed negative features are retained independently of positive peaks.  The
+``allow_bracketed_dips`` compatibility option only enables the closer peak
+separation used to resolve a peak--dip--peak triplet; it does not suppress a
+standalone or one-sided-adjacent closed dip.
 
 Tabular output
 --------------

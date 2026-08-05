@@ -29,7 +29,10 @@ class RoutingThresholds:
     min_subset_stability: float = 0.25
     min_planet_mask_retention: float = 0.50
     max_planet_overlap: float = 0.35
+    min_parallax_scale_cadences: float = 6.0
+    """Minimum observed signal width, in cadence intervals, for parallax."""
     min_parallax_fallback_tE: float = 20.0
+    """Legacy fallback when a manually constructed candidate has no scale."""
     coherent_parallax_rescue_score: float = 4.0
     allow_rank_deficient_exact_probe: bool = True
     exact_probe_available: bool = False
@@ -118,9 +121,20 @@ def route_candidate(
         "non_fspl_peak_shape" in candidate.reason_codes
         or "parallax_wings_incoherent" in candidate.reason_codes
         or "parallax_too_local" in candidate.reason_codes
+        or "signal_scale_censored" in candidate.reason_codes
+        or "signal_scale_unmeasurable" in candidate.reason_codes
         or candidate.morphology == "mixed_or_planet"
         or candidate.morphology == "fspl_partial_peak"
         or parallax_planet_conflict
+    )
+    observed_scale = candidate.observed_signal_scale
+    parallax_scale_points = (
+        float(observed_scale.points_per_width)
+        if observed_scale is not None and observed_scale.valid
+        else float("nan")
+    )
+    scale_available = bool(
+        observed_scale is not None and observed_scale.valid
     )
     parallax_tE = (
         abs(float(np.asarray(candidate.seed_parameters).reshape(-1)[1]))
@@ -132,14 +146,33 @@ def route_candidate(
         else float("nan")
     )
     short_parallax_event = bool(
-        np.isfinite(parallax_tE)
-        and parallax_tE < thresholds.min_parallax_fallback_tE
+        (scale_available and (
+            observed_scale.censored
+            or not np.isfinite(parallax_scale_points)
+            or parallax_scale_points < thresholds.min_parallax_scale_cadences
+        ))
+        or (
+            not scale_available
+            and np.isfinite(parallax_tE)
+            and parallax_tE < thresholds.min_parallax_fallback_tE
+        )
     )
     coherent_parallax_rescue = bool(
         "parallax" in candidate.effect
         and candidate.morphology == "parallax_coherent_wings"
-        and np.isfinite(parallax_tE)
-        and parallax_tE >= thresholds.min_parallax_fallback_tE
+        and (
+            (
+                scale_available
+                and not observed_scale.censored
+                and np.isfinite(parallax_scale_points)
+                and parallax_scale_points >= thresholds.min_parallax_scale_cadences
+            )
+            or (
+                not scale_available
+                and np.isfinite(parallax_tE)
+                and parallax_tE >= thresholds.min_parallax_fallback_tE
+            )
+        )
         and score >= thresholds.coherent_parallax_rescue_score
     )
     if planet_dominated:

@@ -3,7 +3,11 @@ import pytest
 import jax
 import jax.numpy as jnp
 import json
+from types import SimpleNamespace
 
+import jacscanomaly.finder as finder_module
+import jacscanomaly.trajectory as trajectory_module
+from jacscanomaly import Finder, FinderConfig
 from jacscanomaly.effect_detection import (
     EffectCandidate,
     _fspl_sparse_high_snr_topology,
@@ -30,6 +34,59 @@ from jacscanomaly.effect_routing import route_candidate, routing_pareto_curve
 from jacscanomaly.exact_probe import run_fspl_exact_probe
 from jacscanomaly import parallax
 from jacscanomaly.trajectory import make_parallax_projector
+
+
+@pytest.mark.parametrize(
+    ("geometry", "expected_annual", "expected_space"),
+    [
+        ("none", False, False),
+        ("annual", True, False),
+        ("space", False, True),
+    ],
+)
+def test_detect_effects_constructs_only_selected_parallax_geometry(
+    monkeypatch, geometry, expected_annual, expected_space
+):
+    calls = {"annual": 0, "space": 0}
+    annual = object()
+    space = object()
+
+    def make_annual(*args, **kwargs):
+        calls["annual"] += 1
+        return annual
+
+    def make_space(*args, **kwargs):
+        calls["space"] += 1
+        return space
+
+    observed = {}
+
+    def detect(fit, **kwargs):
+        observed.update(kwargs)
+        return ()
+
+    monkeypatch.setattr(trajectory_module, "make_parallax_projector", make_annual)
+    monkeypatch.setattr(
+        trajectory_module, "make_space_parallax_projector", make_space
+    )
+    monkeypatch.setattr(finder_module, "_detect_physical_effects", detect)
+    finder = Finder(
+        FinderConfig(
+            parallax_geometry=geometry,
+            ra_deg=267.6,
+            dec_deg=-29.1,
+            satellite_ephemeris_path="unused-by-test.dat",
+        )
+    )
+    fit = SimpleNamespace(time=np.linspace(0.0, 1.0, 5))
+
+    assert finder.detect_effects(fit, route=False) == ()
+    assert calls == {
+        "annual": int(expected_annual),
+        "space": int(expected_space),
+    }
+    assert (observed["parallax_projector"] is annual) == expected_annual
+    assert (observed["space_parallax_projector"] is space) == expected_space
 
 
 def test_projection_removes_nuisance_tangent_without_dense_projector():

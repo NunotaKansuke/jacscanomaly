@@ -130,6 +130,7 @@ API:
 
    print(result.has_anomaly_candidate)
    print(result.best_anomaly_candidate)
+   print(result.final_detection.summary_dict())
    for candidate in result.anomaly_candidates:
        print(candidate["rank"], candidate["t_center"], candidate["max_abs_z"])
    print(result.adopted_fit.model_kind)
@@ -143,9 +144,29 @@ first row or ``None``. The deliberately cautious name
 ``has_anomaly_candidate`` means that a false value is not a proof that no
 physical anomaly exists.
 
+``result.final_detection`` is a separate ``PlanetScanDecision`` from the
+frozen residual scan after model selection. It is the discovery decision;
+``result.features`` and ``result.anomaly_candidates`` are characterization and
+reporting layers and must not be used to rewrite that decision.
+
 ``result.fit_exclusion_mask`` contains only points excluded by an accepted
 continuation fit. ``result.measurement_mask`` is a separate frozen-residual
 measurement window and must not be used as an HTML removal/display mask.
+
+Physical routing and observed time scale
+----------------------------------------
+
+Physical routing treats annual versus spacecraft parallax as an observer
+geometry choice, not as competing models. ``FinderConfig(parallax_geometry=
+"auto")`` selects spacecraft geometry when a satellite ephemeris is supplied,
+and annual geometry otherwise. Use ``"annual"``, ``"space"``, or ``"none"``
+to make that choice explicit.
+
+The detector and reporting layers expose an ``ObservedSignalScale`` measured
+from residual/profile support. It is based on a weighted central interval,
+with ``censored=True`` when the signal reaches an observing edge. The scan-grid
+``teff`` remains an internal proposal coordinate; plots, masks, and physical
+routing use the observed scale when it is measurable.
 
 For a candidate event, use the extractor to prevent the strongest anomaly
 from biasing the single-lens baseline. Then measure extrema in the refined

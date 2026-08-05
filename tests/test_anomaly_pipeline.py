@@ -119,7 +119,8 @@ def test_complete_pipeline_measures_features_when_post_refit_is_empty(monkeypatc
     assert result.best_anomaly_candidate is None
     assert seen["freeze_baseline"] is True
     assert seen["initial_fit"] is parent
-    assert np.isinf(seen["config"].max_signal_span_over_tE)
+    assert seen["config"].max_signal_span_over_tE == 0.01
+    assert seen["config"].max_signal_half_width_over_event_scale == 1.0
     assert seen["config"].frozen_measurement_windows is True
     assert "final_residual_measurement_completed" in result.reason_codes
 

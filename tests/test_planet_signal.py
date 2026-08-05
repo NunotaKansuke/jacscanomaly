@@ -336,11 +336,11 @@ def test_default_beam_uses_three_adaptive_single_branch_iterations():
     assert config.beam_candidates_per_iter == 1
 
 
-def test_residual_measurement_config_does_not_cap_intervals_by_te():
+def test_residual_measurement_config_caps_intervals_by_resolved_event_scale():
     config = PlanetSignalConfig.residual_measurement()
 
     assert config.baseline_mode == "beam_interval"
-    assert np.isinf(config.max_signal_span_over_tE)
+    assert config.max_signal_half_width_over_event_scale == 1.0
     assert config.frozen_measurement_windows is True
 
 
@@ -653,7 +653,7 @@ def test_planet_signal_measurement_identifies_two_peaks():
     assert all(peak.timescale > 0.0 for peak in features.peaks)
 
 
-def test_planet_feature_measurement_prefers_positive_features_over_dips():
+def test_planet_feature_measurement_keeps_closed_dip_alongside_peaks():
     time = np.linspace(0.0, 20.0, 801)
     ferr = np.full_like(time, 0.02)
     params = np.array([10.0, 3.0, 0.2])
@@ -672,15 +672,19 @@ def test_planet_feature_measurement_prefers_positive_features_over_dips():
     )
 
     assert features.n_peaks == 2
-    assert features.n_dips == 0
-    assert [feature.kind for feature in features.features] == ["peak", "peak"]
-    assert np.allclose([feature.time for feature in features.features], [9.0, 11.0], atol=0.05)
+    assert features.n_dips == 1
+    assert [feature.kind for feature in features.features] == ["peak", "dip", "peak"]
+    assert np.allclose(
+        [feature.time for feature in features.features],
+        [9.0, 10.0, 11.0],
+        atol=0.05,
+    )
     assert all(feature.timescale > 0.0 for feature in features.features)
     assert all(feature.strength >= 10.0 for feature in features.features)
     assert features.peaks[0].fractional_deviation > 0.0
-    assert features.summary_dict()["n_features"] == 2
-    assert len(features.feature_dicts()) == 2
-    assert "peaks=2, dips=0" in features.summary_text()
+    assert features.summary_dict()["n_features"] == 3
+    assert len(features.feature_dicts()) == 3
+    assert "peaks=2, dips=1" in features.summary_text()
 
 
 def test_planet_feature_measurement_keeps_deep_bracketed_dip():
@@ -702,6 +706,68 @@ def test_planet_feature_measurement_keeps_deep_bracketed_dip():
     assert features.n_peaks == 2
     assert features.n_dips == 1
     assert abs(features.dips[0].time - 10.0) < 0.05
+    assert [feature.kind for feature in features.features] == ["peak", "dip", "peak"]
+
+
+def test_planet_feature_measurement_keeps_dip_with_only_one_adjacent_peak():
+    time = np.linspace(8.0, 12.0, 801)
+    ferr = np.full_like(time, 0.01)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = (
+        -0.22 * np.exp(-0.5 * ((time - 10.0) / 0.12) ** 2)
+        + 0.10 * np.exp(-0.5 * ((time - 10.7) / 0.08) ** 2)
+    )
+    flux = model + residual
+    mask = (time > 9.5) & (time < 11.1)
+    result = _feature_result(time, flux, ferr, residual, mask)
+
+    features = result.measure_features(PlanetFeatureConfig(smooth_points=3))
+
+    assert features.n_peaks == 1
+    assert features.n_dips == 1
+    assert features.strongest is features.dips[0]
+    assert [feature.kind for feature in features.features] == ["dip", "peak"]
+
+
+def test_feature_and_candidate_components_split_at_large_time_gap():
+    time = np.concatenate((np.linspace(0.0, 1.0, 101), np.linspace(100.0, 101.0, 101)))
+    ferr = np.full_like(time, 0.01)
+    params = np.array([50.0, 20.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = (
+        0.20 * np.exp(-0.5 * ((time - 0.5) / 0.08) ** 2)
+        + 0.18 * np.exp(-0.5 * ((time - 100.5) / 0.08) ** 2)
+    )
+    flux = model + residual
+    mask = np.ones_like(time, dtype=bool)
+    result = _feature_result(time, flux, ferr, residual, mask)
+
+    features = result.measure_features(PlanetFeatureConfig(smooth_points=3))
+    extractor = PlanetSignalExtractor(Finder())
+    candidates = extractor._candidates_from_mask(time, residual, ferr, mask)
+
+    assert features.n_peaks == 2
+    assert all(feature.timescale < 1.0 for feature in features.peaks)
+    assert len(candidates) == 2
+    assert all(candidate.t_end - candidate.t_start <= 1.0 for candidate in candidates)
+
+
+def test_signal_half_width_cap_uses_fitted_teff_on_healthy_fit():
+    time = np.linspace(0.0, 20.0, 401)
+    fit = SimpleNamespace(
+        time=time,
+        flux=1.0 + np.exp(-0.5 * ((time - 10.0) / 2.0) ** 2),
+        ferr=np.full_like(time, 0.01),
+        residual=np.zeros_like(time),
+        params=np.asarray([10.0, 40.0, 0.03]),
+    )
+    extractor = PlanetSignalExtractor(
+        Finder(),
+        PlanetSignalConfig(max_signal_half_width_over_event_scale=1.0),
+    )
+
+    assert extractor._signal_half_width_cap(fit) == pytest.approx(1.2)
 
 
 def test_planet_feature_measurement_keeps_locally_prominent_smaller_peak():
@@ -721,7 +787,7 @@ def test_planet_feature_measurement_keeps_locally_prominent_smaller_peak():
     features = result.measure_features(PlanetFeatureConfig(smooth_points=3))
 
     assert features.n_peaks == 2
-    assert features.n_dips == 0
+    assert features.n_dips == 1
     assert np.allclose([feature.time for feature in features.peaks], [9.4, 10.0], atol=0.05)
 
 

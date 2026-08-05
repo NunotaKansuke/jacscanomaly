@@ -12,7 +12,9 @@ from jacscanomaly import (
 from jacscanomaly.parallax_backend import default_earth_ephemeris
 
 
-def test_native_fallback_preserves_planet_candidate_through_after_scan():
+def test_native_fallback_preserves_planet_candidate_through_after_scan(
+    monkeypatch,
+):
     ra_deg = 267.6
     dec_deg = -29.1
     tref = 2459000.0
@@ -45,6 +47,19 @@ def test_native_fallback_preserves_planet_candidate_through_after_scan():
             parallax_time_scale="hjd",
         )
     )
+    fallback_masks = {}
+    original_fallback = finder.robust_fallback
+
+    def capture_fallback(*args, **kwargs):
+        for name in (
+            "known_anomaly_mask",
+            "soft_anomaly_mask",
+            "selection_exclusion_mask",
+        ):
+            fallback_masks[name] = np.asarray(kwargs[name], dtype=bool)
+        return original_fallback(*args, **kwargs)
+
+    monkeypatch.setattr(finder, "robust_fallback", capture_fallback)
 
     result = finder.run_effect_aware(
         time,
@@ -64,6 +79,13 @@ def test_native_fallback_preserves_planet_candidate_through_after_scan():
     assert result.fallback_result is not None
     assert result.fallback_result.success
     assert result.fallback_result.model_spec["backend"] == "native_cpp_scipy_trf"
+    hard = fallback_masks["known_anomaly_mask"]
+    soft = fallback_masks["soft_anomaly_mask"]
+    selection = fallback_masks["selection_exclusion_mask"]
+    assert np.any(hard)
+    assert np.any(soft)
+    assert not np.any(hard & soft)
+    np.testing.assert_array_equal(selection, hard | soft)
     assert result.planet_before is not None and result.planet_before.candidates
     assert result.planet_after is not None and result.planet_after.candidates
     assert result.planet_after.iterations
