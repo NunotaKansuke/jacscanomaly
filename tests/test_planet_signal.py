@@ -161,8 +161,105 @@ def test_planet_signal_extractor_frozen_baseline_never_refits(monkeypatch):
     )
 
     assert result.refined_fit is initial_fit
-    assert result.signal_mask.any()
+    assert not result.signal_mask.any()
+    assert result.detection_mask is not None
+    assert result.detection_mask.any()
     assert result.best is not None
+
+
+def test_frozen_final_scan_uses_full_residual_and_separate_detection_support(
+    monkeypatch,
+):
+    time = np.linspace(0.0, 20.0, 401)
+    ferr = np.full_like(time, 0.02)
+    params = np.array([10.0, 3.0, 0.2])
+    model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
+    residual = (
+        0.30 * np.exp(-0.5 * ((time - 5.0) / 0.10) ** 2)
+        + 0.24 * np.exp(-0.5 * ((time - 15.0) / 0.12) ** 2)
+    )
+    flux = model + residual
+    seed_mask = np.abs(time - 5.0) < 0.3
+    initial_fit = _feature_result(
+        time,
+        flux,
+        ferr,
+        residual,
+        seed_mask,
+    ).refined_fit
+    finder = Finder(FinderConfig(grid_backend="jax", single_fit_backend="jax"))
+    extractor = PlanetSignalExtractor(
+        finder,
+        PlanetSignalConfig.residual_measurement(
+            max_iter=1,
+            seed_min_dchi2=100.0,
+        ),
+    )
+    clusters = np.asarray(
+        [
+            [5.0, 0.20, 1200.0],
+            [15.0, 0.20, 900.0],
+        ],
+        dtype=float,
+    )
+    metrics = np.asarray(
+        [
+            [5.0, 0.20, 1200.0, 25.0, 8.0, 6.0, 0.2, 0.8, 6.0],
+            [15.0, 0.20, 900.0, 25.0, 8.0, 6.0, 0.2, 0.8, 6.0],
+        ],
+        dtype=float,
+    )
+    calls = []
+
+    def full_scan(**kwargs):
+        calls.append(np.asarray(kwargs["residual_j"], dtype=float))
+        return [], clusters, metrics
+
+    monkeypatch.setattr(finder.runner, "run", full_scan)
+    result = extractor.run(
+        time,
+        flux,
+        ferr,
+        initial_fit=initial_fit,
+        refit=False,
+        freeze_baseline=True,
+        # A previous fit hint must not constrain the final all-residual scan.
+        prior_signal_windows=((5.0, 0.05),),
+    )
+
+    assert len(calls) == 1
+    assert np.allclose(calls[0], residual)
+    assert not result.signal_mask.any()
+    assert result.detection_mask is not None
+    assert result.detection_mask[np.argmin(np.abs(time - 5.0))]
+    assert result.detection_mask[np.argmin(np.abs(time - 15.0))]
+    assert len(result.candidates) == 2
+    assert result.measure_features().n_peaks == 2
+
+
+def test_separated_detection_regions_use_independent_feature_thresholds():
+    time = np.linspace(0.0, 20.0, 401)
+    ferr = np.full_like(time, 0.01)
+    residual = (
+        1.0 * np.exp(-0.5 * ((time - 5.0) / 0.10) ** 2)
+        + 0.08 * np.exp(-0.5 * ((time - 15.0) / 0.10) ** 2)
+    )
+    detection_mask = (
+        (np.abs(time - 5.0) <= 0.35)
+        | (np.abs(time - 15.0) <= 0.35)
+    )
+    result = _feature_result(time, residual, ferr, residual, detection_mask)
+
+    features = result.measure_features(
+        PlanetFeatureConfig(min_abs_z=5.0, min_relative_strength=0.1)
+    )
+
+    assert features.n_peaks == 2
+    np.testing.assert_allclose(
+        [feature.time for feature in features.peaks],
+        [5.0, 15.0],
+        atol=0.06,
+    )
 
 
 def test_planet_signal_extractor_robust_mode_downweights_connected_structure():
@@ -336,11 +433,10 @@ def test_default_beam_uses_three_adaptive_single_branch_iterations():
     assert config.beam_candidates_per_iter == 1
 
 
-def test_residual_measurement_config_caps_intervals_by_resolved_event_scale():
+def test_residual_measurement_config_marks_frozen_characterization_pass():
     config = PlanetSignalConfig.residual_measurement()
 
     assert config.baseline_mode == "beam_interval"
-    assert config.max_signal_half_width_over_event_scale == 1.0
     assert config.frozen_measurement_windows is True
 
 

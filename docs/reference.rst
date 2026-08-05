@@ -88,7 +88,8 @@ from peak/dip characterization. The complete high-level result exposes it as
 
 The extractor returns both ``initial_fit`` and ``refined_fit``. Use
 ``signal_mask`` to identify excluded points, ``point_weight`` to inspect the
-fit weighting, and ``iterations`` to audit accepted refinement steps. See
+fit weighting, ``anomaly_support_mask()`` to inspect independent final Finder
+support, and ``iterations`` to audit accepted refinement steps. See
 :doc:`planet_features` for the three baseline modes and their controls.
 
 ``timing`` records the extractor wall-clock total, time spent in residual-grid

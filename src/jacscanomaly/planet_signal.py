@@ -103,8 +103,9 @@ class PlanetSignalConfig:
     scan_unimodal_peak_frac: float = 0.2
     scan_unimodal_smooth_points: int = 5
     scan_unimodal_max_lobes: int = 1
-    # In a frozen final-measurement pass this window is only the domain over
-    # which peak/dip widths are measured.  It is never fed back into a fit.
+    # Compatibility marker for the frozen final-measurement pass.  That pass
+    # now scans the complete residual once and stores Finder support in a
+    # separate detection mask; it never feeds that support back into a fit.
     frozen_measurement_windows: bool = False
 
     @classmethod
@@ -142,11 +143,9 @@ class PlanetSignalConfig:
     def residual_measurement(cls, **overrides) -> "PlanetSignalConfig":
         """Return the frozen, final-residual measurement configuration.
 
-        This pass never changes the adopted single-lens model.  Its intervals
-        are measurements of residual structure rather than fit exclusions,
-        but they must still remain local to the resolved event.  The normal
-        scale is ``|tE*u0|``; the shared resolver falls back to the observed
-        magnification envelope only when the fitted scale is untrustworthy.
+        This pass never changes the adopted single-lens model.  It scans the
+        complete frozen residual once, retains every accepted Finder cluster,
+        and stores their supports separately from any baseline-fit mask.
         """
         values = {
             "baseline_mode": "beam_interval",
@@ -478,6 +477,23 @@ class PlanetSignalResult:
     timing: PlanetSignalTiming = PlanetSignalTiming()
     observed_signal_scale: Optional[ObservedSignalScale] = None
     scan_decision: Optional[PlanetScanDecision] = None
+    detection_mask: Optional[np.ndarray] = None
+
+    def anomaly_support_mask(self) -> np.ndarray:
+        """Return the final Finder support used for characterization.
+
+        ``signal_mask`` belongs to baseline fitting: its points may be removed
+        or downweighted to keep a localized anomaly out of the single-lens
+        solution.  A frozen final-residual scan has no fit mask.  It instead
+        stores the support of the independent, all-data Finder pass in
+        ``detection_mask``.  Older results fall back to ``signal_mask``.
+        """
+
+        source = self.signal_mask if self.detection_mask is None else self.detection_mask
+        mask = np.asarray(source, dtype=bool).reshape(-1)
+        if mask.size != np.asarray(self.time).size:
+            raise ValueError("anomaly support mask must match time")
+        return mask
 
     def measure_features(
         self,
@@ -539,7 +555,7 @@ class PlanetSignalResult:
         import matplotlib.pyplot as plt
 
         t = self.time
-        signal = self.signal_mask
+        signal = self.anomaly_support_mask()
         normal = ~signal
         z = self.refined_residual / self.ferr
 
@@ -701,7 +717,7 @@ class PlanetSignalResult:
             return (float(lo), float(hi))
 
         in_best = (
-            self.signal_mask
+            self.anomaly_support_mask()
             & (self.time >= self.best.t_start)
             & (self.time <= self.best.t_end)
         )
@@ -787,7 +803,9 @@ class _PlanetFeatureDetector:
         flux = np.asarray(result.flux, dtype=float)
         ferr = np.asarray(result.ferr, dtype=float)
         residual = np.asarray(result.refined_residual, dtype=float)
-        mask = np.asarray(result.signal_mask, dtype=bool)
+        # Characterization follows the independent final Finder detection,
+        # not the mask that may previously have been used to improve a fit.
+        mask = result.anomaly_support_mask()
 
         if not np.any(mask):
             return PlanetFeatureResult(peaks=(), dips=())
@@ -1304,16 +1322,18 @@ class PlanetSignalExtractor:
             Emit refinement progress through the finder's logging path.
         prior_signal_windows : tuple[tuple[float, float], ...], optional
             Known signal windows expressed as ``(center_time, half_width)``.
-            They are added to the final mask and trigger one guarded refit.
+            During baseline refinement they are added to the fit mask and
+            trigger one guarded refit.  A frozen final scan ignores them.
         initial_seed : BestCandidate, optional
             Cached first grid-scan result for this exact initial fit and input
             data.  Supplying it lets a full beam pass continue after a fast
             pass without repeating the initial grid scan.
         freeze_baseline : bool, optional
-            Keep ``initial_fit`` fixed while discovering and measuring
-            residual intervals.  This is used after a physical fallback has
-            selected FSPL or parallax: the anomaly search must not silently
-            refit or reselect the single-lens model family.
+            Keep ``initial_fit`` fixed and scan its complete residual once.
+            Every accepted Finder cluster is retained for independent
+            peak/dip characterization.  This is used after a physical
+            fallback has selected FSPL or parallax: the anomaly search must
+            not silently refit or reselect the single-lens model family.
         mask_protection : array-like of bool, optional
             Samples that a cheap physical-effect diagnostic requires the
             single-lens-family fit to retain. These points cannot enter the
@@ -1328,7 +1348,7 @@ class PlanetSignalExtractor:
         -------
         PlanetSignalResult
             Initial and refined fits, residuals, signal mask, selected
-            intervals, and refinement history.
+            intervals, independent detection support, and refinement history.
 
         Raises
         ------
@@ -1370,6 +1390,7 @@ class PlanetSignalExtractor:
                 initial_fit = self.finder._fixed_single_lens_from_x0(time_j, flux_j, ferr_j, x0_j)
 
         mode = str(self.config.baseline_mode).lower()
+        detection_mask: Optional[np.ndarray] = None
         if freeze_baseline:
             (
                 current_fit,
@@ -1377,6 +1398,7 @@ class PlanetSignalExtractor:
                 point_weight,
                 iterations,
                 observed_initial_seed,
+                detection_mask,
             ) = self._run_frozen_baseline(
                 initial_fit=initial_fit,
                 time_j=time_j,
@@ -1428,10 +1450,17 @@ class PlanetSignalExtractor:
             iterations = []
             observed_initial_seed = None
 
-        prior_mask = self._prior_signal_window_mask(
-            time_np,
-            prior_signal_windows,
-            fit=current_fit,
+        # Prior masks are fit hints.  Once the adopted model is frozen, the
+        # final Finder pass must start from the complete residual and must not
+        # inherit any previous exclusion window.
+        prior_mask = (
+            np.zeros(time_np.shape, dtype=bool)
+            if freeze_baseline
+            else self._prior_signal_window_mask(
+                time_np,
+                prior_signal_windows,
+                fit=current_fit,
+            )
         )
         combined_prior_mask = signal_mask | prior_mask
         if (
@@ -1480,9 +1509,20 @@ class PlanetSignalExtractor:
 
         initial_residual = np.asarray(jax.device_get(initial_fit.residual), dtype=float)
         refined_residual = np.asarray(jax.device_get(current_fit.residual), dtype=float)
-        candidates = self._candidates_from_mask(time_np, refined_residual, ferr_np, signal_mask)
+        if detection_mask is None:
+            detection_mask = np.asarray(signal_mask, dtype=bool).copy()
+        candidates = self._candidates_from_mask(
+            time_np,
+            refined_residual,
+            ferr_np,
+            detection_mask,
+        )
         best = max(candidates, key=lambda c: c.chi2, default=None)
-        scale_mask = signal_mask if np.any(signal_mask) else np.ones(time_np.size, dtype=bool)
+        scale_mask = (
+            detection_mask
+            if np.any(detection_mask)
+            else np.ones(time_np.size, dtype=bool)
+        )
         observed_scale = measure_observed_signal_scale(
             time_np,
             refined_residual / np.maximum(ferr_np, 1.0e-12),
@@ -1525,6 +1565,7 @@ class PlanetSignalExtractor:
             ),
             observed_signal_scale=observed_scale,
             scan_decision=scan_decision,
+            detection_mask=detection_mask,
         )
 
     def _prior_signal_window_mask(
@@ -1962,69 +2003,67 @@ class PlanetSignalExtractor:
         np.ndarray,
         list[PlanetSignalIteration],
         Optional[BestCandidate],
+        np.ndarray,
     ]:
-        """Find residual intervals without changing the adopted baseline fit."""
+        """Run one independent Finder scan over the complete frozen residual.
+
+        No previous fit mask is reused and no detected interval is suppressed
+        before the scan.  The returned ``signal_mask`` is therefore empty: it
+        remains exclusively a baseline-fitting concept.  Finder template
+        supports are returned separately as ``detection_mask`` for downstream
+        peak/dip characterization.
+        """
         residual_j = initial_fit.residual
         signal_mask = np.zeros(time_np.shape, dtype=bool)
-        iterations: list[PlanetSignalIteration] = []
-        observed_initial_seed: Optional[BestCandidate] = None
-
-        for iteration in range(max(0, int(self.config.max_iter))):
-            residual_for_seed = self._suppress_masked_residual(residual_j, signal_mask)
-            seed = self._scan_best(time_j, residual_for_seed, ferr_j, time_np, verbose=verbose)
-            if seed is None or not np.isfinite(seed.dchi2) or seed.dchi2 < float(self.config.seed_min_dchi2):
-                break
-            if observed_initial_seed is None:
-                observed_initial_seed = seed
-            half_width = self._observed_seed_half_width(
-                time=time_np,
-                fit=initial_fit,
-                center=float(seed.t0),
-                seed_teff=float(seed.teff),
-                coefficient=float(self.config.mask_teff_coeff),
+        detection_mask = np.zeros(time_np.shape, dtype=bool)
+        scan_started = perf_counter()
+        try:
+            seasons, clusters_all, grid_metrics_all = self.finder.runner.run(
+                time_j=time_j,
+                residual_j=residual_j,
+                ferr_j=ferr_j,
+                time_np=time_np,
+                verbose=verbose,
             )
-            half_width = min(half_width, self._signal_half_width_cap(initial_fit))
-            seed_window = np.abs(time_np - float(seed.t0)) <= half_width
-            if bool(self.config.frozen_measurement_windows):
-                # A frozen pass is only measuring residual morphology.  Keep
-                # the complete Finder window so FWHM crossings and adjacent
-                # peak--dip structure are available to the feature detector;
-                # unlike a fit mask, this interval cannot contaminate the
-                # adopted single-lens model.
-                new_mask = self._exclude_mask_protection(seed_window)
-            else:
-                new_mask = self._template_improvement_mask_from_seed(
-                    time_np=time_np,
-                    time_j=time_j,
-                    residual_j=residual_j,
-                    ferr_j=ferr_j,
-                    seed_window=seed_window,
-                    seed_t0=float(seed.t0),
-                    seed_teff=float(seed.teff),
-                )
-            combined = signal_mask | new_mask
-            added = int(np.sum(combined) - np.sum(signal_mask))
-            if added <= 0 or np.mean(combined) > float(self.config.max_mask_fraction):
-                break
-            before = int(np.sum(signal_mask))
-            signal_mask = combined
-            iterations.append(
-                PlanetSignalIteration(
-                    iteration=iteration,
-                    seed=seed,
-                    n_masked_before=before,
-                    n_masked_after=int(np.sum(signal_mask)),
-                    added_points=added,
-                    fit=initial_fit,
-                )
+        finally:
+            self._scan_seconds = getattr(self, "_scan_seconds", 0.0) + (
+                perf_counter() - scan_started
+            )
+            self._n_scans = getattr(self, "_n_scans", 0) + 1
+
+        observed_initial_seed = self.finder._pick_best_candidate(
+            clusters_all,
+            grid_metrics_all,
+            seasons=seasons,
+        )
+        accepted = self.finder._accepted_candidates(
+            np.asarray(clusters_all, dtype=float),
+            np.asarray(grid_metrics_all, dtype=float),
+        )
+        if accepted.size:
+            accepted = accepted[
+                np.isfinite(accepted).all(axis=1)
+                & (accepted[:, 2] >= float(self.config.seed_min_dchi2))
+            ]
+        # These are the Finder's own template supports, evaluated across the
+        # whole light curve.  There is deliberately no tE/u0 cap, event window,
+        # prior mask, or iterative suppression in this final detection pass.
+        for candidate_t0, candidate_teff, _candidate_dchi2 in accepted:
+            half_width = (
+                max(float(self.finder.config.teff_coeff), 0.0)
+                * abs(float(candidate_teff))
+            )
+            detection_mask |= (
+                np.abs(time_np - float(candidate_t0)) <= half_width
             )
 
         return (
             initial_fit,
             signal_mask,
-            np.where(signal_mask, 0.0, 1.0),
-            iterations,
+            np.ones(time_np.shape, dtype=float),
+            [],
             observed_initial_seed,
+            detection_mask,
         )
 
     def _run_robust_baseline(

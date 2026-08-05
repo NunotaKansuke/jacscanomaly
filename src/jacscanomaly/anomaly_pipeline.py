@@ -23,9 +23,9 @@ from .signal_scale import ObservedSignalScale
 class AnomalyPipelineConfig:
     """Configuration for :meth:`Finder.run_anomaly_pipeline`.
 
-    The final residual pass is always frozen by the orchestrator.  Its mask is
-    a measurement window and is deliberately kept separate from points that
-    were actually excluded by an accepted continuation fit.
+    The final residual pass is always frozen by the orchestrator.  Its Finder
+    detection support is deliberately kept separate from points that were
+    actually excluded by an accepted continuation fit.
     """
 
     planet: PlanetSignalConfig = field(default_factory=PlanetSignalConfig)
@@ -139,9 +139,9 @@ class AnomalyPipelineResult:
 
     @property
     def measurement_mask(self) -> np.ndarray:
-        """Final frozen-residual window used only for feature measurement."""
+        """Final Finder support used only for feature characterization."""
 
-        return np.asarray(self.final_measurement.signal_mask, dtype=bool)
+        return self.final_measurement.anomaly_support_mask()
 
     @property
     def final_detection(self):

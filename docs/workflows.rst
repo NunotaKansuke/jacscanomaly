@@ -150,8 +150,9 @@ frozen residual scan after model selection. It is the discovery decision;
 reporting layers and must not be used to rewrite that decision.
 
 ``result.fit_exclusion_mask`` contains only points excluded by an accepted
-continuation fit. ``result.measurement_mask`` is a separate frozen-residual
-measurement window and must not be used as an HTML removal/display mask.
+continuation fit. ``result.measurement_mask`` is the union of supports from
+all accepted clusters in the independent full-residual Finder pass. It is
+used for characterization and must not be used as a fit or HTML removal mask.
 
 Physical routing and observed time scale
 ----------------------------------------

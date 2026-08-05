@@ -43,6 +43,13 @@ tail of a caustic crossing or a baseline mismatch. A deep negative excursion
 is retained alongside the peaks when it is a closed trough bracketed by nearby
 positive recoveries (the ``bump--dip--bump`` pattern).
 
+In the frozen final pass, Finder scans the complete adopted-model residual
+once. Every accepted, spatially separated Finder cluster contributes an
+independent characterization region; the strongest cluster does not discard
+weaker distant clusters. Peak and dip detection then operates inside each
+region without consulting the mask previously used to improve the baseline
+fit.
+
 Measurements
 ------------
 

@@ -1277,9 +1277,9 @@ class Finder:
             )
 
         # Enforce the invariant even when a caller supplies a custom final
-        # measurement configuration: this stage may measure windows but must
-        # never change the adopted model. Window caps still use the shared
-        # resolved event scale so a broad residual cannot mask whole seasons.
+        # measurement configuration: this stage scans the complete residual
+        # but must never change the adopted model. Finder support is retained
+        # only for downstream characterization, never as a fit mask.
         measurement_config = replace(
             resolved.final_measurement,
             frozen_measurement_windows=True,
@@ -1349,7 +1349,7 @@ class Finder:
             "fit_exclusion_mask_points": int(np.sum(fit_exclusion_mask)),
             "post_physical_refinement_reset": bool(post_refinement_reset),
             "final_measurement_mask_points": int(
-                np.sum(final_measurement.signal_mask)
+                np.sum(final_measurement.anomaly_support_mask())
             ),
             "final_feature_count": int(features.n_peaks + features.n_dips),
             "anomaly_candidate_count": len(candidates),

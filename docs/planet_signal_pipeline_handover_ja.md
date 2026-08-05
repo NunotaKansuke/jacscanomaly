@@ -90,8 +90,9 @@ router→physical fallbackのボトルネックではない。
 
 - `run_final_residual_measurement.py`
   - scanまたは採用済みphysical/post-physical fitを再構成し、全イベントでfrozen residual measurementを実行する。
-  - 局所maskはpeak/dipの測定にだけ使い、single-lens baselineを再fitしない。そのため、mask後の
-    `tE` compactnessや継続fitの失敗が、実在するraw residual featureを消すことはない。
+  - 採用モデルの全残差を一度だけFinderに通し、閾値を通る全clusterのsupportをpeak/dip測定に使う。
+    過去のfit mask、event window、最良候補だけへの限定は行わず、single-lens baselineも再fitしない。
+    そのため、離れた複数候補やmask外のraw residual featureを独立に保持できる。
 
 - `make_html.py`
   - 既存公開URLの生成器。

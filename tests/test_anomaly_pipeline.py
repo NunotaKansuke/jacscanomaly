@@ -64,6 +64,8 @@ def _install_pipeline_stubs(
     measurement = SimpleNamespace(
         refined_fit=parent_fit,
         signal_mask=np.array([False, True, False]),
+        detection_mask=np.array([True, False, True]),
+        anomaly_support_mask=lambda: measurement.detection_mask,
         measure_features=lambda config: features,
     )
     seen = {}
@@ -110,8 +112,9 @@ def test_complete_pipeline_measures_features_when_post_refit_is_empty(monkeypatc
     assert not result.fit_exclusion_mask.any()
     np.testing.assert_array_equal(
         result.measurement_mask,
-        np.array([False, True, False]),
+        np.array([True, False, True]),
     )
+    assert result.diagnostics["final_measurement_mask_points"] == 2
     assert result.features is features
     assert result.template_free is template_free
     assert result.has_anomaly_candidate is False
