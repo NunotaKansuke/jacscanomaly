@@ -529,6 +529,28 @@ def test_fold_caustic_detector_pairs_resolved_time_reversed_edges():
     )
 
 
+def test_fold_caustic_detector_keeps_an_edge_resolved_by_one_and_a_half_cadences():
+    time = np.arange(30, dtype=float)
+    residual = np.full(time.shape, 10.0)
+    features = PlanetFeatureResult(
+        peaks=(
+            _fold_peak(8.0, 7.0, 10.6),
+            _fold_peak(21.0, 17.2, 22.0),
+        ),
+        dips=(),
+    )
+
+    result = FoldCausticDetector().run_arrays(
+        time=time,
+        residual=residual,
+        ferr=np.ones(time.shape, dtype=float),
+        features=features,
+    )
+
+    assert result.detected
+    assert [edge.orientation for edge in result.edges] == ["entry", "exit"]
+
+
 def test_fold_caustic_detector_rejects_symmetric_or_disconnected_peaks():
     time = np.arange(40, dtype=float)
     ferr = np.ones(time.shape, dtype=float)
@@ -601,6 +623,29 @@ def test_local_trend_change_masker_does_not_cross_a_long_data_gap():
     )
 
     assert not np.any(mask)
+
+
+def test_local_trend_change_masker_uses_material_outer_breaks():
+    score = np.asarray([np.nan, 2.0, 7.0, 3.0, 10.0, 4.0, np.nan])
+    indices = np.arange(score.size)
+
+    left = LocalTrendChangeMasker._outer_material_break(
+        indices,
+        score,
+        threshold=5.0,
+        fraction=0.5,
+        choose_left=True,
+    )
+    right = LocalTrendChangeMasker._outer_material_break(
+        indices,
+        score,
+        threshold=5.0,
+        fraction=0.5,
+        choose_left=False,
+    )
+
+    assert left == 2
+    assert right == 4
 
 
 def test_residual_measurement_config_marks_frozen_characterization_pass():

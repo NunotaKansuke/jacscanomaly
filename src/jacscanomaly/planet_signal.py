@@ -463,7 +463,7 @@ class PlanetFeatureResult:
 class FoldCausticConfig:
     """Resolution-based controls for fold-caustic entry/exit detection."""
 
-    min_asymmetry_cadences: float = 2.0
+    min_asymmetry_cadences: float = 1.5
 
 
 @dataclass(frozen=True)
@@ -1022,12 +1022,15 @@ class LocalTrendChangeMasker:
     component, weighted straight lines are fit independently to the samples on
     the left and right of every possible boundary. A large change in their
     slopes marks a loss of correlation with the smooth single-lens trend. The
-    two strongest breaks bracketing the component's largest residual define
-    the proposed fit mask. No peak or dip measurements enter this decision.
+    Material outer breaks bracketing the component's largest residual define
+    the proposed fit mask. This keeps a sharper turn inside a caustic from
+    hiding the earlier entry (or later exit). No peak or dip measurements
+    enter this decision.
     """
 
     regression_points: int = 7
     min_slope_change_sigma: float = 5.0
+    outer_break_fraction: float = 0.5
 
     def run_arrays(
         self,
@@ -1090,13 +1093,22 @@ class LocalTrendChangeMasker:
             right = right[np.isfinite(slope_change[right])]
             if left.size == 0 or right.size == 0:
                 continue
-            left_edge = int(left[np.argmax(slope_change[left])])
-            right_edge = int(right[np.argmax(slope_change[right])])
             threshold = max(float(self.min_slope_change_sigma), 0.0)
-            if (
-                slope_change[left_edge] < threshold
-                or slope_change[right_edge] < threshold
-            ):
+            left_edge = self._outer_material_break(
+                left,
+                slope_change,
+                threshold=threshold,
+                fraction=float(self.outer_break_fraction),
+                choose_left=True,
+            )
+            right_edge = self._outer_material_break(
+                right,
+                slope_change,
+                threshold=threshold,
+                fraction=float(self.outer_break_fraction),
+                choose_left=False,
+            )
+            if left_edge is None or right_edge is None:
                 continue
             # The score is centered exactly between its two local regressions;
             # their context establishes the break but is not itself evidence
@@ -1112,6 +1124,32 @@ class LocalTrendChangeMasker:
                 continue
             proposal[mask_start : mask_end + 1] = True
         return proposal
+
+    @staticmethod
+    def _outer_material_break(
+        indices: np.ndarray,
+        score: np.ndarray,
+        *,
+        threshold: float,
+        fraction: float,
+        choose_left: bool,
+    ) -> Optional[int]:
+        """Return the outermost local break comparable to the strongest one."""
+        indices = np.asarray(indices, dtype=int)
+        values = np.asarray(score[indices], dtype=float)
+        finite = np.isfinite(values)
+        if not np.any(finite):
+            return None
+        strongest = float(np.max(values[finite]))
+        material = max(float(threshold), max(float(fraction), 0.0) * strongest)
+        local_peak = finite & (values >= material)
+        if values.size > 1:
+            local_peak[1:] &= values[1:] >= values[:-1]
+            local_peak[:-1] &= values[:-1] >= values[1:]
+        candidates = indices[local_peak]
+        if candidates.size == 0:
+            return None
+        return int(candidates[0] if choose_left else candidates[-1])
 
     @staticmethod
     def _true_runs(mask: np.ndarray) -> tuple[tuple[int, int], ...]:

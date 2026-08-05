@@ -62,11 +62,14 @@ Fit fit_pspl_fluxes(
     const double* time,
     const double* flux,
     const double* ferr,
-    npy_intp n
+    npy_intp n,
+    bool nonnegative_fluxes = false
 ) {
     double sw = 0.0;
     double sx = 0.0;
     double sy = 0.0;
+    double sxx = 0.0;
+    double sxy = 0.0;
     for (npy_intp i = 0; i < n; ++i) {
         const double fe = std::max(ferr[i], 1e-12);
         const double w = 1.0 / (fe * fe);
@@ -74,6 +77,8 @@ Fit fit_pspl_fluxes(
         sw += w;
         sx += w * a;
         sy += w * flux[i];
+        sxx += w * a * a;
+        sxy += w * a * flux[i];
     }
     if (!(sw > 0.0)) {
         return {};
@@ -91,13 +96,38 @@ Fit fit_pspl_fluxes(
         wxx += w * xc * xc;
         wxy += w * xc * yc;
     }
-    if (!(wxx > 0.0)) {
+    if (!(wxx > 0.0) && !nonnegative_fluxes) {
         return {};
     }
 
     Fit fit;
-    fit.a = wxy / wxx;
+    fit.a = wxx > 0.0 ? wxy / wxx : 0.0;
     fit.b = y_mean - fit.a * x_mean;
+    if (nonnegative_fluxes && (fit.a < 0.0 || fit.b < 0.0)) {
+        Fit source_only;
+        source_only.a = sxx > 0.0 ? std::max(sxy / sxx, 0.0) : 0.0;
+        source_only.b = 0.0;
+        source_only.valid = true;
+        Fit blend_only;
+        blend_only.a = 0.0;
+        blend_only.b = std::max(y_mean, 0.0);
+        blend_only.valid = true;
+        auto calculate_chi2 = [&](const Fit& candidate) {
+            double value = 0.0;
+            for (npy_intp i = 0; i < n; ++i) {
+                const double fe = std::max(ferr[i], 1e-12);
+                const double model = candidate.a * pspl_magnification(
+                    t0, tE, u0, time[i]
+                ) + candidate.b;
+                const double r = (flux[i] - model) / fe;
+                value += r * r;
+            }
+            return value;
+        };
+        source_only.chi2 = calculate_chi2(source_only);
+        blend_only.chi2 = calculate_chi2(blend_only);
+        fit = source_only.chi2 <= blend_only.chi2 ? source_only : blend_only;
+    }
     fit.valid = true;
     double chi2 = 0.0;
     for (npy_intp i = 0; i < n; ++i) {
@@ -120,7 +150,8 @@ void pspl_residuals(
     Fit* out_fit = nullptr,
     double u0_min = 0.0,
     int min_t0_support_points = 0,
-    double t0_support_tE_coeff = 0.0
+    double t0_support_tE_coeff = 0.0,
+    bool nonnegative_fluxes = false
 ) {
     const double t0 = q[0];
     const double tE = std::max(std::exp(q[1]), 1e-12);
@@ -150,7 +181,9 @@ void pspl_residuals(
             return;
         }
     }
-    const Fit fit = fit_pspl_fluxes(t0, tE, u0, time, flux, ferr, n);
+    const Fit fit = fit_pspl_fluxes(
+        t0, tE, u0, time, flux, ferr, n, nonnegative_fluxes
+    );
     if (out_fit != nullptr) {
         *out_fit = fit;
     }
@@ -759,15 +792,17 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
     double u0_min = 0.01;
     int min_t0_support_points = 3;
     double t0_support_tE_coeff = 3.0;
+    int nonnegative_fluxes = 0;
 
     static const char* kwlist[] = {
         "time", "flux", "ferr", "p0", "maxiter", "damping_parameter", "tol",
-        "u0_min", "min_t0_support_points", "t0_support_tE_coeff", nullptr
+        "u0_min", "min_t0_support_points", "t0_support_tE_coeff",
+        "nonnegative_fluxes", nullptr
     };
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
-            "OOOO|idddid",
+            "OOOO|idddidp",
             const_cast<char**>(kwlist),
             &time_obj,
             &flux_obj,
@@ -778,7 +813,8 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
             &tol,
             &u0_min,
             &min_t0_support_points,
-            &t0_support_tE_coeff
+            &t0_support_tE_coeff,
+            &nonnegative_fluxes
         )) {
         return nullptr;
     }
@@ -835,7 +871,11 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
     double lambda = std::max(damping_parameter, 1e-12);
     std::vector<double> residual;
     Fit fit;
-    pspl_residuals(q, time, flux, ferr, n, residual, &fit, u0_min, min_t0_support_points, t0_support_tE_coeff);
+    pspl_residuals(
+        q, time, flux, ferr, n, residual, &fit, u0_min,
+        min_t0_support_points, t0_support_tE_coeff,
+        nonnegative_fluxes != 0
+    );
     double chi2 = sumsq(residual);
 
     for (int iter = 0; iter < maxiter; ++iter) {
@@ -850,8 +890,16 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
             qm[k] -= step;
             std::vector<double> rp;
             std::vector<double> rm;
-            pspl_residuals(qp, time, flux, ferr, n, rp, nullptr, u0_min, min_t0_support_points, t0_support_tE_coeff);
-            pspl_residuals(qm, time, flux, ferr, n, rm, nullptr, u0_min, min_t0_support_points, t0_support_tE_coeff);
+            pspl_residuals(
+                qp, time, flux, ferr, n, rp, nullptr, u0_min,
+                min_t0_support_points, t0_support_tE_coeff,
+                nonnegative_fluxes != 0
+            );
+            pspl_residuals(
+                qm, time, flux, ferr, n, rm, nullptr, u0_min,
+                min_t0_support_points, t0_support_tE_coeff,
+                nonnegative_fluxes != 0
+            );
             jcol[k].resize(static_cast<size_t>(n));
             const double inv = 1.0 / (2.0 * step);
             for (npy_intp i = 0; i < n; ++i) {
@@ -891,7 +939,11 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
                 q_trial[2] = std::copysign(u0_min, q_trial[2] == 0.0 ? q[2] : q_trial[2]);
             }
             std::vector<double> trial_residual;
-            pspl_residuals(q_trial, time, flux, ferr, n, trial_residual, nullptr, u0_min, min_t0_support_points, t0_support_tE_coeff);
+            pspl_residuals(
+                q_trial, time, flux, ferr, n, trial_residual, nullptr,
+                u0_min, min_t0_support_points, t0_support_tE_coeff,
+                nonnegative_fluxes != 0
+            );
             const double trial_chi2 = sumsq(trial_residual);
             if (std::isfinite(trial_chi2) && trial_chi2 < best_trial_chi2) {
                 best_trial_chi2 = trial_chi2;
@@ -919,7 +971,11 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
         }
     }
 
-    pspl_residuals(q, time, flux, ferr, n, residual, &fit, u0_min, min_t0_support_points, t0_support_tE_coeff);
+    pspl_residuals(
+        q, time, flux, ferr, n, residual, &fit, u0_min,
+        min_t0_support_points, t0_support_tE_coeff,
+        nonnegative_fluxes != 0
+    );
     chi2 = sumsq(residual);
 
     npy_intp param_dims[1] = {3};

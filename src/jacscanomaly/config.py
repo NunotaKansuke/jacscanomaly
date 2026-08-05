@@ -208,6 +208,15 @@ class FinderConfig:
     pspl_fit_t0_support_tE_coeff: float = 3.0
     """Require t0 support points within +/- coeff * tE for C++ PSPL fits."""
 
+    pspl_fit_nonnegative_fluxes: bool = False
+    """Constrain C++ PSPL source and blend fluxes to be nonnegative."""
+
+    pspl_fit_nonnegative_on_cancellation: bool = False
+    """Use nonnegative fluxes only when the free solution strongly cancels."""
+
+    pspl_fit_max_flux_cancellation_ratio: float = 50.0
+    """Maximum source/blend cancellation before the nonnegative safeguard."""
+
     # ==================================================
     # 1) Season splitting
     # ==================================================

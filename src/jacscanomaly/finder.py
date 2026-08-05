@@ -214,6 +214,15 @@ class Finder:
                     u0_min=float(self.config.pspl_fit_u0_min),
                     min_t0_support_points=int(self.config.pspl_fit_min_t0_support_points),
                     t0_support_tE_coeff=float(self.config.pspl_fit_t0_support_tE_coeff),
+                    nonnegative_fluxes=bool(
+                        self.config.pspl_fit_nonnegative_fluxes
+                    ),
+                    nonnegative_on_cancellation=bool(
+                        self.config.pspl_fit_nonnegative_on_cancellation
+                    ),
+                    max_flux_cancellation_ratio=float(
+                        self.config.pspl_fit_max_flux_cancellation_ratio
+                    ),
                 )
             else:
                 self.fitter = PSPLFitter()

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -73,6 +74,12 @@ def main() -> None:
     )
     parser.add_argument("--event-timeout", type=int, default=600)
     parser.add_argument(
+        "--fit-bin-points",
+        type=int,
+        default=1,
+        help="Bin only scan-stage PSPL baseline fits by this many observations.",
+    )
+    parser.add_argument(
         "--html-only",
         action="store_true",
         help="Reuse existing scan/final JSON and rebuild only the sparse site.",
@@ -99,8 +106,14 @@ def main() -> None:
 
     scan_data = RESULT_ROOT / f"planet_signal_{tag}_scan_data"
     scan_figures = RESULT_ROOT / f"planet_signal_{tag}_scan_figures"
+    physical_data = RESULT_ROOT / f"planet_signal_{tag}_physical_data"
+    physical_figures = RESULT_ROOT / f"planet_signal_{tag}_physical_figures"
+    post_data = RESULT_ROOT / f"planet_signal_{tag}_post_physical_data"
+    post_figures = RESULT_ROOT / f"planet_signal_{tag}_post_physical_figures"
     final_data = RESULT_ROOT / f"planet_signal_{tag}_final_residual_data"
     final_figures = RESULT_ROOT / f"planet_signal_{tag}_final_residual_figures"
+    route_result = RESULT_ROOT / f"planet_effect_route_{tag}.json"
+    route_indices = route_result.with_suffix(".indices.txt")
     site_dir = (PORTAL_ROOT / str(args.site_dir_name)).resolve()
     if (
         site_dir.parent != PORTAL_ROOT.resolve()
@@ -143,21 +156,92 @@ def main() -> None:
             str(scan_data),
             "--figure-dir",
             str(scan_figures),
+            "--fit-bin-points",
+            str(max(1, int(args.fit_bin_points))),
         ]
         if args.reuse:
             scan_command.append("--skip-existing")
         run(scan_command, env=env)
+
+        run(
+            [
+                sys.executable,
+                str(ROMAN_TOOL / "run_planet_effect_router.py"),
+                "--jobs",
+                str(max(1, int(args.jobs))),
+                "--indices",
+                index_arg,
+                "--result",
+                str(route_result),
+                "--errors",
+                str(route_result.with_suffix(".errors.log")),
+                "--scan-data-dir",
+                str(scan_data),
+            ],
+            env=env,
+        )
+        route_payload = json.loads(route_result.read_text(encoding="utf-8"))
+        if int(route_payload.get("n_errors", 0)):
+            parser.error(
+                "physical-effect routing failed for "
+                f"{int(route_payload['n_errors'])} event(s); see "
+                f"{route_result.with_suffix('.errors.log')}"
+            )
+
+        if route_indices.exists() and route_indices.read_text().strip():
+            physical_command = [
+                sys.executable,
+                str(ROMAN_TOOL / "run_jacscanomaly_planet_signal.py"),
+                "--stage",
+                "physical",
+                "--indices-file",
+                str(route_indices),
+                "--jobs",
+                str(max(1, int(args.jobs))),
+                "--result-tag",
+                tag,
+                "--event-timeout",
+                str(max(1, int(args.event_timeout))),
+                "--effect-route-result",
+                str(route_result),
+                "--scan-data-dir",
+                str(scan_data),
+                "--data-dir",
+                str(physical_data),
+                "--figure-dir",
+                str(physical_figures),
+            ]
+            if args.reuse:
+                physical_command.append("--skip-existing")
+            run(physical_command, env=env)
+
+        post_command = [
+            sys.executable,
+            str(ROMAN_TOOL / "run_post_physical_planet_refinement.py"),
+            "--physical-data-dir",
+            str(physical_data),
+            "--data-dir",
+            str(post_data),
+            "--figure-dir",
+            str(post_figures),
+            "--jobs",
+            str(max(1, int(args.jobs))),
+            "--max-refits",
+            "3",
+            "--event-timeout",
+            str(max(1, int(args.event_timeout))),
+        ]
+        if args.reuse:
+            post_command.append("--skip-existing")
+        run(post_command, env=env)
 
         final_command = [
             sys.executable,
             str(ROMAN_TOOL / "run_final_residual_measurement.py"),
             "--scan-data-dir",
             str(scan_data),
-            # This focused comparison deliberately tests the PSPL fit-mask
-            # change. Accepted physical models require the full router path
-            # and can be supplied by a later survey-wide trial.
             "--physical-data-dir",
-            str(scan_data),
+            str(post_data),
             "--data-dir",
             str(final_data),
             "--figure-dir",

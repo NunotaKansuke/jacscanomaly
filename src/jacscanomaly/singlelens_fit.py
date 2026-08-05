@@ -372,6 +372,9 @@ class CPPPSPLFitter:
     u0_min: float = 0.01
     min_t0_support_points: int = 3
     t0_support_tE_coeff: float = 3.0
+    nonnegative_fluxes: bool = False
+    nonnegative_on_cancellation: bool = False
+    max_flux_cancellation_ratio: float = 50.0
 
     def __post_init__(self):
         self.plotter = SingleLensPlotter()
@@ -385,18 +388,46 @@ class CPPPSPLFitter:
         flux_np = np.asarray(flux, dtype=float)
         ferr_np = np.asarray(ferr, dtype=float)
         p0_np = np.asarray(p0, dtype=float)
+        native_kwargs = {
+            "maxiter": int(self.maxiter),
+            "damping_parameter": float(self.damping_parameter),
+            "tol": float(self.tol),
+            "u0_min": float(self.u0_min),
+            "min_t0_support_points": int(self.min_t0_support_points),
+            "t0_support_tE_coeff": float(self.t0_support_tE_coeff),
+        }
         params, fs, fb, chi2, model_flux, residual = _cpp_grid.fit_pspl(
             time_np,
             flux_np,
             ferr_np,
             p0_np,
-            maxiter=int(self.maxiter),
-            damping_parameter=float(self.damping_parameter),
-            tol=float(self.tol),
-            u0_min=float(self.u0_min),
-            min_t0_support_points=int(self.min_t0_support_points),
-            t0_support_tE_coeff=float(self.t0_support_tE_coeff),
+            nonnegative_fluxes=bool(self.nonnegative_fluxes),
+            **native_kwargs,
         )
+        used_nonnegative_fallback = bool(self.nonnegative_fluxes)
+        baseline_flux = max(
+            abs(float(fs) + float(fb)),
+            float(np.median(np.abs(flux_np))),
+            1.0e-30,
+        )
+        cancellation_ratio = (
+            abs(float(fs)) + abs(float(fb))
+        ) / baseline_flux
+        if (
+            not self.nonnegative_fluxes
+            and self.nonnegative_on_cancellation
+            and np.isfinite(cancellation_ratio)
+            and cancellation_ratio > float(self.max_flux_cancellation_ratio)
+        ):
+            params, fs, fb, chi2, model_flux, residual = _cpp_grid.fit_pspl(
+                time_np,
+                flux_np,
+                ferr_np,
+                p0_np,
+                nonnegative_fluxes=True,
+                **native_kwargs,
+            )
+            used_nonnegative_fallback = True
         params_np = np.asarray(params, dtype=float)
         model_np = np.asarray(model_flux, dtype=float)
         residual_np = np.asarray(residual, dtype=float)
@@ -441,10 +472,146 @@ class CPPPSPLFitter:
             model_flux=model_np,
             residual=residual_np,
             optimizer_success=True,
-            optimizer_status="native_cpp_lm",
+            optimizer_status=(
+                "native_cpp_lm_nonnegative_flux_fallback"
+                if used_nonnegative_fallback
+                else "native_cpp_lm"
+            ),
         )
         self._last_fit = fit
         return fit
+
+    def plot_lc(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_lc(self._last_fit, **kwargs)
+
+    def plot_residual(self, **kwargs):
+        if self._last_fit is None:
+            raise RuntimeError("No fit has been run yet.")
+        return self.plotter.plot_residual(self._last_fit, **kwargs)
+
+
+@dataclass
+class BinnedCPPPSPLFitter:
+    """Fit PSPL on cadence bins and evaluate the solution on every datum.
+
+    Binning is intentionally confined to the PSPL baseline. Physical FSPL and
+    parallax fits still see the original observations, so finite-source and
+    trajectory information is not averaged away.
+    """
+
+    bin_points: int = 8
+    base_fitter: Optional[CPPPSPLFitter] = None
+    gap_cadence_factor: float = 8.0
+
+    def __post_init__(self):
+        self.plotter = SingleLensPlotter()
+        self._last_fit: Optional[SingleLensFitResult] = None
+        if self.base_fitter is None:
+            self.base_fitter = CPPPSPLFitter()
+
+    def fit(
+        self,
+        time: jnp.ndarray,
+        flux: jnp.ndarray,
+        ferr: jnp.ndarray,
+        p0: jnp.ndarray,
+    ) -> SingleLensFitResult:
+        time_np = np.asarray(time, dtype=float).reshape(-1)
+        flux_np = np.asarray(flux, dtype=float).reshape(-1)
+        ferr_np = np.maximum(np.asarray(ferr, dtype=float).reshape(-1), 1.0e-12)
+        if not (time_np.size == flux_np.size == ferr_np.size):
+            raise ValueError("time, flux, and ferr must have matching sizes")
+        binned_time, binned_flux, binned_ferr = self._bin_arrays(
+            time_np, flux_np, ferr_np
+        )
+        fit = self.base_fitter.fit(
+            binned_time,
+            binned_flux,
+            binned_ferr,
+            np.asarray(p0, dtype=float),
+        )
+        params = np.asarray(fit.params, dtype=float)
+        tau = (time_np - float(params[0])) / max(abs(float(params[1])), 1.0e-12)
+        u = np.sqrt(np.square(tau) + float(params[2]) ** 2)
+        u = np.maximum(u, 1.0e-12)
+        magnification = (np.square(u) + 2.0) / (
+            u * np.sqrt(np.square(u) + 4.0)
+        )
+        fs = float(np.asarray(fit.fs))
+        fb = float(np.asarray(fit.fb))
+        model_flux = fs * magnification + fb
+        residual = flux_np - model_flux
+        chi2 = float(np.sum(np.square(residual / ferr_np)))
+        result = SingleLensFitResult(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=params,
+            param_names=("t0", "tE", "u0"),
+            chi2=chi2,
+            chi2_dof=chi2 / max(time_np.size - 3, 1),
+            fs=fs,
+            fb=fb,
+            model_flux=model_flux,
+            residual=residual,
+            raw_params=fit.raw_params,
+            optimizer_success=fit.optimizer_success,
+            optimizer_status=(
+                f"binned_{int(self.bin_points)}pt:{fit.optimizer_status}"
+            ),
+            diagnostics=fit.diagnostics,
+        )
+        object.__setattr__(result, "model_kind", "pspl")
+        object.__setattr__(result, "bin_points", int(self.bin_points))
+        object.__setattr__(result, "n_binned_points", int(binned_time.size))
+        self._last_fit = result
+        return result
+
+    def _bin_arrays(
+        self,
+        time: np.ndarray,
+        flux: np.ndarray,
+        ferr: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        order = np.argsort(time, kind="stable")
+        time = np.asarray(time, dtype=float)[order]
+        flux = np.asarray(flux, dtype=float)[order]
+        ferr = np.asarray(ferr, dtype=float)[order]
+        positive_dt = np.diff(time)
+        positive_dt = positive_dt[
+            np.isfinite(positive_dt) & (positive_dt > 0.0)
+        ]
+        cadence = float(np.median(positive_dt)) if positive_dt.size else 0.0
+        gap_limit = max(float(self.gap_cadence_factor) * cadence, 0.0)
+        breaks = np.flatnonzero(
+            ~np.isfinite(np.diff(time))
+            | (np.diff(time) <= 0.0)
+            | (np.diff(time) > gap_limit)
+        )
+        starts = np.r_[0, breaks + 1]
+        ends = np.r_[breaks + 1, time.size]
+        size = max(int(self.bin_points), 1)
+        rows: list[tuple[float, float, float]] = []
+        for start, end in zip(starts, ends):
+            for left in range(int(start), int(end), size):
+                right = min(left + size, int(end))
+                weight = 1.0 / np.square(ferr[left:right])
+                weight_sum = float(np.sum(weight))
+                if not np.isfinite(weight_sum) or weight_sum <= 0.0:
+                    continue
+                rows.append(
+                    (
+                        float(np.sum(weight * time[left:right]) / weight_sum),
+                        float(np.sum(weight * flux[left:right]) / weight_sum),
+                        float(np.sqrt(1.0 / weight_sum)),
+                    )
+                )
+        if len(rows) < 4:
+            raise ValueError("Binned PSPL fit requires at least four populated bins.")
+        values = np.asarray(rows, dtype=float)
+        return values[:, 0], values[:, 1], values[:, 2]
 
     def plot_lc(self, **kwargs):
         if self._last_fit is None:

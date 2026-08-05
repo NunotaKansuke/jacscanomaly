@@ -38,3 +38,85 @@ def test_cpp_pspl_fitter_rejects_native_sentinel(monkeypatch):
             jnp.asarray([0.1, 0.1, 0.1, 0.1]),
             jnp.asarray([1.0, 1.0, 0.1]),
         )
+
+
+def test_cpp_pspl_fitter_retries_nonnegative_only_for_flux_cancellation(
+    monkeypatch,
+):
+    import numpy as np
+    from jacscanomaly import singlelens_fit
+
+    calls = []
+
+    class CancellationBackend:
+        @staticmethod
+        def fit_pspl(time, flux, ferr, p0, **kwargs):
+            constrained = bool(kwargs["nonnegative_fluxes"])
+            calls.append(constrained)
+            fs, fb = (1.0, 0.0) if constrained else (100.0, -99.0)
+            model = np.full(len(time), fs + fb)
+            residual = np.asarray(flux) - model
+            return np.asarray(p0), fs, fb, 0.0, model, residual
+
+    monkeypatch.setattr(singlelens_fit, "_cpp_grid", CancellationBackend())
+    fitter = singlelens_fit.CPPPSPLFitter(
+        nonnegative_on_cancellation=True,
+        max_flux_cancellation_ratio=50.0,
+    )
+    fit = fitter.fit(
+        np.arange(4.0),
+        np.ones(4),
+        np.ones(4),
+        np.asarray([1.5, 1.0, 0.1]),
+    )
+
+    assert calls == [False, True]
+    assert fit.fs == 1.0
+    assert fit.fb == 0.0
+    assert "nonnegative_flux_fallback" in fit.optimizer_status
+
+
+def test_binned_cpp_pspl_fitter_does_not_cross_observing_gaps():
+    import numpy as np
+    from jacscanomaly import BinnedCPPPSPLFitter
+
+    fitter = BinnedCPPPSPLFitter(bin_points=4, base_fitter=object())
+    time = np.r_[np.arange(8), np.arange(100, 108)].astype(float)
+    flux = np.r_[np.ones(8), np.full(8, 3.0)]
+    ferr = np.ones(time.shape, dtype=float)
+
+    binned_time, binned_flux, binned_ferr = fitter._bin_arrays(
+        time, flux, ferr
+    )
+
+    assert np.allclose(binned_time, [1.5, 5.5, 101.5, 105.5])
+    assert np.allclose(binned_flux, [1.0, 1.0, 3.0, 3.0])
+    assert np.allclose(binned_ferr, 0.5)
+
+
+def test_cpp_pspl_can_constrain_linear_fluxes_nonnegative():
+    import numpy as np
+    from jacscanomaly import _cpp_grid
+    from jacscanomaly.singlelens_model import A_pspl_func
+
+    time = np.linspace(-20.0, 20.0, 101)
+    params = np.asarray([0.0, 4.0, 0.2])
+    magnification = np.asarray(A_pspl_func(params, time))
+    flux = 2.0 * magnification - 1.5
+    ferr = np.full(time.shape, 0.01)
+
+    unconstrained = _cpp_grid.fit_pspl(
+        time, flux, ferr, params, maxiter=0
+    )
+    constrained = _cpp_grid.fit_pspl(
+        time,
+        flux,
+        ferr,
+        params,
+        maxiter=0,
+        nonnegative_fluxes=True,
+    )
+
+    assert unconstrained[2] < 0.0
+    assert constrained[1] >= 0.0
+    assert constrained[2] >= 0.0
