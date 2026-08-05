@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and publish a sparse Roman feature-derived fit-mask comparison site."""
+"""Run and publish a sparse Roman fit-mask comparison site."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--variant-name",
-        default="feature-derived fit mask trial",
+        default="fit mask trial",
     )
     parser.add_argument("--event-timeout", type=int, default=600)
     parser.add_argument(

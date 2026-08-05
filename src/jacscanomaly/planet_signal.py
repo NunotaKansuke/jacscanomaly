@@ -82,13 +82,11 @@ class PlanetSignalConfig:
     # multiply both full-grid scans and LM fits.
     beam_width: int = 1
     beam_candidates_per_iter: int = 1
-    # Add one fit-mask proposal built from the closed peak/dip widths measured
-    # inside every accepted Finder component.  This keeps weak disconnected
-    # caustics from being compared with the strongest peak, while avoiding the
-    # dangerous alternative of masking an entire broad Finder support.
-    fit_mask_from_features: bool = True
-    fit_mask_feature_pad_fraction: float = 0.0
-    fit_mask_feature_max_fraction: float = 0.02
+    # Add one fit-mask proposal from changes in the local residual trend around
+    # every accepted Finder component. Finder supplies location only; peak/dip
+    # characterization remains downstream of the final all-residual scan.
+    fit_mask_from_local_trend: bool = True
+    fit_mask_trend_max_fraction: float = 0.02
     beam_probe_only: bool = False
     beam_teff_factors: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 32.0)
     beam_min_half_width: float = 0.0
@@ -1017,17 +1015,19 @@ class FoldCausticDetector:
 
 
 @dataclass(frozen=True)
-class SmoothDepartureMasker:
-    """Join feature intervals until the residual returns to its noise floor.
+class LocalTrendChangeMasker:
+    """Locate anomaly boundaries from breaks in the local residual trend.
 
-    Feature widths provide the seeds. Adjacent seeds belong to one departure
-    when the samples between them never contain a sustained return to the
-    ordinary single-lens residual. The return threshold and duration are
-    inherited from the feature detector, so this adds no event-width, gap, or
-    peak-ratio tuning parameters.
+    Finder support identifies where an anomaly may live. Around each support
+    component, weighted straight lines are fit independently to the samples on
+    the left and right of every possible boundary. A large change in their
+    slopes marks a loss of correlation with the smooth single-lens trend. The
+    two strongest breaks bracketing the component's largest residual define
+    the proposed fit mask. No peak or dip measurements enter this decision.
     """
 
-    feature_config: PlanetFeatureConfig = PlanetFeatureConfig()
+    regression_points: int = 7
+    min_slope_change_sigma: float = 5.0
 
     def run_arrays(
         self,
@@ -1035,73 +1035,154 @@ class SmoothDepartureMasker:
         time: np.ndarray,
         residual: np.ndarray,
         ferr: np.ndarray,
-        features: PlanetFeatureResult,
-        pad_fraction: float = 0.0,
+        support_mask: np.ndarray,
     ) -> np.ndarray:
         time = np.asarray(time, dtype=float).reshape(-1)
         residual = np.asarray(residual, dtype=float).reshape(-1)
         ferr = np.asarray(ferr, dtype=float).reshape(-1)
-        if not (time.size == residual.size == ferr.size):
-            raise ValueError("time, residual, and ferr must have matching sizes")
-        mask = np.zeros(time.shape, dtype=bool)
-        ordered = features.features
-        if not ordered:
-            return mask
-
-        padding = max(float(pad_fraction), 0.0)
-        for feature in ordered:
-            pad = padding * max(float(feature.timescale), 0.0)
-            mask |= (
-                (time >= float(feature.t_start) - pad)
-                & (time <= float(feature.t_end) + pad)
+        support = np.asarray(support_mask, dtype=bool).reshape(-1)
+        if not (
+            time.size == residual.size == ferr.size == support.size
+        ):
+            raise ValueError(
+                "time, residual, ferr, and support_mask must have matching sizes"
             )
+        proposal = np.zeros(time.shape, dtype=bool)
+        if not np.any(support):
+            return proposal
 
         positive_dt = np.diff(time)
         positive_dt = positive_dt[
             np.isfinite(positive_dt) & (positive_dt > 0.0)
         ]
         if positive_dt.size == 0:
-            return mask
+            return proposal
         cadence = float(np.median(positive_dt))
-        return_points = max(int(self.feature_config.smooth_points) // 3, 2)
-        baseline_limit = max(
-            float(self.feature_config.duration_min_abs_z), 0.0
+        width = max(int(self.regression_points), 2)
+        slope_change = self._slope_change_significance(
+            time=time,
+            residual=residual,
+            ferr=ferr,
+            cadence=cadence,
+            width=width,
         )
         z = residual / np.maximum(ferr, 1.0e-12)
 
-        for left, right in zip(ordered, ordered[1:]):
-            # Crossing the fitted baseline changes the character of the
-            # departure. Keep opposite-sign features separate; the independent
-            # fold-caustic detector is diagnostic and must not enlarge the fit
-            # mask by itself.
-            if left.kind != right.kind:
+        runs = self._true_runs(support)
+        for run_index, (start, end) in enumerate(runs):
+            span = end - start + 1
+            search_start = max(0, start - max(span, width))
+            search_end = min(time.size - 1, end + max(span, width))
+            if run_index:
+                previous_end = runs[run_index - 1][1]
+                search_start = max(search_start, (previous_end + start) // 2 + 1)
+            if run_index + 1 < len(runs):
+                next_start = runs[run_index + 1][0]
+                search_end = min(search_end, (end + next_start) // 2)
+            anchor = start + int(np.argmax(np.abs(z[start : end + 1])))
+            # The largest excursion itself often contains another sharp turn
+            # (for example the top of a caustic spike). Excluding one local
+            # regression width around it makes the selected pair describe the
+            # anomaly's outer entry and exit instead of its internal peak.
+            left = np.arange(search_start, max(search_start, anchor - width) + 1)
+            right = np.arange(min(search_end, anchor + width), search_end + 1)
+            left = left[np.isfinite(slope_change[left])]
+            right = right[np.isfinite(slope_change[right])]
+            if left.size == 0 or right.size == 0:
                 continue
-            between = (
-                (time > float(left.t_end))
-                & (time < float(right.t_start))
-            )
-            indices = np.flatnonzero(between)
-            if indices.size == 0:
-                continue
-            local_indices = np.unique(
-                np.r_[
-                    max(int(indices[0]) - 1, 0),
-                    indices,
-                    min(int(indices[-1]) + 1, time.size - 1),
-                ]
-            )
-            local_dt = np.diff(time[local_indices])
-            if np.any(
-                local_dt
-                > float(max(int(self.feature_config.smooth_points), 1))
-                * cadence
+            left_edge = int(left[np.argmax(slope_change[left])])
+            right_edge = int(right[np.argmax(slope_change[right])])
+            threshold = max(float(self.min_slope_change_sigma), 0.0)
+            if (
+                slope_change[left_edge] < threshold
+                or slope_change[right_edge] < threshold
             ):
                 continue
-            returned = np.abs(z[indices]) < baseline_limit
-            if FoldCausticDetector._longest_true_run(returned) >= return_points:
+            # The score is centered exactly between its two local regressions;
+            # their context establishes the break but is not itself evidence
+            # that every surrounding sample belongs in the fit exclusion.
+            mask_start = left_edge
+            mask_end = right_edge
+            if mask_start > end or mask_end < start:
                 continue
-            mask[indices] = True
-        return mask
+            if np.any(
+                np.diff(time[mask_start : mask_end + 1])
+                > float(width) * cadence
+            ):
+                continue
+            proposal[mask_start : mask_end + 1] = True
+        return proposal
+
+    @staticmethod
+    def _true_runs(mask: np.ndarray) -> tuple[tuple[int, int], ...]:
+        indices = np.flatnonzero(np.asarray(mask, dtype=bool))
+        if indices.size == 0:
+            return ()
+        starts = np.r_[indices[0], indices[1:][np.diff(indices) > 1]]
+        ends = np.r_[indices[:-1][np.diff(indices) > 1], indices[-1]]
+        return tuple((int(start), int(end)) for start, end in zip(starts, ends))
+
+    @classmethod
+    def _slope_change_significance(
+        cls,
+        *,
+        time: np.ndarray,
+        residual: np.ndarray,
+        ferr: np.ndarray,
+        cadence: float,
+        width: int,
+    ) -> np.ndarray:
+        score = np.full(time.shape, np.nan, dtype=float)
+        for center in range(width, time.size - width):
+            left = np.arange(center - width, center, dtype=int)
+            right = np.arange(center + 1, center + width + 1, dtype=int)
+            local = np.r_[left, center, right]
+            if np.any(np.diff(time[local]) > float(width) * cadence):
+                continue
+            left_fit = cls._weighted_slope(
+                time[left], residual[left], ferr[left], cadence
+            )
+            right_fit = cls._weighted_slope(
+                time[right], residual[right], ferr[right], cadence
+            )
+            if left_fit is None or right_fit is None:
+                continue
+            left_slope, left_variance = left_fit
+            right_slope, right_variance = right_fit
+            uncertainty = np.sqrt(left_variance + right_variance)
+            if np.isfinite(uncertainty) and uncertainty > 0.0:
+                score[center] = abs(right_slope - left_slope) / uncertainty
+        return score
+
+    @staticmethod
+    def _weighted_slope(
+        time: np.ndarray,
+        residual: np.ndarray,
+        ferr: np.ndarray,
+        cadence: float,
+    ) -> Optional[tuple[float, float]]:
+        valid = (
+            np.isfinite(time)
+            & np.isfinite(residual)
+            & np.isfinite(ferr)
+            & (ferr > 0.0)
+        )
+        if int(np.sum(valid)) < 2:
+            return None
+        x = (time[valid] - float(np.mean(time[valid]))) / cadence
+        y = residual[valid]
+        weight = 1.0 / np.square(ferr[valid])
+        weight_sum = float(np.sum(weight))
+        if not np.isfinite(weight_sum) or weight_sum <= 0.0:
+            return None
+        x_mean = float(np.sum(weight * x) / weight_sum)
+        y_mean = float(np.sum(weight * y) / weight_sum)
+        centered_x = x - x_mean
+        denominator = float(np.sum(weight * np.square(centered_x)))
+        if not np.isfinite(denominator) or denominator <= 0.0:
+            return None
+        slope = float(np.sum(weight * centered_x * (y - y_mean)) / denominator)
+        return slope, 1.0 / denominator
 
 
 @dataclass
@@ -1778,7 +1859,7 @@ class PlanetSignalExtractor:
                 initial_seed=initial_seed,
             )
             if (
-                bool(self.config.fit_mask_from_features)
+                bool(self.config.fit_mask_from_local_trend)
                 and not bool(self.config.beam_probe_only)
             ):
                 (
@@ -1786,7 +1867,7 @@ class PlanetSignalExtractor:
                     signal_mask,
                     point_weight,
                     iterations,
-                ) = self._run_feature_mask_refinement(
+                ) = self._run_local_trend_mask_refinement(
                     current_fit=current_fit,
                     signal_mask=signal_mask,
                     iterations=iterations,
@@ -1794,7 +1875,6 @@ class PlanetSignalExtractor:
                     flux_j=flux_j,
                     ferr_j=ferr_j,
                     time_np=time_np,
-                    flux_np=flux_np,
                     ferr_np=ferr_np,
                     verbose=verbose,
                 )
@@ -2649,7 +2729,7 @@ class PlanetSignalExtractor:
         point_weight = np.where(best_branch.mask, 0.0, 1.0)
         return best_branch.fit, best_branch.mask, point_weight, list(best_branch.iterations), observed_initial_seed
 
-    def _run_feature_mask_refinement(
+    def _run_local_trend_mask_refinement(
         self,
         *,
         current_fit: SingleLensFitResult,
@@ -2659,7 +2739,6 @@ class PlanetSignalExtractor:
         flux_j: jnp.ndarray,
         ferr_j: jnp.ndarray,
         time_np: np.ndarray,
-        flux_np: np.ndarray,
         ferr_np: np.ndarray,
         verbose: bool,
     ) -> tuple[
@@ -2668,15 +2747,7 @@ class PlanetSignalExtractor:
         np.ndarray,
         list[PlanetSignalIteration],
     ]:
-        """Run one feature-derived widening pass after conservative beam fit.
-
-        Finder support can legitimately cover a broad physical mismatch or a
-        long residual wing.  The ordinary beam fit first establishes a safe
-        compact core and a less biased baseline.  One fresh all-residual scan
-        then supplies support to the existing feature detector; only measured
-        peak/dip durations, rather than the support itself, are added to the
-        fit exclusion.  This pass is deliberately bounded to one refit.
-        """
+        """Widen accepted beam cores at local residual-trend boundaries."""
         current_mask = np.asarray(signal_mask, dtype=bool)
         point_weight = np.where(current_mask, 0.0, 1.0)
         if not np.any(current_mask):
@@ -2705,36 +2776,16 @@ class PlanetSignalExtractor:
         if not np.any(support):
             return current_fit, current_mask, point_weight, iterations
 
-        features = _PlanetFeatureDetector(PlanetFeatureConfig()).run_arrays(
-            time=np.asarray(time_np, dtype=float),
-            flux=np.asarray(flux_np, dtype=float),
-            ferr=np.asarray(ferr_np, dtype=float),
-            residual=np.asarray(
-                jax.device_get(current_fit.residual), dtype=float
-            ),
-            model_flux=np.asarray(current_fit.model_flux, dtype=float),
-            fit=current_fit,
-            mask=support,
-        )
-        pad_fraction = max(
-            float(self.config.fit_mask_feature_pad_fraction), 0.0
-        )
-        residual_np = np.asarray(
-            jax.device_get(current_fit.residual), dtype=float
-        )
-        feature_config = PlanetFeatureConfig()
-        feature_mask = SmoothDepartureMasker(feature_config).run_arrays(
+        trend_mask = LocalTrendChangeMasker().run_arrays(
             time=time_np,
-            residual=residual_np,
+            residual=np.asarray(jax.device_get(current_fit.residual), dtype=float),
             ferr=ferr_np,
-            features=features,
-            pad_fraction=pad_fraction,
+            support_mask=support,
         )
-        feature_mask = self._exclude_mask_protection(feature_mask)
-        combined = current_mask | feature_mask
-
+        trend_mask = self._exclude_mask_protection(trend_mask)
+        combined = current_mask | trend_mask
         max_fraction = min(
-            max(float(self.config.fit_mask_feature_max_fraction), 0.0),
+            max(float(self.config.fit_mask_trend_max_fraction), 0.0),
             max(float(self.config.max_mask_fraction), 0.0),
         )
         if (
@@ -2756,12 +2807,14 @@ class PlanetSignalExtractor:
             return current_fit, current_mask, point_weight, iterations
         if not self._continuation_fit_is_usable(candidate_fit):
             return current_fit, current_mask, point_weight, iterations
-        if self._continuation_hit_new_pspl_u0_bound(
-            current_fit, candidate_fit
-        ):
+        if self._continuation_hit_new_pspl_u0_bound(current_fit, candidate_fit):
             return current_fit, current_mask, point_weight, iterations
-        old_unmasked = self._masked_chi2_dof(current_fit, ~combined)
-        new_unmasked = self._masked_chi2_dof(candidate_fit, ~combined)
+        # Other disconnected anomalies must not vote for a distorted baseline
+        # merely because this proposal did not mask them. Compare continuation
+        # fits only on points outside every Finder-supported component.
+        clean_keep = ~(support | combined)
+        old_unmasked = self._masked_chi2_dof(current_fit, clean_keep)
+        new_unmasked = self._masked_chi2_dof(candidate_fit, clean_keep)
         allowed = old_unmasked * (
             1.0 + float(self.config.max_unmasked_chi2_dof_increase)
         )
@@ -2779,10 +2832,10 @@ class PlanetSignalExtractor:
             grid_metrics_all,
             seasons=seasons,
         )
-        widened_iterations = list(iterations)
-        widened_iterations.append(
+        widened = list(iterations)
+        widened.append(
             PlanetSignalIteration(
-                iteration=len(widened_iterations),
+                iteration=len(widened),
                 seed=seed,
                 n_masked_before=int(np.sum(current_mask)),
                 n_masked_after=int(np.sum(combined)),
@@ -2794,7 +2847,7 @@ class PlanetSignalExtractor:
             candidate_fit,
             combined,
             np.where(combined, 0.0, 1.0),
-            widened_iterations,
+            widened,
         )
 
     def _beam_seed_repeats_history(

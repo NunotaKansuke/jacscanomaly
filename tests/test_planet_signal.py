@@ -10,7 +10,7 @@ from jacscanomaly import (
     FlatBaselineDiagnostic,
     FoldCausticDetector,
     FoldCausticResult,
-    SmoothDepartureMasker,
+    LocalTrendChangeMasker,
     PlanetFeatureConfig,
     PlanetFeature,
     PlanetFeatureResult,
@@ -436,92 +436,47 @@ def test_default_beam_uses_three_adaptive_single_branch_iterations():
     assert config.beam_max_iter == 3
     assert config.beam_width == 1
     assert config.beam_candidates_per_iter == 1
-    assert config.fit_mask_from_features is True
-    assert config.fit_mask_feature_pad_fraction == 0.0
-    assert config.fit_mask_feature_max_fraction == 0.02
+    assert config.fit_mask_from_local_trend is True
 
 
-def test_feature_mask_refinement_masks_local_features_not_finder_support(
-    monkeypatch,
-):
+def test_beam_interval_keeps_compact_core_before_trend_refinement():
     time = np.linspace(0.0, 20.0, 401)
     ferr = np.full_like(time, 0.01)
     params = np.array([10.0, 3.0, 0.2])
     model = 2.0 * np.asarray(A_pspl_func(params, time)) + 1.0
-    residual = (
-        0.18 * np.exp(-0.5 * ((time - 7.0) / 0.10) ** 2)
-        + 0.32 * np.exp(-0.5 * ((time - 13.0) / 0.12) ** 2)
-    )
-    flux = model + residual
-    current_mask = np.abs(time - 13.0) <= 0.10
-    current_fit = _feature_result(
+    residual = 0.32 * np.exp(-0.5 * ((time - 13.0) / 0.12) ** 2)
+    fit = _feature_result(
         time,
-        flux,
+        model + residual,
         ferr,
         residual,
-        current_mask,
+        np.abs(time - 13.0) <= 0.10,
     ).refined_fit
-    finder = Finder(
-        FinderConfig(
-            grid_backend="jax",
-            single_fit_backend="jax",
-            teff_coeff=4.0,
-        )
-    )
     extractor = PlanetSignalExtractor(
-        finder,
-        PlanetSignalConfig(fit_mask_feature_max_fraction=0.20),
+        Finder(FinderConfig(grid_backend="jax", teff_coeff=4.0)),
     )
-    extractor._scan_seconds = 0.0
-    extractor._n_scans = 0
-    extractor._time_cadence = float(np.median(np.diff(time)))
     extractor._mask_protection = None
-    extractor._baseline_refit_fitter = None
-
-    clusters = np.asarray(
-        [[7.0, 0.50, 1200.0], [13.0, 0.50, 1800.0]],
-        dtype=float,
-    )
-    metrics = np.asarray(
-        [
-            [7.0, 0.50, 1200.0, 25.0, 8.0, 6.0, 0.2, 0.8, 6.0],
-            [13.0, 0.50, 1800.0, 25.0, 8.0, 6.0, 0.2, 0.8, 6.0],
-        ],
-        dtype=float,
-    )
-    monkeypatch.setattr(
-        finder.runner,
-        "run",
-        lambda **_kwargs: ([], clusters, metrics),
-    )
-    monkeypatch.setattr(
-        extractor,
-        "_fit_masked_single_lens_and_evaluate_full",
-        lambda **_kwargs: current_fit,
+    seed = BestCandidate(
+        t0=13.0,
+        teff=0.25,
+        dchi2=1800.0,
+        med_others=0.0,
+        std_others=1.0,
+        score=1800.0,
+        quality=CandidateQuality(10, 5, 5.0, 0.2, 0.0, 5),
     )
 
-    fit, mask, weights, iterations = extractor._run_feature_mask_refinement(
-        current_fit=current_fit,
-        signal_mask=current_mask,
-        iterations=[],
-        time_j=time,
-        flux_j=flux,
-        ferr_j=ferr,
+    masks = extractor._beam_interval_masks_from_seed(
         time_np=time,
-        flux_np=flux,
-        ferr_np=ferr,
-        verbose=False,
+        fit=fit,
+        current_mask=np.zeros(time.shape, dtype=bool),
+        seed=seed,
     )
 
-    assert fit is current_fit
-    assert mask[np.argmin(np.abs(time - 7.0))]
-    assert mask[np.argmin(np.abs(time - 13.0))]
-    assert not mask[np.argmin(np.abs(time - 8.0))]
-    assert not mask[np.argmin(np.abs(time - 12.0))]
-    assert np.sum(mask) < 40
-    assert np.array_equal(weights, np.where(mask, 0.0, 1.0))
-    assert len(iterations) == 1
-    assert iterations[0].added_points > 0
+    assert len(masks) == 1
+    assert masks[0][np.argmin(np.abs(time - 13.0))]
+    assert not masks[0][np.argmin(np.abs(time - 11.0))]
+    assert not masks[0][np.argmin(np.abs(time - 15.0))]
 
 
 def _fold_peak(time, t_start, t_end, *, strength=20.0):
@@ -609,93 +564,43 @@ def test_fold_caustic_detector_rejects_symmetric_or_disconnected_peaks():
     assert len(split.edges) == 2
 
 
-def test_smooth_departure_masker_bridges_until_sustained_baseline_return():
-    time = np.arange(30, dtype=float)
+def test_local_trend_change_masker_brackets_a_break_from_smooth_trend():
+    time = np.arange(80, dtype=float)
     ferr = np.ones(time.shape, dtype=float)
-    features = PlanetFeatureResult(
-        peaks=(
-            _fold_peak(8.0, 7.0, 9.0),
-            _fold_peak(21.0, 20.0, 22.0),
-        ),
-        dips=(),
-    )
-    connected_residual = np.zeros(time.shape, dtype=float)
-    connected_residual[7:23] = 10.0
-    returned_residual = connected_residual.copy()
-    returned_residual[14:16] = 0.0
-    masker = SmoothDepartureMasker()
+    residual = 0.1 * time
+    residual[25:36] += 4.0 * np.arange(11)
+    residual[36:47] += 4.0 * np.arange(10, -1, -1)
+    support = (time >= 31.0) & (time <= 40.0)
 
-    connected = masker.run_arrays(
+    mask = LocalTrendChangeMasker().run_arrays(
         time=time,
-        residual=connected_residual,
+        residual=residual,
         ferr=ferr,
-        features=features,
+        support_mask=support,
     )
-    returned = masker.run_arrays(
+
+    assert np.all(mask[25:46])
+    assert not np.any(mask[:15])
+    assert not np.any(mask[57:])
+
+
+def test_local_trend_change_masker_does_not_cross_a_long_data_gap():
+    time = np.r_[np.arange(40), np.arange(60, 100)].astype(float)
+    ferr = np.ones(time.shape, dtype=float)
+    residual = 0.1 * time
+    residual[30:40] += np.arange(10, dtype=float) * 5.0
+    residual[40:50] += np.arange(10, 0, -1, dtype=float) * 5.0
+    support = np.zeros(time.shape, dtype=bool)
+    support[35:45] = True
+
+    mask = LocalTrendChangeMasker().run_arrays(
         time=time,
-        residual=returned_residual,
+        residual=residual,
         ferr=ferr,
-        features=features,
-    )
-    opposite = masker.run_arrays(
-        time=time,
-        residual=connected_residual,
-        ferr=ferr,
-        features=PlanetFeatureResult(
-            peaks=(features.peaks[0],),
-            dips=(
-                replace(
-                    features.peaks[1],
-                    kind="dip",
-                    signed_z=-features.peaks[1].signed_z,
-                ),
-            ),
-        ),
+        support_mask=support,
     )
 
-    assert np.all(connected[7:23])
-    assert np.all(returned[7:10])
-    assert np.all(returned[20:23])
-    assert not np.any(returned[10:20])
-    assert not np.any(opposite[10:20])
-
-
-def test_smooth_departure_masker_tolerates_short_holes_but_not_long_gaps():
-    masker = SmoothDepartureMasker()
-    ferr = np.ones(29, dtype=float)
-    short_hole_time = np.r_[np.arange(14), np.arange(15, 30)].astype(float)
-    short_hole_features = PlanetFeatureResult(
-        peaks=(
-            _fold_peak(8.0, 7.0, 9.0),
-            _fold_peak(21.0, 20.0, 22.0),
-        ),
-        dips=(),
-    )
-
-    short_hole = masker.run_arrays(
-        time=short_hole_time,
-        residual=np.full(short_hole_time.shape, 10.0),
-        ferr=ferr,
-        features=short_hole_features,
-    )
-
-    long_gap_time = np.r_[np.arange(14), np.arange(30, 45)].astype(float)
-    long_gap_features = PlanetFeatureResult(
-        peaks=(
-            _fold_peak(8.0, 7.0, 9.0),
-            _fold_peak(35.0, 34.0, 36.0),
-        ),
-        dips=(),
-    )
-    long_gap = masker.run_arrays(
-        time=long_gap_time,
-        residual=np.full(long_gap_time.shape, 10.0),
-        ferr=ferr,
-        features=long_gap_features,
-    )
-
-    assert np.all(short_hole[(short_hole_time >= 7.0) & (short_hole_time <= 22.0)])
-    assert not np.any(long_gap[(long_gap_time > 9.0) & (long_gap_time < 34.0)])
+    assert not np.any(mask)
 
 
 def test_residual_measurement_config_marks_frozen_characterization_pass():
