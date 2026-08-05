@@ -67,6 +67,10 @@ def main() -> None:
         "--current-site-dir-name",
         default="anomaly_finder_model_result",
     )
+    parser.add_argument(
+        "--variant-name",
+        default="feature-derived fit mask trial",
+    )
     parser.add_argument("--event-timeout", type=int, default=600)
     parser.add_argument(
         "--html-only",
@@ -188,7 +192,7 @@ def main() -> None:
         "ROMAN_HTML_DIR": str(site_dir),
         "ROMAN_EVENT_FILTER": event_arg,
         "ROMAN_SPARSE_SITE": "1",
-        "ROMAN_SITE_VARIANT_NAME": "feature-derived fit mask trial",
+        "ROMAN_SITE_VARIANT_NAME": str(args.variant_name),
         "ROMAN_SITE_VARIANT_PEER_DIR": str(args.current_site_dir_name),
         "ROMAN_SITE_VARIANT_PEER_LABEL": "Current mask",
         # This focused trial is driven entirely by the trial's adopted-model

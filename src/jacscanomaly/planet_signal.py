@@ -462,6 +462,89 @@ class PlanetFeatureResult:
 
 
 @dataclass(frozen=True)
+class FoldCausticConfig:
+    """Resolution-based controls for fold-caustic entry/exit detection."""
+
+    min_asymmetry_cadences: float = 2.0
+
+
+@dataclass(frozen=True)
+class FoldCausticEdge:
+    """One resolved asymmetric peak interpreted as an entry or exit edge."""
+
+    orientation: str
+    feature: PlanetFeature
+    left_width: float
+    right_width: float
+    asymmetry: float
+    asymmetry_cadences: float
+
+    def summary_dict(self) -> dict[str, object]:
+        return {
+            "orientation": self.orientation,
+            "time": float(self.feature.time),
+            "t_start": float(self.feature.t_start),
+            "t_end": float(self.feature.t_end),
+            "left_width": float(self.left_width),
+            "right_width": float(self.right_width),
+            "asymmetry": float(self.asymmetry),
+            "asymmetry_cadences": float(self.asymmetry_cadences),
+            "strength": float(self.feature.strength),
+        }
+
+
+@dataclass(frozen=True)
+class FoldCausticPair:
+    """A time-reversed entry/exit pair with continuous anomalous interior."""
+
+    entry: FoldCausticEdge
+    exit: FoldCausticEdge
+    t_start: float
+    t_end: float
+    n_points: int
+    minimum_interior_energy: float
+
+    def summary_dict(self) -> dict[str, object]:
+        return {
+            "t_start": float(self.t_start),
+            "t_end": float(self.t_end),
+            "n_points": int(self.n_points),
+            "minimum_interior_energy": float(self.minimum_interior_energy),
+            "entry": self.entry.summary_dict(),
+            "exit": self.exit.summary_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class FoldCausticResult:
+    """Resolved fold-caustic edges and compatible entry/exit pairs."""
+
+    edges: Tuple[FoldCausticEdge, ...]
+    pairs: Tuple[FoldCausticPair, ...]
+
+    @property
+    def detected(self) -> bool:
+        return bool(self.pairs)
+
+    def summary_dict(self) -> dict[str, object]:
+        return {
+            "detected": self.detected,
+            "n_edges": len(self.edges),
+            "n_pairs": len(self.pairs),
+            "edges": [edge.summary_dict() for edge in self.edges],
+            "pairs": [pair.summary_dict() for pair in self.pairs],
+        }
+
+    def interval_mask(self, time: np.ndarray) -> np.ndarray:
+        """Return the union of detected entry-to-exit intervals."""
+        time = np.asarray(time, dtype=float)
+        mask = np.zeros(time.shape, dtype=bool)
+        for pair in self.pairs:
+            mask |= (time >= float(pair.t_start)) & (time <= float(pair.t_end))
+        return mask
+
+
+@dataclass(frozen=True)
 class PlanetSignalResult:
     """
     Result of :class:`PlanetSignalExtractor`.
@@ -523,6 +606,20 @@ class PlanetSignalResult:
         """
         cfg = PlanetFeatureConfig() if config is None else config
         return _PlanetFeatureDetector(cfg).run(self)
+
+    def detect_fold_caustics(
+        self,
+        config: Optional[FoldCausticConfig] = None,
+        feature_config: Optional[PlanetFeatureConfig] = None,
+    ) -> FoldCausticResult:
+        """Detect resolved entry/exit morphology without fitting a template."""
+        return FoldCausticDetector(
+            config=FoldCausticConfig() if config is None else config,
+            feature_config=(
+                PlanetFeatureConfig()
+                if feature_config is None else feature_config
+            ),
+        ).run(self)
 
     def plot_signal(
         self,
@@ -798,6 +895,126 @@ class PlanetSignalResult:
                     label=line_label if ax is ax_peak else None,
                     zorder=4,
                 )
+
+
+@dataclass(frozen=True)
+class FoldCausticDetector:
+    """Detect complementary fold-caustic edges from measured peak shapes.
+
+    A resolved entry peak rises faster than it decays (``fast_slow``); a
+    resolved exit peak has the time-reversed shape (``slow_fast``).  The
+    asymmetry must be resolved by the data cadence, not merely exceed a width
+    ratio.  A pair is retained only when the residual does not return to the
+    noise floor for a full feature-smoothing span between its edges.
+    """
+
+    config: FoldCausticConfig = FoldCausticConfig()
+    feature_config: PlanetFeatureConfig = PlanetFeatureConfig()
+
+    def run(self, result: PlanetSignalResult) -> FoldCausticResult:
+        return self.run_arrays(
+            time=np.asarray(result.time, dtype=float),
+            residual=np.asarray(result.refined_residual, dtype=float),
+            ferr=np.asarray(result.ferr, dtype=float),
+            features=result.measure_features(self.feature_config),
+        )
+
+    def run_arrays(
+        self,
+        *,
+        time: np.ndarray,
+        residual: np.ndarray,
+        ferr: np.ndarray,
+        features: PlanetFeatureResult,
+    ) -> FoldCausticResult:
+        time = np.asarray(time, dtype=float).reshape(-1)
+        residual = np.asarray(residual, dtype=float).reshape(-1)
+        ferr = np.asarray(ferr, dtype=float).reshape(-1)
+        if not (time.size == residual.size == ferr.size):
+            raise ValueError("time, residual, and ferr must have matching sizes")
+        positive_dt = np.diff(time)
+        positive_dt = positive_dt[np.isfinite(positive_dt) & (positive_dt > 0.0)]
+        if positive_dt.size == 0:
+            return FoldCausticResult(edges=(), pairs=())
+        cadence = float(np.median(positive_dt))
+        min_cadences = max(float(self.config.min_asymmetry_cadences), 0.0)
+
+        edges: list[FoldCausticEdge] = []
+        for feature in features.peaks:
+            left = max(float(feature.time) - float(feature.t_start), 0.0)
+            right = max(float(feature.t_end) - float(feature.time), 0.0)
+            total = left + right
+            if total <= 0.0:
+                continue
+            delta = right - left
+            resolved = abs(delta) / max(cadence, 1.0e-12)
+            if resolved < min_cadences:
+                continue
+            edges.append(
+                FoldCausticEdge(
+                    orientation=("entry" if delta > 0.0 else "exit"),
+                    feature=feature,
+                    left_width=left,
+                    right_width=right,
+                    asymmetry=delta / total,
+                    asymmetry_cadences=resolved,
+                )
+            )
+        edges.sort(key=lambda edge: edge.feature.time)
+
+        z = residual / np.maximum(ferr, 1.0e-12)
+        width = max(int(self.feature_config.smooth_points), 1)
+        energy = np.sqrt(
+            np.maximum(_PlanetFeatureDetector._smooth(z * z, width), 0.0)
+        )
+        pairs: list[FoldCausticPair] = []
+        pending_entry: Optional[FoldCausticEdge] = None
+        for edge in edges:
+            if edge.orientation == "entry":
+                pending_entry = edge
+                continue
+            if pending_entry is None:
+                continue
+            interior = (
+                (time >= float(pending_entry.feature.time))
+                & (time <= float(edge.feature.time))
+            )
+            indices = np.flatnonzero(interior)
+            if indices.size < 2:
+                pending_entry = None
+                continue
+            local_dt = np.diff(time[indices])
+            if np.any(local_dt > float(width) * cadence):
+                pending_entry = None
+                continue
+            low = np.abs(z[indices]) < float(
+                self.feature_config.duration_min_abs_z
+            )
+            if self._longest_true_run(low) >= width:
+                pending_entry = None
+                continue
+            pairs.append(
+                FoldCausticPair(
+                    entry=pending_entry,
+                    exit=edge,
+                    t_start=float(pending_entry.feature.t_start),
+                    t_end=float(edge.feature.t_end),
+                    n_points=int(indices.size),
+                    minimum_interior_energy=float(np.min(energy[indices])),
+                )
+            )
+            pending_entry = None
+        return FoldCausticResult(edges=tuple(edges), pairs=tuple(pairs))
+
+    @staticmethod
+    def _longest_true_run(values: np.ndarray) -> int:
+        longest = 0
+        current = 0
+        for value in np.asarray(values, dtype=bool):
+            current = current + 1 if value else 0
+            longest = max(longest, current)
+        return longest
+
 
 @dataclass
 class _PlanetFeatureDetector:

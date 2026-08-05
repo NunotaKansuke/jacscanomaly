@@ -27,6 +27,11 @@ from .template_free import (
 )
 from .planet_signal import (
     FlatBaselineDiagnostic,
+    FoldCausticConfig,
+    FoldCausticDetector,
+    FoldCausticEdge,
+    FoldCausticPair,
+    FoldCausticResult,
     PlanetFeature,
     PlanetFeatureConfig,
     PlanetFeatureResult,
@@ -138,6 +143,11 @@ __all__ = [
     "TemplateFreeSearchConfig",
     "TemplateFreeSearchResult",
     "FlatBaselineDiagnostic",
+    "FoldCausticConfig",
+    "FoldCausticDetector",
+    "FoldCausticEdge",
+    "FoldCausticPair",
+    "FoldCausticResult",
     "PlanetFeature",
     "PlanetFeatureConfig",
     "PlanetFeatureResult",

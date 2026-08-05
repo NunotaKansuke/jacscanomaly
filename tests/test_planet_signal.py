@@ -8,7 +8,11 @@ from jacscanomaly import (
     Finder,
     FinderConfig,
     FlatBaselineDiagnostic,
+    FoldCausticDetector,
+    FoldCausticResult,
     PlanetFeatureConfig,
+    PlanetFeature,
+    PlanetFeatureResult,
     PlanetSignalCandidate,
     PlanetSignalConfig,
     PlanetSignalExtractor,
@@ -517,6 +521,91 @@ def test_feature_mask_refinement_masks_local_features_not_finder_support(
     assert np.array_equal(weights, np.where(mask, 0.0, 1.0))
     assert len(iterations) == 1
     assert iterations[0].added_points > 0
+
+
+def _fold_peak(time, t_start, t_end, *, strength=20.0):
+    return PlanetFeature(
+        kind="peak",
+        index=int(round(time)),
+        time=float(time),
+        t_start=float(t_start),
+        t_end=float(t_end),
+        timescale=float(t_end - t_start),
+        strength=float(strength),
+        signed_z=float(strength),
+        residual=1.0,
+        fractional_deviation=0.1,
+        magnification_ratio=1.1,
+    )
+
+
+def test_fold_caustic_detector_pairs_resolved_time_reversed_edges():
+    time = np.arange(30, dtype=float)
+    ferr = np.ones(time.shape, dtype=float)
+    residual = np.full(time.shape, 10.0)
+    features = PlanetFeatureResult(
+        peaks=(
+            _fold_peak(8.0, 7.0, 12.0),
+            _fold_peak(21.0, 17.0, 22.0),
+        ),
+        dips=(),
+    )
+
+    result = FoldCausticDetector().run_arrays(
+        time=time,
+        residual=residual,
+        ferr=ferr,
+        features=features,
+    )
+
+    assert isinstance(result, FoldCausticResult)
+    assert result.detected
+    assert [edge.orientation for edge in result.edges] == [
+        "entry",
+        "exit",
+    ]
+    assert len(result.pairs) == 1
+    assert result.pairs[0].t_start == 7.0
+    assert result.pairs[0].t_end == 22.0
+    assert np.array_equal(
+        result.interval_mask(time),
+        (time >= 7.0) & (time <= 22.0),
+    )
+
+
+def test_fold_caustic_detector_rejects_symmetric_or_disconnected_peaks():
+    time = np.arange(40, dtype=float)
+    ferr = np.ones(time.shape, dtype=float)
+    residual = np.full(time.shape, 10.0)
+    disconnected = residual.copy()
+    disconnected[13:22] = 0.0
+
+    symmetric = FoldCausticDetector().run_arrays(
+        time=time,
+        residual=residual,
+        ferr=ferr,
+        features=PlanetFeatureResult(
+            peaks=(_fold_peak(10.0, 7.0, 13.0),),
+            dips=(),
+        ),
+    )
+    split = FoldCausticDetector().run_arrays(
+        time=time,
+        residual=disconnected,
+        ferr=ferr,
+        features=PlanetFeatureResult(
+            peaks=(
+                _fold_peak(8.0, 7.0, 12.0),
+                _fold_peak(27.0, 23.0, 28.0),
+            ),
+            dips=(),
+        ),
+    )
+
+    assert not symmetric.detected
+    assert symmetric.edges == ()
+    assert not split.detected
+    assert len(split.edges) == 2
 
 
 def test_residual_measurement_config_marks_frozen_characterization_pass():
