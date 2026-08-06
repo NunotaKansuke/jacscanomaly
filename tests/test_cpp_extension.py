@@ -76,24 +76,6 @@ def test_cpp_pspl_fitter_retries_nonnegative_only_for_flux_cancellation(
     assert "nonnegative_flux_fallback" in fit.optimizer_status
 
 
-def test_binned_cpp_pspl_fitter_does_not_cross_observing_gaps():
-    import numpy as np
-    from jacscanomaly import BinnedCPPPSPLFitter
-
-    fitter = BinnedCPPPSPLFitter(bin_points=4, base_fitter=object())
-    time = np.r_[np.arange(8), np.arange(100, 108)].astype(float)
-    flux = np.r_[np.ones(8), np.full(8, 3.0)]
-    ferr = np.ones(time.shape, dtype=float)
-
-    binned_time, binned_flux, binned_ferr = fitter._bin_arrays(
-        time, flux, ferr
-    )
-
-    assert np.allclose(binned_time, [1.5, 5.5, 101.5, 105.5])
-    assert np.allclose(binned_flux, [1.0, 1.0, 3.0, 3.0])
-    assert np.allclose(binned_ferr, 0.5)
-
-
 def test_cpp_pspl_can_constrain_linear_fluxes_nonnegative():
     import numpy as np
     from jacscanomaly import _cpp_grid

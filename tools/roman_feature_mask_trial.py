@@ -74,12 +74,6 @@ def main() -> None:
     )
     parser.add_argument("--event-timeout", type=int, default=600)
     parser.add_argument(
-        "--fit-bin-points",
-        type=int,
-        default=1,
-        help="Bin only scan-stage PSPL baseline fits by this many observations.",
-    )
-    parser.add_argument(
         "--html-only",
         action="store_true",
         help="Reuse existing scan/final JSON and rebuild only the sparse site.",
@@ -156,8 +150,6 @@ def main() -> None:
             str(scan_data),
             "--figure-dir",
             str(scan_figures),
-            "--fit-bin-points",
-            str(max(1, int(args.fit_bin_points))),
         ]
         if args.reuse:
             scan_command.append("--skip-existing")
