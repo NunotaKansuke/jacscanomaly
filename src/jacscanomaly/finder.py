@@ -1446,6 +1446,11 @@ class Finder:
                 "model_kind",
                 self._physical_model_kind(str(effect)),
             )
+        mask_protection = protected_support_mask(
+            time_np,
+            str(effect),
+            np.asarray(selected_fit.params, dtype=float),
+        )
         return PlanetSignalExtractor(self, post_config).run(
             time_np,
             np.asarray(flux, dtype=float),
@@ -1457,6 +1462,7 @@ class Finder:
             freeze_baseline=False,
             detection_stage=detection_stage,
             baseline_refit_fitter=spec.fitter,
+            mask_protection=mask_protection,
         )
 
     def evaluate_saved_physical_solution(

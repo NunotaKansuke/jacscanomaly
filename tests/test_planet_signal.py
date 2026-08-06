@@ -648,6 +648,50 @@ def test_local_trend_change_masker_uses_material_outer_breaks():
     assert right == 4
 
 
+def test_post_physical_refinement_protects_physical_model_support(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+    import jacscanomaly.finder as finder_module
+    from jacscanomaly import Finder, PlanetSignalExtractor
+
+    captured = {}
+    sentinel = object()
+
+    monkeypatch.setattr(
+        finder_module,
+        "make_effect_fitter",
+        lambda *_args, **_kwargs: SimpleNamespace(fitter=object()),
+    )
+
+    def fake_run(_self, *_args, **kwargs):
+        captured["mask_protection"] = np.asarray(
+            kwargs["mask_protection"], dtype=bool
+        )
+        return sentinel
+
+    monkeypatch.setattr(PlanetSignalExtractor, "run", fake_run)
+    time = np.linspace(-10.0, 10.0, 201)
+    selected_fit = SimpleNamespace(
+        params=np.asarray([0.0, 10.0, 0.1, 0.2]),
+        model_kind="fspl",
+    )
+
+    result = Finder().refine_planet_after_physical(
+        time,
+        np.ones(time.shape),
+        np.ones(time.shape),
+        selected_fit=selected_fit,
+        effect="fspl",
+    )
+
+    assert result is sentinel
+    protection = captured["mask_protection"]
+    assert protection[np.argmin(np.abs(time))]
+    assert not protection[0]
+    assert not protection[-1]
+
+
 def test_residual_measurement_config_marks_frozen_characterization_pass():
     config = PlanetSignalConfig.residual_measurement()
 
