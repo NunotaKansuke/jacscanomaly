@@ -565,6 +565,7 @@ class Finder:
                 else float(self.config.max_piE)
             ),
             min_bic_improvement=config.min_bic_improvement,
+            min_fspl_full_bic_improvement=config.min_fspl_full_bic_improvement,
         )
         projector = None if spec is None else getattr(spec.fitter, "_P", None)
 

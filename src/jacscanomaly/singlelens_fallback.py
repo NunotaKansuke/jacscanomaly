@@ -37,6 +37,13 @@ class FallbackConfig:
     t0_offsets: tuple[float, ...] = (-0.25, 0.0, 0.25)
     max_piE: Optional[float] = None
     min_bic_improvement: float = 0.0
+    # A compact FSPL crossing can be excluded from the complementary
+    # (non-planet) selection set.  In that case the clean-region BIC is
+    # intentionally blind to the very samples that distinguish FSPL from
+    # PSPL.  Permit a rescue only when a numerically valid FSPL fit also wins
+    # decisively on the complete light curve; the relatively large default
+    # keeps this from turning a small local PSPL adjustment into an FSPL.
+    min_fspl_full_bic_improvement: float = 1.0e3
     min_coherent_parallax_tE: float = 20.0
 
 
@@ -1145,6 +1152,44 @@ def run_robust_fallback(
         and np.isfinite(best.original_chi2)
         and np.all(np.isfinite(_fit_raw_parameters(best.result.fit)))
     )
+    # The ordinary BIC above is deliberately evaluated on the complementary
+    # clean region whenever a planet interval is known.  That is the right
+    # guard for parallax (a parallax model must not win by fitting a planet),
+    # but it is incomplete for FSPL: the finite-source crossing is itself a
+    # compact signal and is therefore part of the excluded interval.  A
+    # valid FSPL fit can consequently improve the full light curve by orders
+    # of magnitude while having no clean-region gain.  Re-open that narrow
+    # case using a *full-data* BIC and an independently strong FSPL detector
+    # score.  The score, stable detector support, and chi2/dof guard are all
+    # required so a toy/local planet-only fit cannot pass this rescue.
+    full_bic_improvement = float(
+        baseline_original_chi2
+        + baseline_dimension * np.log(n_data)
+        - best.original_chi2
+        - selected_dimension * np.log(n_data)
+    )
+    fspl_detector_support = any(
+        candidate.effect == "fspl"
+        and float(candidate.score) >= float(
+            max(1.0e3, config.min_fspl_full_bic_improvement)
+        )
+        and float(candidate.coverage) >= 0.02
+        and float(candidate.subset_stability) >= 0.75
+        and candidate.morphology not in {"planet_like", "mixed_or_planet"}
+        for candidate in candidate_tuple
+    )
+    fspl_full_fit_acceptance = bool(
+        "fspl" in str(effect)
+        and numerically_valid
+        and fspl_detector_support
+        and selected_reduced_chi2 <= 2.0
+        and np.isfinite(full_bic_improvement)
+        and full_bic_improvement
+        >= float(config.min_fspl_full_bic_improvement)
+    )
+    if fspl_full_fit_acceptance:
+        reasons.append("fspl_full_data_bic_rescue")
+        reasons.append("clean_region_bic_not_applicable_to_fspl_support")
     # Physical diagnostics decide whether this expensive fit should run.
     # Once it has run, selection is deliberately model-based: retain every
     # numerically valid, non-boundary solution whose BIC improves on its
@@ -1153,8 +1198,10 @@ def run_robust_fallback(
     # better single-lens model.
     success = bool(
         numerically_valid
-        and model_selection_improved
-        and clean_region_acceptable
+        and (
+            (model_selection_improved and clean_region_acceptable)
+            or fspl_full_fit_acceptance
+        )
     )
     if success:
         reasons.append("accepted_by_postfit_validity_and_bic")

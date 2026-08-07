@@ -298,6 +298,78 @@ def test_partial_fspl_signed_topology_cannot_override_clean_region_bic(monkeypat
     assert "fallback_acceptance_failed" in result.reason_codes
 
 
+def test_fspl_full_data_rescue_when_crossing_is_excluded(monkeypatch):
+    """The compact FSPL crossing must not be vetoed by the clean-region BIC."""
+    import jacscanomaly.singlelens_fallback as fallback_module
+
+    time = np.arange(40.0)
+    ferr = np.ones(40)
+    known_planet = time < 20.0
+    baseline = SimpleNamespace(
+        params=np.asarray([20.0, 10.0, 0.1]),
+        residual=np.where(known_planet, 50.0, 0.0),
+        chi2=50.0**2 * 20.0,
+    )
+    selected = SimpleNamespace(
+        params=np.asarray([20.0, 10.0, 0.1, 0.05]),
+        residual=np.zeros(40),
+        chi2=20.0,
+        optimizer_success=True,
+    )
+    segmentation = ContaminationSegmentation(
+        state=known_planet.astype(np.int8),
+        anomaly_probability=known_planet.astype(float),
+        blocks=((0, 19),),
+        objective=1.0,
+        anomaly_fraction=0.5,
+        anomaly_span_fraction=0.5,
+        protected_fraction=0.0,
+    )
+    monkeypatch.setattr(
+        fallback_module,
+        "robust_refine_with_fitter",
+        lambda *args, **kwargs: RobustFitResult(
+            fit=selected,
+            initial_fit=baseline,
+            final_weights=np.ones(40),
+            segmentation=segmentation,
+            iterations=(),
+            converged=True,
+            segmentation_stable=True,
+        ),
+    )
+    candidate = EffectCandidate(
+        effect="fspl",
+        score=100_000.0,
+        score_without_compact_blocks=5.0,
+        effective_rank=5,
+        condition_number=10.0,
+        coverage=0.2,
+        max_point_influence=0.1,
+        max_block_influence=0.1,
+        subset_stability=0.99,
+        morphology="ambiguous",
+    )
+
+    result = run_robust_fallback(
+        object(),
+        time,
+        np.ones(40),
+        ferr,
+        selected.params,
+        candidates=(candidate,),
+        effect="fspl",
+        config=FallbackConfig(parameter_dimension=4, max_seeds=1),
+        known_anomaly_mask=known_planet,
+        baseline_fit=baseline,
+        effect_score_fn=lambda fit, *_: 100_000.0 if fit is baseline else 1.0,
+    )
+
+    assert result.success
+    assert "fspl_full_data_bic_rescue" in result.reason_codes
+    assert "clean_region_bic_not_applicable_to_fspl_support" in result.reason_codes
+
+
 def test_clear_fspl_topology_can_override_segmenter_oscillation(monkeypatch):
     import jacscanomaly.singlelens_fallback as fallback_module
 
