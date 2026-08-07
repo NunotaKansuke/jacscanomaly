@@ -167,12 +167,12 @@ def test_planet_signal_extractor_frozen_baseline_never_refits(monkeypatch):
 
     assert result.refined_fit is initial_fit
     assert not result.signal_mask.any()
-    assert result.detection_mask is not None
-    assert result.detection_mask.any()
+    assert result.finder_support is not None
+    assert result.finder_support.any()
     assert result.best is not None
 
 
-def test_frozen_final_scan_uses_full_residual_and_separate_detection_support(
+def test_frozen_final_scan_uses_full_residual_and_separate_finder_support(
     monkeypatch,
 ):
     time = np.linspace(0.0, 20.0, 401)
@@ -235,9 +235,9 @@ def test_frozen_final_scan_uses_full_residual_and_separate_detection_support(
     assert len(calls) == 1
     assert np.allclose(calls[0], residual)
     assert not result.signal_mask.any()
-    assert result.detection_mask is not None
-    assert result.detection_mask[np.argmin(np.abs(time - 5.0))]
-    assert result.detection_mask[np.argmin(np.abs(time - 15.0))]
+    assert result.finder_support is not None
+    assert result.finder_support[np.argmin(np.abs(time - 5.0))]
+    assert result.finder_support[np.argmin(np.abs(time - 15.0))]
     assert len(result.candidates) == 2
     assert result.measure_features().n_peaks == 2
 
@@ -249,11 +249,11 @@ def test_separated_detection_regions_use_independent_feature_thresholds():
         1.0 * np.exp(-0.5 * ((time - 5.0) / 0.10) ** 2)
         + 0.08 * np.exp(-0.5 * ((time - 15.0) / 0.10) ** 2)
     )
-    detection_mask = (
+    finder_support = (
         (np.abs(time - 5.0) <= 0.35)
         | (np.abs(time - 15.0) <= 0.35)
     )
-    result = _feature_result(time, residual, ferr, residual, detection_mask)
+    result = _feature_result(time, residual, ferr, residual, finder_support)
 
     features = result.measure_features(
         PlanetFeatureConfig(min_abs_z=5.0, min_relative_strength=0.1)
@@ -437,6 +437,7 @@ def test_default_beam_uses_three_adaptive_single_branch_iterations():
     assert config.beam_width == 1
     assert config.beam_candidates_per_iter == 1
     assert config.fit_mask_from_local_trend is True
+    assert config.fit_mask_trend_growth_factors == (1.0, 2.0, 4.0)
 
 
 def test_beam_interval_keeps_compact_core_before_trend_refinement():
@@ -604,6 +605,33 @@ def test_local_trend_change_masker_brackets_a_break_from_smooth_trend():
     assert np.all(mask[25:46])
     assert not np.any(mask[:15])
     assert not np.any(mask[57:])
+
+
+def test_local_trend_change_masker_can_expand_search_around_compact_support():
+    time = np.arange(100, dtype=float)
+    ferr = np.ones(time.shape, dtype=float)
+    residual = np.zeros(time.shape, dtype=float)
+    residual[30:46] = 4.0 * np.arange(16)
+    residual[46:62] = 4.0 * np.arange(15, -1, -1)
+    support = np.zeros(time.shape, dtype=bool)
+    support[44:50] = True
+
+    compact = LocalTrendChangeMasker(search_extent_factor=1.0).run_arrays(
+        time=time,
+        residual=residual,
+        ferr=ferr,
+        support_mask=support,
+    )
+    expanded = LocalTrendChangeMasker(search_extent_factor=4.0).run_arrays(
+        time=time,
+        residual=residual,
+        ferr=ferr,
+        support_mask=support,
+    )
+
+    assert not np.any(compact)
+    assert np.any(expanded)
+    assert np.all(expanded[30:62])
 
 
 def test_local_trend_change_masker_does_not_cross_a_long_data_gap():
@@ -1123,6 +1151,37 @@ def test_signal_half_width_cap_uses_fitted_teff_on_healthy_fit():
     )
 
     assert extractor._signal_half_width_cap(fit) == pytest.approx(1.2)
+
+
+def test_compact_mask_keeps_the_scale_that_created_the_proposal():
+    time = np.linspace(0.0, 20.0, 401)
+    flux = 1.0 + np.exp(-0.5 * ((time - 10.0) / 2.0) ** 2)
+    common = {
+        "time": time,
+        "flux": flux,
+        "ferr": np.full_like(time, 0.01),
+        "residual": np.zeros_like(time),
+    }
+    reference_fit = SimpleNamespace(
+        **common,
+        params=np.asarray([10.0, 40.0, 0.03]),
+    )
+    candidate_fit = SimpleNamespace(
+        **common,
+        params=np.asarray([10.0, 30.0, 0.03]),
+    )
+    mask = (time >= 9.0) & (time <= 11.0)
+    extractor = PlanetSignalExtractor(Finder(), PlanetSignalConfig())
+
+    assert not extractor._mask_is_compact_for_fit(
+        time, mask, candidate_fit
+    )
+    assert extractor._mask_is_compact_for_fit(
+        time,
+        mask,
+        candidate_fit,
+        reference_fit=reference_fit,
+    )
 
 
 def test_planet_feature_measurement_keeps_locally_prominent_smaller_peak():

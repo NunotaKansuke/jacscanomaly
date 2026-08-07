@@ -138,10 +138,10 @@ class AnomalyPipelineResult:
         return self.fit_exclusion_mask
 
     @property
-    def measurement_mask(self) -> np.ndarray:
-        """Final Finder support used only for feature characterization."""
+    def finder_support(self) -> np.ndarray:
+        """Finder alert region used only for anomaly characterization."""
 
-        return self.final_measurement.anomaly_support_mask()
+        return self.final_measurement.finder_support_array()
 
     @property
     def final_detection(self):

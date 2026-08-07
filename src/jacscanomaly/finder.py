@@ -1357,8 +1357,8 @@ class Finder:
             ),
             "fit_exclusion_mask_points": int(np.sum(fit_exclusion_mask)),
             "post_physical_refinement_reset": bool(post_refinement_reset),
-            "final_measurement_mask_points": int(
-                np.sum(final_measurement.anomaly_support_mask())
+            "final_finder_support_points": int(
+                np.sum(final_measurement.finder_support_array())
             ),
             "final_feature_count": int(features.n_peaks + features.n_dips),
             "anomaly_candidate_count": len(candidates),

@@ -150,9 +150,10 @@ frozen residual scan after model selection. It is the discovery decision;
 reporting layers and must not be used to rewrite that decision.
 
 ``result.fit_exclusion_mask`` contains only points excluded by an accepted
-continuation fit. ``result.measurement_mask`` is the union of supports from
-all accepted clusters in the independent full-residual Finder pass. It is
-used for characterization and must not be used as a fit or HTML removal mask.
+continuation fit. ``result.finder_support`` is the union of supports from all
+accepted clusters in the independent full-residual Finder pass. It is an
+anomaly alert region used for characterization and must not be used as a fit
+or HTML removal mask.
 
 Physical routing and observed time scale
 ----------------------------------------
@@ -194,6 +195,16 @@ residual:
 This stage returns candidate intervals, a refined baseline, and direct
 measurements of each peak and dip. It does not assign physical caustic labels
 or estimate binary-lens parameters.
+
+The beam fit first accepts a compact anomaly core.  Local trend boundaries
+are then searched with the successive radii in
+``fit_mask_trend_growth_factors``.  Each wider proposal is refitted and must
+improve the accepted continuation without exceeding
+``fit_mask_trend_max_fraction``.  An unstable or over-broad proposal rolls
+back to the last accepted fit and mask; it is never clipped to an arbitrary
+subset of points.  Compactness uses the larger of the pre- and post-refit
+``|tE*u0|`` scales so that a valid proposal cannot reject itself merely by
+shrinking the continuation fit's scale.
 
 For high-throughput first passes, use ``PlanetSignalConfig.fast()``.  It
 performs one beam iteration with one retained interval.  For routing-only

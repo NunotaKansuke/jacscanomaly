@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from functools import partial
 from time import perf_counter
 from typing import Optional, Tuple
 
@@ -87,6 +86,8 @@ class PlanetSignalConfig:
     # characterization remains downstream of the final all-residual scan.
     fit_mask_from_local_trend: bool = True
     fit_mask_trend_max_fraction: float = 0.02
+    fit_mask_trend_growth_factors: tuple[float, ...] = (1.0, 2.0, 4.0)
+    """Successive local-boundary search radii around an accepted mask core."""
     beam_probe_only: bool = False
     beam_teff_factors: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 32.0)
     beam_min_half_width: float = 0.0
@@ -110,7 +111,7 @@ class PlanetSignalConfig:
     scan_unimodal_max_lobes: int = 1
     # Compatibility marker for the frozen final-measurement pass.  That pass
     # now scans the complete residual once and stores Finder support in a
-    # separate detection mask; it never feeds that support back into a fit.
+    # separate alert region; it never feeds that support back into a fit.
     frozen_measurement_windows: bool = False
 
     @classmethod
@@ -565,22 +566,27 @@ class PlanetSignalResult:
     timing: PlanetSignalTiming = PlanetSignalTiming()
     observed_signal_scale: Optional[ObservedSignalScale] = None
     scan_decision: Optional[PlanetScanDecision] = None
-    detection_mask: Optional[np.ndarray] = None
+    finder_support: Optional[np.ndarray] = None
 
-    def anomaly_support_mask(self) -> np.ndarray:
-        """Return the final Finder support used for characterization.
+    def finder_support_array(self) -> np.ndarray:
+        """Return the Finder's anomaly-support region for characterization.
 
         ``signal_mask`` belongs to baseline fitting: its points may be removed
         or downweighted to keep a localized anomaly out of the single-lens
         solution.  A frozen final-residual scan has no fit mask.  It instead
         stores the support of the independent, all-data Finder pass in
-        ``detection_mask``.  Older results fall back to ``signal_mask``.
+        ``finder_support``.  Older in-memory results fall back to
+        ``signal_mask``.
         """
 
-        source = self.signal_mask if self.detection_mask is None else self.detection_mask
+        source = (
+            self.signal_mask
+            if self.finder_support is None
+            else self.finder_support
+        )
         mask = np.asarray(source, dtype=bool).reshape(-1)
         if mask.size != np.asarray(self.time).size:
-            raise ValueError("anomaly support mask must match time")
+            raise ValueError("finder support must match time")
         return mask
 
     def measure_features(
@@ -657,7 +663,9 @@ class PlanetSignalResult:
         import matplotlib.pyplot as plt
 
         t = self.time
-        signal = self.anomaly_support_mask()
+        # Orange/fit-exclusion points are the only mask shown as excluded.
+        # Finder support is an alert region, not a fit mask.
+        signal = np.asarray(self.signal_mask, dtype=bool)
         normal = ~signal
         z = self.refined_residual / self.ferr
 
@@ -819,7 +827,7 @@ class PlanetSignalResult:
             return (float(lo), float(hi))
 
         in_best = (
-            self.anomaly_support_mask()
+            self.finder_support_array()
             & (self.time >= self.best.t_start)
             & (self.time <= self.best.t_end)
         )
@@ -1031,6 +1039,7 @@ class LocalTrendChangeMasker:
     regression_points: int = 7
     min_slope_change_sigma: float = 5.0
     outer_break_fraction: float = 0.5
+    search_extent_factor: float = 1.0
 
     def run_arrays(
         self,
@@ -1074,8 +1083,14 @@ class LocalTrendChangeMasker:
         runs = self._true_runs(support)
         for run_index, (start, end) in enumerate(runs):
             span = end - start + 1
-            search_start = max(0, start - max(span, width))
-            search_end = min(time.size - 1, end + max(span, width))
+            search_extent = int(
+                np.ceil(
+                    max(span, width)
+                    * max(float(self.search_extent_factor), 0.0)
+                )
+            )
+            search_start = max(0, start - search_extent)
+            search_end = min(time.size - 1, end + search_extent)
             if run_index:
                 previous_end = runs[run_index - 1][1]
                 search_start = max(search_start, (previous_end + start) // 2 + 1)
@@ -1239,7 +1254,7 @@ class _PlanetFeatureDetector:
             residual=np.asarray(result.refined_residual, dtype=float),
             model_flux=np.asarray(result.refined_fit.model_flux, dtype=float),
             fit=result.refined_fit,
-            mask=result.anomaly_support_mask(),
+            mask=result.finder_support_array(),
         )
 
     def run_arrays(
@@ -1851,7 +1866,7 @@ class PlanetSignalExtractor:
                 initial_fit = self.finder._fixed_single_lens_from_x0(time_j, flux_j, ferr_j, x0_j)
 
         mode = str(self.config.baseline_mode).lower()
-        detection_mask: Optional[np.ndarray] = None
+        finder_support: Optional[np.ndarray] = None
         if freeze_baseline:
             (
                 current_fit,
@@ -1859,7 +1874,7 @@ class PlanetSignalExtractor:
                 point_weight,
                 iterations,
                 observed_initial_seed,
-                detection_mask,
+                finder_support,
             ) = self._run_frozen_baseline(
                 initial_fit=initial_fit,
                 time_j=time_j,
@@ -1972,6 +1987,7 @@ class PlanetSignalExtractor:
                         time_np,
                         signal_mask,
                         candidate_fit,
+                        reference_fit=current_fit,
                     )
                 ):
                     current_fit = candidate_fit
@@ -1990,18 +2006,18 @@ class PlanetSignalExtractor:
 
         initial_residual = np.asarray(jax.device_get(initial_fit.residual), dtype=float)
         refined_residual = np.asarray(jax.device_get(current_fit.residual), dtype=float)
-        if detection_mask is None:
-            detection_mask = np.asarray(signal_mask, dtype=bool).copy()
+        if finder_support is None:
+            finder_support = np.asarray(signal_mask, dtype=bool).copy()
         candidates = self._candidates_from_mask(
             time_np,
             refined_residual,
             ferr_np,
-            detection_mask,
+            finder_support,
         )
         best = max(candidates, key=lambda c: c.chi2, default=None)
         scale_mask = (
-            detection_mask
-            if np.any(detection_mask)
+            finder_support
+            if np.any(finder_support)
             else np.ones(time_np.size, dtype=bool)
         )
         observed_scale = measure_observed_signal_scale(
@@ -2046,7 +2062,7 @@ class PlanetSignalExtractor:
             ),
             observed_signal_scale=observed_scale,
             scan_decision=scan_decision,
-            detection_mask=detection_mask,
+            finder_support=finder_support,
         )
 
     def _prior_signal_window_mask(
@@ -2346,12 +2362,23 @@ class PlanetSignalExtractor:
         time: np.ndarray,
         mask: np.ndarray,
         fit: SingleLensFitResult,
+        *,
+        reference_fit: Optional[SingleLensFitResult] = None,
     ) -> bool:
-        """Reject a mask that becomes broad under the resulting fit's tE."""
+        """Reject masks broad under both the proposal and resulting fits.
+
+        A mask is proposed using the reference fit's event scale.  Removing
+        that signal may legitimately shrink ``|tE*u0|`` in the continuation
+        fit, so the proposal must not invalidate itself solely through that
+        shrinkage.  The larger of the pre/post scales is the stable bound.
+        """
         mask = np.asarray(mask, dtype=bool)
         if not np.any(mask):
             return True
-        max_span = 2.0 * self._signal_half_width_cap(fit)
+        caps = [self._signal_half_width_cap(fit)]
+        if reference_fit is not None:
+            caps.append(self._signal_half_width_cap(reference_fit))
+        max_span = 2.0 * max(caps)
         if not np.isfinite(max_span):
             return True
         indices = np.flatnonzero(mask)
@@ -2434,6 +2461,7 @@ class PlanetSignalExtractor:
                 time_np,
                 combined,
                 candidate_fit,
+                reference_fit=current_fit,
             ):
                 break
             allowed = current_unmasked_chi2_dof * (1.0 + float(self.config.max_unmasked_chi2_dof_increase))
@@ -2491,12 +2519,12 @@ class PlanetSignalExtractor:
         No previous fit mask is reused and no detected interval is suppressed
         before the scan.  The returned ``signal_mask`` is therefore empty: it
         remains exclusively a baseline-fitting concept.  Finder template
-        supports are returned separately as ``detection_mask`` for downstream
-        peak/dip characterization.
+        supports are returned separately as ``finder_support`` for downstream
+        peak/dip characterization.  They never exclude points from a fit.
         """
         residual_j = initial_fit.residual
         signal_mask = np.zeros(time_np.shape, dtype=bool)
-        detection_mask = np.zeros(time_np.shape, dtype=bool)
+        finder_support = np.zeros(time_np.shape, dtype=bool)
         scan_started = perf_counter()
         try:
             seasons, clusters_all, grid_metrics_all = self.finder.runner.run(
@@ -2520,7 +2548,7 @@ class PlanetSignalExtractor:
         # These are the Finder's own template supports, evaluated across the
         # whole light curve.  There is deliberately no tE/u0 cap, event window,
         # prior mask, or iterative suppression in this final detection pass.
-        detection_mask = self._detection_mask_from_scan(
+        finder_support = self._finder_support_from_scan(
             time_np=time_np,
             clusters_all=clusters_all,
             grid_metrics_all=grid_metrics_all,
@@ -2532,7 +2560,7 @@ class PlanetSignalExtractor:
             np.ones(time_np.shape, dtype=float),
             [],
             observed_initial_seed,
-            detection_mask,
+            finder_support,
         )
 
     def _run_robust_baseline(
@@ -2547,6 +2575,7 @@ class PlanetSignalExtractor:
     ) -> tuple[SingleLensFitResult, np.ndarray, np.ndarray, list[PlanetSignalIteration]]:
         current_fit = initial_fit
         point_weight = np.ones(time_np.shape, dtype=float)
+        signal_mask = np.zeros(time_np.shape, dtype=bool)
         iterations: list[PlanetSignalIteration] = []
         last_seed: Optional[BestCandidate] = None
 
@@ -2582,22 +2611,51 @@ class PlanetSignalExtractor:
                 1.0,
             )
             max_change = float(np.max(np.abs(updated_weight - point_weight)))
-            before = int(np.sum(point_weight <= float(self.config.signal_weight_threshold)))
-            point_weight = updated_weight
+            before = int(np.sum(signal_mask))
 
-            candidate_fit = self._fit_weighted_single_lens_and_evaluate_full(
-                time_j=time_j,
-                flux_j=flux_j,
-                ferr_j=ferr_j,
-                point_weight=point_weight,
-                x0_j=self._seed_for_refit(current_fit),
-                model_kind=getattr(current_fit, "model_kind", None),
+            try:
+                candidate_fit = self._fit_weighted_single_lens_and_evaluate_full(
+                    time_j=time_j,
+                    flux_j=flux_j,
+                    ferr_j=ferr_j,
+                    point_weight=updated_weight,
+                    x0_j=self._seed_for_refit(current_fit),
+                    model_kind=getattr(current_fit, "model_kind", None),
+                )
+            except ValueError:
+                break
+            candidate_mask = self._signal_mask_from_weight_and_residual(
+                fit=candidate_fit,
+                point_weight=updated_weight,
             )
+            if float(np.mean(candidate_mask)) > float(
+                self.config.max_mask_fraction
+            ):
+                break
+            if not self._continuation_fit_is_usable(candidate_fit):
+                break
+            if self._fit_is_catastrophically_worse(current_fit, candidate_fit):
+                break
+            if not self._mask_is_compact_for_fit(
+                time_np,
+                candidate_mask,
+                candidate_fit,
+                reference_fit=current_fit,
+            ):
+                break
+
+            keep = ~candidate_mask
+            old_unmasked = self._masked_chi2_dof(current_fit, keep)
+            new_unmasked = self._masked_chi2_dof(candidate_fit, keep)
+            allowed = old_unmasked * (
+                1.0 + float(self.config.max_unmasked_chi2_dof_increase)
+            )
+            if np.isfinite(old_unmasked) and new_unmasked > allowed:
+                break
+
             current_fit = candidate_fit
-            signal_mask = self._signal_mask_from_weight_and_residual(
-                fit=current_fit,
-                point_weight=point_weight,
-            )
+            point_weight = updated_weight
+            signal_mask = candidate_mask
             after = int(np.sum(signal_mask))
             iterations.append(
                 PlanetSignalIteration(
@@ -2613,16 +2671,6 @@ class PlanetSignalExtractor:
             if max_change < float(self.config.robust_min_weight_change):
                 break
 
-        signal_mask = self._signal_mask_from_weight_and_residual(
-            fit=current_fit,
-            point_weight=point_weight,
-        )
-        if np.mean(signal_mask) > float(self.config.max_mask_fraction):
-            order = np.argsort(point_weight)
-            keep_n = int(float(self.config.max_mask_fraction) * signal_mask.size)
-            clipped = np.zeros_like(signal_mask, dtype=bool)
-            clipped[order[:keep_n]] = signal_mask[order[:keep_n]]
-            signal_mask = clipped
         return current_fit, signal_mask, point_weight, iterations
 
     def _run_beam_interval_baseline(
@@ -2726,6 +2774,7 @@ class PlanetSignalExtractor:
                         time_np,
                         combined,
                         candidate_fit,
+                        reference_fit=branch.fit,
                     ):
                         continue
 
@@ -2806,7 +2855,7 @@ class PlanetSignalExtractor:
             )
             self._n_scans = getattr(self, "_n_scans", 0) + 1
 
-        support = self._detection_mask_from_scan(
+        support = self._finder_support_from_scan(
             time_np=time_np,
             clusters_all=clusters_all,
             grid_metrics_all=grid_metrics_all,
@@ -2814,77 +2863,104 @@ class PlanetSignalExtractor:
         if not np.any(support):
             return current_fit, current_mask, point_weight, iterations
 
-        trend_mask = LocalTrendChangeMasker().run_arrays(
-            time=time_np,
-            residual=np.asarray(jax.device_get(current_fit.residual), dtype=float),
-            ferr=ferr_np,
-            support_mask=support,
-        )
-        trend_mask = self._exclude_mask_protection(trend_mask)
-        combined = current_mask | trend_mask
         max_fraction = min(
             max(float(self.config.fit_mask_trend_max_fraction), 0.0),
             max(float(self.config.max_mask_fraction), 0.0),
         )
-        if (
-            np.array_equal(combined, current_mask)
-            or float(np.mean(combined)) > max_fraction
-        ):
-            return current_fit, current_mask, point_weight, iterations
-
-        try:
-            candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
-                time_j=time_j,
-                flux_j=flux_j,
-                ferr_j=ferr_j,
-                keep_mask_np=~combined,
-                x0_j=self._seed_for_refit(current_fit),
-                model_kind=getattr(current_fit, "model_kind", None),
-            )
-        except ValueError:
-            return current_fit, current_mask, point_weight, iterations
-        if not self._continuation_fit_is_usable(candidate_fit):
-            return current_fit, current_mask, point_weight, iterations
-        if self._continuation_hit_new_pspl_u0_bound(current_fit, candidate_fit):
-            return current_fit, current_mask, point_weight, iterations
-        # Other disconnected anomalies must not vote for a distorted baseline
-        # merely because this proposal did not mask them. Compare continuation
-        # fits only on points outside every Finder-supported component.
-        clean_keep = ~(support | combined)
-        old_unmasked = self._masked_chi2_dof(current_fit, clean_keep)
-        new_unmasked = self._masked_chi2_dof(candidate_fit, clean_keep)
-        allowed = old_unmasked * (
-            1.0 + float(self.config.max_unmasked_chi2_dof_increase)
-        )
-        if np.isfinite(old_unmasked) and new_unmasked > allowed:
-            return current_fit, current_mask, point_weight, iterations
-        if self._fit_is_catastrophically_worse(current_fit, candidate_fit):
-            return current_fit, current_mask, point_weight, iterations
-        if self._beam_score(candidate_fit, combined) >= self._beam_score(
-            current_fit, current_mask
-        ):
-            return current_fit, current_mask, point_weight, iterations
-
         seed = self.finder._pick_best_candidate(
             clusters_all,
             grid_metrics_all,
             seasons=seasons,
         )
         widened = list(iterations)
-        widened.append(
-            PlanetSignalIteration(
-                iteration=len(widened),
-                seed=seed,
-                n_masked_before=int(np.sum(current_mask)),
-                n_masked_after=int(np.sum(combined)),
-                added_points=int(np.sum(combined) - np.sum(current_mask)),
-                fit=candidate_fit,
-            )
+        accepted_fit = current_fit
+        accepted_mask = current_mask.copy()
+        growth_factors = sorted(
+            {
+                float(value)
+                for value in tuple(self.config.fit_mask_trend_growth_factors)
+                if np.isfinite(value) and float(value) > 0.0
+            }
         )
+        if not growth_factors:
+            growth_factors = [1.0]
+
+        # Expand the boundary search in stages.  Every stage starts from the
+        # last accepted fit/mask pair; the first unstable or over-broad stage
+        # simply rolls back to that pair.  No arbitrary subset of a rejected
+        # mask is retained.
+        for growth_factor in growth_factors:
+            trend_mask = LocalTrendChangeMasker(
+                search_extent_factor=float(growth_factor)
+            ).run_arrays(
+                time=time_np,
+                residual=np.asarray(
+                    jax.device_get(accepted_fit.residual), dtype=float
+                ),
+                ferr=ferr_np,
+                support_mask=support,
+            )
+            trend_mask = self._exclude_mask_protection(trend_mask)
+            combined = accepted_mask | trend_mask
+            if np.array_equal(combined, accepted_mask):
+                continue
+            if float(np.mean(combined)) > max_fraction:
+                break
+
+            try:
+                candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
+                    time_j=time_j,
+                    flux_j=flux_j,
+                    ferr_j=ferr_j,
+                    keep_mask_np=~combined,
+                    x0_j=self._seed_for_refit(accepted_fit),
+                    model_kind=getattr(accepted_fit, "model_kind", None),
+                )
+            except ValueError:
+                break
+            if not self._continuation_fit_is_usable(candidate_fit):
+                break
+            if self._continuation_hit_new_pspl_u0_bound(
+                accepted_fit, candidate_fit
+            ):
+                break
+            # Other disconnected anomalies must not vote for a distorted
+            # baseline merely because this proposal did not mask them.
+            clean_keep = ~(support | combined)
+            old_unmasked = self._masked_chi2_dof(accepted_fit, clean_keep)
+            new_unmasked = self._masked_chi2_dof(candidate_fit, clean_keep)
+            allowed = old_unmasked * (
+                1.0 + float(self.config.max_unmasked_chi2_dof_increase)
+            )
+            if np.isfinite(old_unmasked) and new_unmasked > allowed:
+                break
+            if self._fit_is_catastrophically_worse(
+                accepted_fit, candidate_fit
+            ):
+                break
+            if self._beam_score(candidate_fit, combined) >= self._beam_score(
+                accepted_fit, accepted_mask
+            ):
+                break
+
+            before = int(np.sum(accepted_mask))
+            accepted_fit = candidate_fit
+            accepted_mask = combined
+            widened.append(
+                PlanetSignalIteration(
+                    iteration=len(widened),
+                    seed=seed,
+                    n_masked_before=before,
+                    n_masked_after=int(np.sum(accepted_mask)),
+                    added_points=int(np.sum(accepted_mask)) - before,
+                    fit=accepted_fit,
+                )
+            )
+
         return (
-            candidate_fit,
-            combined,
-            np.where(combined, 0.0, 1.0),
+            accepted_fit,
+            accepted_mask,
+            np.where(accepted_mask, 0.0, 1.0),
             widened,
         )
 
@@ -3157,7 +3233,7 @@ class PlanetSignalExtractor:
             seasons=seasons,
         )
 
-    def _detection_mask_from_scan(
+    def _finder_support_from_scan(
         self,
         *,
         time_np: np.ndarray,
@@ -3165,7 +3241,7 @@ class PlanetSignalExtractor:
         grid_metrics_all: np.ndarray,
     ) -> np.ndarray:
         """Build full Finder support for local feature measurement."""
-        detection_mask = np.zeros(np.asarray(time_np).shape, dtype=bool)
+        finder_support = np.zeros(np.asarray(time_np).shape, dtype=bool)
         accepted = self.finder._accepted_candidates(
             np.asarray(clusters_all, dtype=float),
             np.asarray(grid_metrics_all, dtype=float),
@@ -3180,11 +3256,11 @@ class PlanetSignalExtractor:
                 max(float(self.finder.config.teff_coeff), 0.0)
                 * abs(float(candidate_teff))
             )
-            detection_mask |= (
+            finder_support |= (
                 np.abs(np.asarray(time_np, dtype=float) - float(candidate_t0))
                 <= half_width
             )
-        return detection_mask
+        return finder_support
 
     def _unimodal_scan_clusters(
         self,
@@ -3233,20 +3309,18 @@ class PlanetSignalExtractor:
             )
         else:
             is_unimodal = np.asarray(
-                jax.device_get(
-                    self._scan_grids_are_unimodal(
-                        time_j=time_j,
-                        residual_j=residual_j,
-                        ferr_j=ferr_j,
-                        t0_j=jnp.asarray(metrics[eval_idx, 0], dtype=time_j.dtype),
-                        teff_j=jnp.asarray(metrics[eval_idx, 1], dtype=time_j.dtype),
-                        teff_coeff=float(self.finder.config.teff_coeff),
-                        min_pts=int(self.finder.config.min_pts_in_window),
-                        min_improvement=float(self.config.scan_unimodal_min_improvement),
-                        peak_frac=float(self.config.scan_unimodal_peak_frac),
-                        smooth_points=int(self.config.scan_unimodal_smooth_points),
-                        max_lobes=int(self.config.scan_unimodal_max_lobes),
-                    )
+                self._scan_grids_are_unimodal(
+                    time_j=time_j,
+                    residual_j=residual_j,
+                    ferr_j=ferr_j,
+                    t0_j=np.asarray(metrics[eval_idx, 0], dtype=float),
+                    teff_j=np.asarray(metrics[eval_idx, 1], dtype=float),
+                    teff_coeff=float(self.finder.config.teff_coeff),
+                    min_pts=int(self.finder.config.min_pts_in_window),
+                    min_improvement=float(self.config.scan_unimodal_min_improvement),
+                    peak_frac=float(self.config.scan_unimodal_peak_frac),
+                    smooth_points=int(self.config.scan_unimodal_smooth_points),
+                    max_lobes=int(self.config.scan_unimodal_max_lobes),
                 ),
                 dtype=bool,
             )
@@ -3265,17 +3339,6 @@ class PlanetSignalExtractor:
         return clusters, filtered
 
     @staticmethod
-    @partial(
-        jax.jit,
-        static_argnames=(
-            "teff_coeff",
-            "min_pts",
-            "min_improvement",
-            "peak_frac",
-            "smooth_points",
-            "max_lobes",
-        ),
-    )
     def _scan_grids_are_unimodal(
         *,
         time_j: jnp.ndarray,
@@ -3289,39 +3352,43 @@ class PlanetSignalExtractor:
         peak_frac: float,
         smooth_points: int,
         max_lobes: int,
-    ) -> jnp.ndarray:
-        """Evaluate all candidate lobe tests in one JAX dispatch."""
+    ) -> np.ndarray:
+        """Evaluate candidate lobe tests without a secondary JAX dispatch."""
+        time = np.asarray(time_j, dtype=float)
+        residual = np.asarray(residual_j, dtype=float)
+        ferr = np.asarray(ferr_j, dtype=float)
+        t0s = np.asarray(t0_j, dtype=float).reshape(-1)
+        teffs = np.asarray(teff_j, dtype=float).reshape(-1)
         width = max(1, int(smooth_points))
         if width % 2 == 0:
             width += 1
-        pad = width // 2
-        kernel = jnp.ones((width,), dtype=time_j.dtype) / float(width)
-        weights = 1.0 / (ferr_j ** 2)
-
-        def one(t0, teff):
-            window = jnp.abs(time_j - t0) < float(teff_coeff) * jnp.abs(teff)
-            chi2_anom, chi2s_anom = get_chi2_anom_masked(
-                t0, teff, time_j, residual_j, weights, window
-            )
-            chi2_flat, chi2s_flat = get_chi2_flat_masked(residual_j, weights, window)
-            improvement = jnp.where(window, jnp.maximum(chi2s_flat - chi2s_anom, 0.0), 0.0)
-            peak = jnp.max(improvement)
-            threshold = jnp.maximum(float(min_improvement), float(peak_frac) * peak)
-            if width > 1:
-                smoothed = jnp.convolve(jnp.pad(improvement, (pad, pad), mode="edge"), kernel, mode="valid")
-            else:
-                smoothed = improvement
+        weights = 1.0 / np.square(ferr)
+        result = []
+        for t0, teff in zip(t0s, teffs):
+            window = np.abs(time - t0) < float(teff_coeff) * abs(float(teff))
+            _, chi2s_anom = get_chi2_anom_masked(t0, teff, time, residual, weights, window)
+            _, chi2s_flat = get_chi2_flat_masked(residual, weights, window)
+            improvement = np.where(window, np.maximum(chi2s_flat - chi2s_anom, 0.0), 0.0)
+            peak = float(np.max(improvement)) if improvement.size else 0.0
+            threshold = max(float(min_improvement), float(peak_frac) * peak)
+            smoothed = improvement
+            if width > 1 and improvement.size > 2:
+                pad = width // 2
+                smoothed = np.convolve(
+                    np.pad(improvement, (pad, pad), mode="edge"),
+                    np.ones(width, dtype=float) / float(width),
+                    mode="valid",
+                )
             active = window & (smoothed >= threshold)
-            starts = active & ~jnp.concatenate((jnp.zeros((1,), dtype=bool), active[:-1]))
-            lobes = jnp.sum(starts)
-            return (
-                (jnp.sum(window) >= int(min_pts))
-                & jnp.isfinite(peak)
-                & (peak > 0.0)
-                & (lobes <= int(max_lobes))
+            idx = np.flatnonzero(active)
+            lobes = 0 if idx.size == 0 else 1 + int(np.sum(np.diff(idx) > 1))
+            result.append(
+                bool(np.sum(window) >= int(min_pts)
+                     and np.isfinite(peak)
+                     and peak > 0.0
+                     and lobes <= int(max_lobes))
             )
-
-        return jax.vmap(one)(t0_j, teff_j)
+        return np.asarray(result, dtype=bool)
 
     def _scan_grid_is_unimodal(
         self,
@@ -3340,19 +3407,19 @@ class PlanetSignalExtractor:
         if int(np.sum(window)) < int(self.finder.config.min_pts_in_window):
             return False
 
-        w_j = 1.0 / (ferr_j ** 2)
-        mask_j = jnp.asarray(window)
+        w_j = 1.0 / np.square(ferr_np)
+        mask_j = window
         chi2_anom, chi2s_anom = get_chi2_anom_masked(
-            jnp.asarray(t0, dtype=time_j.dtype),
-            jnp.asarray(teff, dtype=time_j.dtype),
-            time_j,
-            residual_j,
+            t0,
+            teff,
+            time_np,
+            residual_np,
             w_j,
             mask_j,
         )
-        chi2_flat, chi2s_flat = get_chi2_flat_masked(residual_j, w_j, mask_j)
-        chi2s_flat_np = np.asarray(jax.device_get(chi2s_flat), dtype=float)
-        chi2s_anom_np = np.asarray(jax.device_get(chi2s_anom), dtype=float)
+        chi2_flat, chi2s_flat = get_chi2_flat_masked(residual_np, w_j, mask_j)
+        chi2s_flat_np = np.asarray(chi2s_flat, dtype=float)
+        chi2s_anom_np = np.asarray(chi2s_anom, dtype=float)
         improvement = np.where(window, np.maximum(chi2s_flat_np - chi2s_anom_np, 0.0), 0.0)
 
         in_window = improvement[window]
@@ -3408,20 +3475,20 @@ class PlanetSignalExtractor:
         if not np.any(seed_window):
             return np.zeros_like(seed_window, dtype=bool)
 
-        w_j = 1.0 / (ferr_j ** 2)
-        mask_j = jnp.asarray(seed_window)
+        w_j = 1.0 / np.square(ferr_np)
+        mask_j = np.asarray(seed_window, dtype=bool)
         chi2_anom, chi2s_anom = get_chi2_anom_masked(
-            jnp.asarray(seed_t0, dtype=time_j.dtype),
-            jnp.asarray(seed_teff, dtype=time_j.dtype),
-            time_j,
-            residual_j,
+            seed_t0,
+            seed_teff,
+            np.asarray(time_np, dtype=float),
+            residual_np,
             w_j,
             mask_j,
         )
-        chi2_flat, chi2s_flat = get_chi2_flat_masked(residual_j, w_j, mask_j)
+        chi2_flat, chi2s_flat = get_chi2_flat_masked(residual_np, w_j, mask_j)
 
-        chi2s_flat_np = np.asarray(jax.device_get(chi2s_flat), dtype=float)
-        chi2s_anom_np = np.asarray(jax.device_get(chi2s_anom), dtype=float)
+        chi2s_flat_np = np.asarray(chi2s_flat, dtype=float)
+        chi2s_anom_np = np.asarray(chi2s_anom, dtype=float)
         improvement = np.where(seed_window, np.maximum(chi2s_flat_np - chi2s_anom_np, 0.0), 0.0)
 
         peak_abs_z = float(np.max(abs_z[seed_window]))
