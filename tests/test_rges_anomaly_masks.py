@@ -7,7 +7,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.build_rges_anomaly_html import _roman_payload
-from tools.rges_anomaly_pipeline import _fit_exclusion_mask
+from tools.rges_anomaly_pipeline import (
+    _ecliptic_to_icrf,
+    _earth_position_at,
+    _fit_exclusion_mask,
+    _write_rges_space_ephemeris,
+)
+from jacscanomaly.parallax import load_vbm_satellite_file
 
 
 def test_fit_exclusion_mask_is_empty_without_accepted_refit():
@@ -29,6 +35,22 @@ def test_fit_exclusion_mask_keeps_only_zero_weight_signal_points():
         _fit_exclusion_mask(result),
         np.array([True, False, True, False]),
     )
+
+
+def test_rges_observer_positions_become_geocentric_space_ephemeris(tmp_path):
+    times = np.array([2459000.0, 2459001.0, 2459002.0])
+    earth = _earth_position_at(times)
+    geocentric_icrf = np.array(
+        [[0.012, -0.001, 0.0005], [0.0121, -0.0009, 0.0005], [0.0122, -0.0008, 0.0005]]
+    )
+    # RGES stores the complete observer orbit in ecliptic Cartesian AU.
+    observer_ecliptic = _ecliptic_to_icrf(earth + geocentric_icrf, -1.0)
+    path = _write_rges_space_ephemeris(
+        tmp_path, "beginner", times, observer_ecliptic
+    )
+    table = load_vbm_satellite_file(str(path))
+    assert table.shape == (3, 4)
+    np.testing.assert_allclose(table[:, 3], np.linalg.norm(geocentric_icrf, axis=1), atol=2e-6)
 
 
 def _row(series):

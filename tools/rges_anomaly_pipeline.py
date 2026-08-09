@@ -50,6 +50,7 @@ TIERS = {
 }
 FILT = "F146"
 SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+OBLIQUITY_DEG = 23.4392911
 
 
 def _json_safe(value: Any) -> Any:
@@ -125,14 +126,26 @@ def event_names(tier: str, output_dir: Path, *, refresh: bool = False) -> list[s
     return ordered
 
 
-def load_f146_event(tier: str, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-    """Read, quality-filter, sort, and normalise one F146 light curve."""
+def _load_f146_event_with_observer(
+    tier: str, name: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any], np.ndarray]:
+    """Read one F146 curve and retain the RGES observer positions internally."""
     ds, pc, _ = _require_pyarrow()
     spec = TIERS[tier]
     dataset = ds.dataset(spec["path"], format="parquet")
     expression = pc.equal(ds.field("name"), name) & pc.equal(ds.field("filt"), FILT)
     table = dataset.to_table(
-        columns=["bjd", spec["value"], spec["error"], "saturation_flag", "ra_deg", "dec_deg"],
+        columns=[
+            "bjd",
+            spec["value"],
+            spec["error"],
+            "saturation_flag",
+            "ra_deg",
+            "dec_deg",
+            "obs_x",
+            "obs_y",
+            "obs_z",
+        ],
         filter=expression,
     )
     time_values = np.asarray(table["bjd"].to_numpy(zero_copy_only=False), dtype=float)
@@ -141,6 +154,12 @@ def load_f146_event(tier: str, name: str) -> tuple[np.ndarray, np.ndarray, np.nd
     saturation = np.asarray(table["saturation_flag"].to_numpy(zero_copy_only=False))
     ra_values = np.asarray(table["ra_deg"].to_numpy(zero_copy_only=False), dtype=float)
     dec_values = np.asarray(table["dec_deg"].to_numpy(zero_copy_only=False), dtype=float)
+    observer_values = np.column_stack(
+        [
+            np.asarray(table[column].to_numpy(zero_copy_only=False), dtype=float)
+            for column in ("obs_x", "obs_y", "obs_z")
+        ]
+    )
 
     valid = (
         np.isfinite(time_values)
@@ -150,18 +169,21 @@ def load_f146_event(tier: str, name: str) -> tuple[np.ndarray, np.ndarray, np.nd
         & (saturation == 0)
         & np.isfinite(ra_values)
         & np.isfinite(dec_values)
+        & np.all(np.isfinite(observer_values), axis=1)
     )
     time_values = time_values[valid]
     values = values[valid]
     errors = errors[valid]
     ra_values = ra_values[valid]
     dec_values = dec_values[valid]
+    observer_values = observer_values[valid]
     order = np.argsort(time_values, kind="mergesort")
     time_values = time_values[order]
     values = values[order]
     errors = errors[order]
     ra_values = ra_values[order]
     dec_values = dec_values[order]
+    observer_values = observer_values[order]
     if time_values.size == 0:
         raise ValueError("no valid F146 points after quality filtering")
 
@@ -195,9 +217,116 @@ def load_f146_event(tier: str, name: str) -> tuple[np.ndarray, np.ndarray, np.nd
         "n_rejected_quality": int(table.num_rows - time_values.size),
         "ra_deg": float(np.median(ra_values)),
         "dec_deg": float(np.median(dec_values)),
-        "space_parallax_ephemeris": None,
+        "space_parallax_ephemeris": "rges_obs_xyz",
     }
+    return time_values, flux, ferr, metadata, observer_values
+
+
+def load_f146_event(
+    tier: str, name: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Read, quality-filter, sort, and normalise one F146 light curve."""
+    time_values, flux, ferr, metadata, _ = _load_f146_event_with_observer(tier, name)
     return time_values, flux, ferr, metadata
+
+
+def _earth_position_at(time_values: np.ndarray) -> np.ndarray:
+    """Interpolate the package Earth ephemeris at full-JD RGES timestamps."""
+    from importlib import resources
+    from jacscanomaly.parallax import load_horizons_vectors_file
+
+    earth_table = load_horizons_vectors_file(
+        str(resources.files("jacscanomaly.data").joinpath("earth_orbital_parallax_table.txt"))
+    )
+    times = np.asarray(time_values, dtype=float)
+    if times.size == 0 or times.min() < earth_table[0, 0] or times.max() > earth_table[-1, 0]:
+        raise ValueError("RGES observer timestamps fall outside the package Earth ephemeris support")
+    return np.column_stack(
+        [np.interp(times, earth_table[:, 0], earth_table[:, axis]) for axis in range(1, 4)]
+    )
+
+
+def _ecliptic_to_icrf(position: np.ndarray, sign: float = 1.0) -> np.ndarray:
+    """Rotate ecliptic Cartesian coordinates into the ICRF equatorial frame."""
+    angle = np.deg2rad(float(sign) * OBLIQUITY_DEG)
+    c, s = np.cos(angle), np.sin(angle)
+    rotation = np.asarray([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+    return np.asarray(position, dtype=float) @ rotation.T
+
+
+def _write_rges_space_ephemeris(
+    output_dir: Path,
+    tier: str,
+    time_values: np.ndarray,
+    observer_values: np.ndarray,
+) -> Path:
+    """Create the common RGES geocentric satellite table used by GULLS mode.
+
+    RGES ``obs_x/y/z`` are complete observer positions in ecliptic Cartesian
+    AU.  The native/GULLS backend consumes geocentric ICRF positions, so the
+    frame is selected by agreement with the package Earth ephemeris, converted
+    to ICRF, and the Earth position is removed before writing JD/RA/Dec/AU.
+    """
+    time_values = np.asarray(time_values, dtype=float).reshape(-1)
+    observer_values = np.asarray(observer_values, dtype=float).reshape(-1, 3)
+    if time_values.size != observer_values.shape[0] or time_values.size < 2:
+        raise ValueError("RGES observer ephemeris requires at least two time-position rows")
+    order = np.argsort(time_values, kind="mergesort")
+    times = time_values[order]
+    positions = observer_values[order]
+    unique, unique_index = np.unique(times, return_index=True)
+    times = unique
+    positions = positions[unique_index]
+
+    ephemeris_dir = Path(output_dir) / "ephemeris"
+    ephemeris_dir.mkdir(parents=True, exist_ok=True)
+    path = ephemeris_dir / "rges_space_parallax.txt"
+    # The cadence/observer orbit is shared by the RGES tiers.  Reuse the
+    # validated table for subsequent event subprocesses instead of rewriting
+    # tens of thousands of rows for every light curve.
+    if path.is_file() and path.stat().st_size > 0:
+        return path
+
+    earth = _earth_position_at(times)
+
+    candidates = {
+        "identity": positions,
+        "ecliptic_to_icrf": _ecliptic_to_icrf(positions, 1.0),
+        "ecliptic_to_icrf_reverse": _ecliptic_to_icrf(positions, -1.0),
+    }
+    # The RGES columns are complete heliocentric positions (radius ~1 AU).
+    # Choose the frame that agrees with the package ICRF Earth ephemeris.  The
+    # radius check prevents a genuinely geocentric input from being mistaken
+    # for a complete observer orbit.
+    scores = {
+        key: float(np.median(np.linalg.norm(value - earth, axis=1)))
+        for key, value in candidates.items()
+    }
+    frame_name = min(scores, key=scores.get)
+    complete_observer = candidates[frame_name]
+    if float(np.median(np.linalg.norm(complete_observer, axis=1))) > 0.2:
+        geocentric = complete_observer - earth
+        observer_kind = "complete_heliocentric"
+    else:
+        geocentric = complete_observer
+        observer_kind = "geocentric"
+    distances = np.linalg.norm(geocentric, axis=1)
+    if not np.all(np.isfinite(distances)) or np.any(distances <= 1.0e-8):
+        raise ValueError("RGES observer positions contain invalid geocentric distances")
+    ra = np.degrees(np.arctan2(geocentric[:, 1], geocentric[:, 0])) % 360.0
+    dec = np.degrees(np.arcsin(np.clip(geocentric[:, 2] / distances, -1.0, 1.0)))
+    table = np.column_stack((times, ra, dec, distances))
+
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    header = (
+        f"# RGES obs_xyz -> geocentric ICRF GULLS table; frame={frame_name}; "
+        f"observer={observer_kind}; score={scores[frame_name]:.8g}\n"
+    )
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(header)
+        np.savetxt(handle, table, fmt="%.12f")
+    temporary.replace(path)
+    return path
 
 
 def _fit_summary(fit: Any) -> dict[str, Any]:
@@ -364,9 +493,14 @@ def _run_one(
         PlanetSignalConfig,
     )
 
-    time_values, flux, ferr, metadata = load_f146_event(tier, name)
+    time_values, flux, ferr, metadata, observer_values = _load_f146_event_with_observer(
+        tier, name
+    )
     if time_values.size < min_points:
         raise ValueError(f"only {time_values.size} valid F146 points; need {min_points}")
+    space_ephemeris_path = _write_rges_space_ephemeris(
+        output_dir, tier, time_values, observer_values
+    )
 
     finder = Finder(
         FinderConfig(
@@ -375,6 +509,9 @@ def _run_one(
             grid_backend="cpp",
             ra_deg=float(metadata["ra_deg"]),
             dec_deg=float(metadata["dec_deg"]),
+            satellite_ephemeris_path=str(space_ephemeris_path),
+            parallax_geometry="space",
+            parallax_observer_convention="gulls",
             # RGES bjd values are full Julian Dates, unlike the Roman/GULLS
             # helper tables that use an offset HJD convention.
             parallax_time_scale="jd",
@@ -527,9 +664,9 @@ def _run_one(
                 if fallback_result is not None
                 else None
             ),
-            # Space-parallax requires an observer ephemeris, which is not part
-            # of these tier Parquet files. Annual parallax remains enabled.
-            "space_parallax_skipped": True,
+            "space_parallax_skipped": False,
+            "space_parallax_ephemeris": str(space_ephemeris_path),
+            "space_parallax_observer_convention": "gulls",
         },
         "template_scan": {
             "seed": _candidate_summary(result.initial_seed),

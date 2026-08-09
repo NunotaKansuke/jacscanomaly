@@ -1,6 +1,6 @@
 # RGES F146 anomaly finder パイプライン引き継ぎ
 
-最終更新: 2026-08-02
+最終更新: 2026-08-09
 対象コード: `/rogue1_8/nunota/jacscanomaly`
 公開先: `http://133.1.160.32/ou-moa/public/rges_anomaly_finder/`
 
@@ -8,17 +8,16 @@
 `jacscanomaly` に通し、イベント単位でHTML公開するrunの引き継ぎ用である。
 GitHubへの公開はしていない。
 
-## 現在のrun
+## 新しいrun
 
-現在のtmuxセッションは次の通り。
+以前の試行成果物は途中状態であり、現行コードの結果として扱わない。
+新しいrunでは`anomaly_finder_result`を空にして、最初から作り直す。
 
 ```text
-session: rges_f146_serial
-log:     /moao39_13/nunota/rges-data/rges_f146_serial_v10.log
-progress:/moao39_13/nunota/rges-data/anomaly_finder_progress.txt
+output:  /moao39_13/nunota/rges-data/anomaly_finder_result
 ```
 
-起動コマンド:
+scan起動コマンド（HTML・同期は最後に一括）:
 
 ```bash
 cd /rogue1_8/nunota/jacscanomaly
@@ -26,22 +25,13 @@ env OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1 JAX_NUM_THREADS=1 \
     taskset -c 0 \
     python tools/rges_anomaly_pipeline.py \
-      --tier both --force --build-html \
+      --tier both --force \
       --progress-file /moao39_13/nunota/rges-data/anomaly_finder_progress.txt \
-      >> /moao39_13/nunota/rges-data/rges_f146_serial_v10.log 2>&1
+      >> /moao39_13/nunota/rges-data/rges_f146_serial_current.log 2>&1
 ```
 
 `--force` を付けているため、以前の途中成果物をスキップせず全2267イベントを再計算する。
 現在の構成は1コア・直列で、1イベントの全処理が終わってから次のイベントへ進む。
-
-2026-08-02の確認時点では、全体 `923/2267 (40.71%)`、Experienced tier内では
-`736/2079` の開始直前まで進んでいる。正確な最新値は以下で確認する。
-
-```bash
-tail -20 /moao39_13/nunota/rges-data/rges_f146_serial_v10.log
-tail -1 /moao39_13/nunota/rges-data/anomaly_finder_progress.txt
-tmux has-session -t rges_f146_serial && echo alive
-```
 
 進捗ファイルはイベント完了ごとに次の形式で追記される。
 
@@ -67,7 +57,7 @@ band:        F146のみ
 F146読込・品質filter
   → PSPL初期fit
   → 惑星signal before scan / refine
-  → FSPL・annual parallax等のeffect routing
+  → FSPL・annual/space parallax等のeffect routing
   → 必要な場合だけphysical fallback
   → 採用single-lensモデル決定
   → 採用モデルをwarm startしたpost-physical惑星再探索
@@ -87,10 +77,11 @@ F146全点を入力にする。
 
 - `tools/rges_anomaly_pipeline.py`
   - RGES Parquetからイベント単位でF146を読む。
+  - `obs_x/y/z`から観測者軌道を作り、GULLS形式のspace-parallax ephemerisへ変換する。
   - `Finder.run_anomaly_pipeline()` の一行APIで、effect-aware Finder、fallback、
     post-physical refinement、frozen final-residual measurement、feature extraction、
     template-free searchを最後まで実行する。
-  - 1イベントごとにJSONとfigureを書き、HTML更新を呼ぶ。
+  - 1イベントごとにJSONとfigureを書き、HTMLは最後に一括生成する。
 - `tools/build_rges_anomaly_html.py`
   - Roman本家 `roman_simu/tool/make_html.py` のCSS/JavaScriptブロックを読み、
     同じUI構造でRGESのindex/eventページを生成する。
@@ -189,10 +180,10 @@ indexのMain参照は`http://133.1.160.32/ou-moa/index.html`である。
 
 ## portal同期とRagan公開
 
-各イベント完了後、runnerが次を実行する。
+全イベントのJSON生成後、HTMLを一括buildしてから1回だけ次を実行する。
 
 ```text
-build_rges_anomaly_html.py
+build_rges_anomaly_html.py（全2267イベント）
   → /rogue1_8/nunota/html_portal/tool/request_sync.sh
   → .sync/requestへトークンを書く
   → watch_sync_html_portal.shがportalを再構築
@@ -219,23 +210,12 @@ curl -fsS http://133.1.160.32/ou-moa/public/rges_anomaly_finder/planet_signal_da
 
 ## runを止める・再開する
 
-現在のrunを止める場合:
+scanを止める場合は、起動したtmux/jobのプロセスを停止する。HTML生成はscan完了後に次で行う。
 
 ```bash
-tmux send-keys -t rges_f146_serial C-c
-```
-
-停止後の再開は、同じコマンドを使えば既存JSONを基準に継続できる。ただし、コードやHTML仕様を
-変更して全件再計算する場合は`--force`を付ける。新しいlogを使い、古いrunと同じtmux名を
-二重起動しないこと。
-
-```bash
-tmux has-session -t rges_f146_serial && echo already-running
-tmux new-session -d -s rges_f146_serial -c /rogue1_8/nunota/jacscanomaly \
-  "env OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 JAX_NUM_THREADS=1 \
-   taskset -c 0 python tools/rges_anomaly_pipeline.py --tier both --force --build-html \
-   --progress-file /moao39_13/nunota/rges-data/anomaly_finder_progress.txt \
-   >> /moao39_13/nunota/rges-data/rges_f146_serial_vNN.log 2>&1"
+python tools/build_rges_anomaly_html.py \
+  --result-dir /moao39_13/nunota/rges-data/anomaly_finder_result \
+  --out-dir /rogue1_8/nunota/html_portal/rges_anomaly_finder
 ```
 
 イベント子プロセスの標準出力は抑制している。エラーは親logの`ERROR`行と、source output下の
