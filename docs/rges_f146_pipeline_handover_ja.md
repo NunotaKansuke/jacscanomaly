@@ -17,7 +17,7 @@ GitHubへの公開はしていない。
 output:  /moao39_13/nunota/rges-data/anomaly_finder_result
 ```
 
-scan起動コマンド（HTML・同期は最後に一括）:
+scan起動コマンド（HTML・同期は別watcherでイベント単位）:
 
 ```bash
 cd /rogue1_8/nunota/jacscanomaly
@@ -28,6 +28,12 @@ env OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
       --tier both --force \
       --progress-file /moao39_13/nunota/rges-data/anomaly_finder_progress.txt \
       >> /moao39_13/nunota/rges-data/rges_f146_serial_current.log 2>&1
+```
+
+別tmuxで次を起動すると、完了済みJSONを検知するたびにHTML生成とportal同期を行う。
+
+```bash
+tools/watch_rges_html_sync.sh
 ```
 
 `--force` を付けているため、以前の途中成果物をスキップせず全2267イベントを再計算する。
@@ -180,10 +186,10 @@ indexのMain参照は`http://133.1.160.32/ou-moa/index.html`である。
 
 ## portal同期とRagan公開
 
-全イベントのJSON生成後、HTMLを一括buildしてから1回だけ次を実行する。
+`tools/watch_rges_html_sync.sh`が新しいイベントJSONごとに次を実行する。
 
 ```text
-build_rges_anomaly_html.py（全2267イベント）
+build_rges_anomaly_html.py（対象イベント）
   → /rogue1_8/nunota/html_portal/tool/request_sync.sh
   → .sync/requestへトークンを書く
   → watch_sync_html_portal.shがportalを再構築
@@ -210,13 +216,7 @@ curl -fsS http://133.1.160.32/ou-moa/public/rges_anomaly_finder/planet_signal_da
 
 ## runを止める・再開する
 
-scanを止める場合は、起動したtmux/jobのプロセスを停止する。HTML生成はscan完了後に次で行う。
-
-```bash
-python tools/build_rges_anomaly_html.py \
-  --result-dir /moao39_13/nunota/rges-data/anomaly_finder_result \
-  --out-dir /rogue1_8/nunota/html_portal/rges_anomaly_finder
-```
+scanを止める場合は、起動したscan tmux/jobを停止する。HTML同期watcherはscan停止後に残りのJSONを処理して終了する。
 
 イベント子プロセスの標準出力は抑制している。エラーは親logの`ERROR`行と、source output下の
 `errors.jsonl`に残る。manifest更新は、途中失敗で`fit.refined=null`になった古いartifactが
