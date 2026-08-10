@@ -44,6 +44,14 @@ def _canonical_scripts() -> dict[str, str]:
     # is available.  This is what allows template-free-only candidates to get
     # the same center/range overlay as measured peak/dip features.
     event_js = found["EVENT_JS"]
+    # RGES exposes the actual fit-exclusion mask as ``display_signal_mask``.
+    # The Roman template still calls its legacy field ``signal_mask``; leaving
+    # that name here silently plots every point as normal and hides orange
+    # excluded points.
+    event_js = event_js.replace("s.signal_mask", "s.display_signal_mask")
+    event_js = event_js.replace(
+        "d.series?.signal_mask", "d.series?.display_signal_mask"
+    )
     event_js = event_js.replace(
         "const shown = d.features?.items || [];",
         "const shown = (d.anomaly_candidates?.length ? d.anomaly_candidates : (d.features?.items || [])).map(p => ({...p, time: p.t_center ?? p.time}));",
@@ -53,6 +61,9 @@ def _canonical_scripts() -> dict[str, str]:
         "const color = Number(p.signed_z ?? (p.kind === 'dip' ? -1 : 1)) < 0 ? C.dip_range : C.peak_range;",
     )
     feature_js = found["FEATURE_EVENT_JS"]
+    feature_js = feature_js.replace(
+        "(s.signal_mask || [])", "(s.display_signal_mask || [])"
+    )
     feature_js = feature_js.replace(
         "(measured.features || []).forEach(feature => {",
         "(measured.candidates || measured.features || []).forEach(feature => {",
@@ -355,6 +366,21 @@ def _roman_payload(row: dict[str, Any]) -> dict[str, Any]:
         # samples into a model line.  Newly processed events always carry the
         # adaptive curve generated from the adopted fit.
         model_curve = {"time": [], "flux": []}
+    physical_diagnostics = physical.get("diagnostics", {}) or {}
+    final_detection = payload.get("final_detection")
+    if not isinstance(final_detection, dict):
+        final_detection = physical_diagnostics.get("final_detection")
+    if not isinstance(final_detection, dict):
+        # Older RGES artifacts did not persist the final scan decision.  The
+        # unified candidate center is the closest truthful fallback for the
+        # black final-anomaly marker until those events are recomputed.
+        best_candidate = anomaly_candidates[0] if anomaly_candidates else {}
+        center = _finite(best_candidate.get("t_center"))
+        final_detection = (
+            {"detected": True, "t0": center}
+            if center is not None
+            else {"detected": False}
+        )
     return {
         "event": row["event"],
         "tier": row["tier"],
@@ -371,6 +397,7 @@ def _roman_payload(row: dict[str, Any]) -> dict[str, Any]:
         "best_anomaly_candidate": (
             anomaly_candidates[0] if anomaly_candidates else None
         ),
+        "final_detection": final_detection,
         "anomaly_candidates": anomaly_candidates,
         "candidates": anomaly_candidates,
         "flat_baseline": {"use_flat_baseline": False},

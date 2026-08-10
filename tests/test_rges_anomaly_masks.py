@@ -6,7 +6,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.build_rges_anomaly_html import _roman_payload
+from tools.build_rges_anomaly_html import _canonical_scripts, _roman_payload
 from tools.rges_anomaly_pipeline import (
     _ecliptic_to_icrf,
     _earth_position_at,
@@ -104,6 +104,31 @@ def test_html_preserves_explicit_partial_display_mask():
     }
     output = _roman_payload(_row(series))
     assert sum(output["series"]["display_signal_mask"]) == 2
+
+
+def test_html_plot_scripts_use_display_mask_and_final_detection_marker():
+    scripts = _canonical_scripts()
+    assert "s.display_signal_mask" in scripts["EVENT_JS"]
+    assert "d.series?.display_signal_mask" in scripts["EVENT_JS"]
+    assert "s.display_signal_mask" in scripts["FEATURE_EVENT_JS"]
+    assert "s.signal_mask || []" not in scripts["EVENT_JS"]
+    assert "detectionT0" in scripts["EVENT_JS"]
+
+
+def test_html_exposes_final_detection_with_legacy_candidate_fallback():
+    series = {
+        "n_total": 2,
+        "time": [9.0, 10.0],
+        "flux": [1.0, 1.0],
+        "ferr": [0.1, 0.1],
+        "model_flux": [1.0, 1.0],
+        "residual": [0.0, 0.0],
+        "display_signal_mask": [0, 1],
+    }
+    row = _row(series)
+    row["payload"]["anomaly_candidates"] = [{"t_center": 9.5, "kind": "peak"}]
+    output = _roman_payload(row)
+    assert output["final_detection"] == {"detected": True, "t0": 9.5}
 
 
 def test_html_uses_adaptive_model_curve_instead_of_observation_model_samples():

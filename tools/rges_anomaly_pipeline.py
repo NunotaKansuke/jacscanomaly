@@ -644,6 +644,9 @@ def _run_one(
                 "post_physical_refits_completed": post_physical_refits,
                 "post_physical_mask_points": int(np.sum(display_mask)),
                 "post_physical_refinement_reset": post_physical_reset,
+                "final_detection": _json_safe(
+                    pipeline_result.diagnostics.get("final_detection")
+                ),
             },
             "effect_candidates": full_effects,
             "accepted": bool(
