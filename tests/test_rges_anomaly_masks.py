@@ -113,6 +113,7 @@ def test_html_plot_scripts_use_display_mask_and_final_detection_marker():
     assert "s.display_signal_mask" in scripts["FEATURE_EVENT_JS"]
     assert "s.signal_mask || []" not in scripts["EVENT_JS"]
     assert "detectionT0" in scripts["EVENT_JS"]
+    assert "finalDetection.detected ? Number(finalDetection.t0)" in scripts["EVENT_JS"]
 
 
 def test_html_exposes_final_detection_with_legacy_candidate_fallback():

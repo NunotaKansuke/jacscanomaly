@@ -53,6 +53,10 @@ def _canonical_scripts() -> dict[str, str]:
         "d.series?.signal_mask", "d.series?.display_signal_mask"
     )
     event_js = event_js.replace(
+        "const detectionT0 = Number((d.final_detection || d.planet_detection)?.t0);",
+        "const finalDetection = d.final_detection || d.planet_detection || {};\n    const detectionT0 = finalDetection.detected ? Number(finalDetection.t0) : NaN;",
+    )
+    event_js = event_js.replace(
         "const shown = d.features?.items || [];",
         "const shown = (d.anomaly_candidates?.length ? d.anomaly_candidates : (d.features?.items || [])).map(p => ({...p, time: p.t_center ?? p.time}));",
     )
