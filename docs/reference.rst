@@ -71,6 +71,7 @@ Planet signal extraction API
 .. automethod:: jacscanomaly.PlanetSignalExtractor.run
 
 .. autoclass:: jacscanomaly.PlanetSignalResult
+   :no-index:
 
 ``PlanetScanDecision`` records the scan-only discovery decision separately
 from peak/dip characterization. The complete high-level result exposes it as
