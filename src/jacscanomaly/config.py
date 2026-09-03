@@ -304,19 +304,19 @@ class FinderConfig:
 
     best_score_teff_ratio: float = 2.0
     """
-    Maximum timescale ratio used for best-score background clusters.
+    Maximum timescale ratio used for score background clusters.
 
-    The score compares a candidate only with clusters from the same season
+    The score compares a candidate with clusters from all observing seasons
     whose ``teff`` differs by at most this factor. If too few such clusters
-    exist, the nearest timescales from the same season are added.
+    exist, the nearest timescales from all seasons are added.
     """
 
     best_score_min_reference_clusters: int = 8
     """
-    Preferred minimum number of same-season background clusters.
+    Preferred minimum number of all-season background clusters.
 
     When the local ``teff`` band contains fewer clusters, the nearest
-    same-season timescales are added up to this count. A score still requires
+    all-season timescales are added up to this count. A score still requires
     at least two usable background clusters.
     """
 

@@ -52,6 +52,12 @@ Important attributes
    The best :class:`jacscanomaly.BestCandidate`, or ``None`` if no candidate
    exists.
 
+``scored_candidates``
+   A list of :class:`jacscanomaly.ScoredCandidate` objects for every extracted
+   cluster. Scores are computed against an all-season, comparable-timescale
+   background and the list is sorted by descending finite score. Non-finite
+   scores are retained at the end.
+
 Best candidate
 --------------
 
@@ -67,6 +73,18 @@ Best candidate
        quality = best.quality
        print(quality.n_eff)
        print(quality.peak_frac)
+
+All scored candidates
+---------------------
+
+.. code-block:: python
+
+   for candidate in result.scored_candidates:
+       print(candidate.t0, candidate.teff, candidate.dchi2, candidate.score)
+
+``result.best`` is selected by maximum ``dchi2`` (subject to quality
+criteria), while ``result.scored_candidates`` is ordered by score. These are
+intentionally separate rankings.
 
 Candidate quality fields
 ------------------------

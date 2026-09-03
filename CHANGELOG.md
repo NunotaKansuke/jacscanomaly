@@ -6,6 +6,17 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## Unreleased
+
+### Changed
+- Score every extracted anomaly cluster against an all-season,
+  comparable-timescale background and expose the results through
+  `AnomalyResult.scored_candidates`.
+- Keep `AnomalyResult.best` as the maximum-`dchi2` quality-accepted candidate
+  for backward compatibility.
+
+---
+
 ## [0.5.3] - 2026-08-03
 
 ### Added

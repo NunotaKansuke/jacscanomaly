@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -37,9 +37,9 @@ class CandidateQuality:
 
 
 @dataclass(frozen=True)
-class BestCandidate:
+class ScoredCandidate:
     """
-    Best anomaly candidate selected from all extracted clusters.
+    Extracted anomaly cluster with an all-season score.
 
     Attributes
     ----------
@@ -50,20 +50,25 @@ class BestCandidate:
     dchi2 : float
         Improvement in chi-square: chi2_null - chi2_anom (larger is better).
     med_others : float
-        Median dchi2 among comparable same-season background clusters.
+        Median dchi2 of the all-season, comparable-timescale background.
     std_others : float
-        Robust scale of comparable same-season background clusters. The
+        Robust scale of the all-season, comparable-timescale background. The
         historical field name is retained for API compatibility; the value is
         MAD-based, with stable fallbacks for degenerate samples.
     score : float
-        Standardized score of the best candidate.
-        Computed as ``(dchi2_best - med_others) / std_others``, where the
-        historical ``std_others`` field stores the robust background scale.
-        (may be NaN/inf depending on the number of candidates / std_others).
+        Standardized score computed as
+        ``(dchi2 - med_others) / std_others``.
     quality : CandidateQuality
         Per-point support and temporal diagnostics for this candidate.
     n_score_reference : int
         Number of background clusters retained for score normalization.
+
+    Notes
+    -----
+    The score is computed independently for each extracted cluster. The
+    background spans all observing seasons, while the configurable ``teff``
+    locality is retained so that unlike-duration templates are not compared
+    as though they had the same response.
     """
     t0: float
     teff: float
@@ -73,6 +78,18 @@ class BestCandidate:
     score: float
     quality: CandidateQuality
     n_score_reference: int = 0
+
+
+@dataclass(frozen=True)
+class BestCandidate(ScoredCandidate):
+    """
+    Best anomaly candidate selected from all extracted clusters.
+
+    The selected candidate is still chosen by maximum ``dchi2`` among the
+    candidates accepted by :class:`~jacscanomaly.criteria.CandidateCriteria`.
+    Its score is the same value as the matching entry in
+    ``AnomalyResult.scored_candidates``.
+    """
 
 
 @dataclass(frozen=True)
@@ -134,6 +151,11 @@ class AnomalyResult:
         [t0, teff, dchi2, n_window, n_contrib, n_eff, peak_frac, rho1, longest_run].
     best : BestCandidate | None
         Best candidate over all clusters, or None if no candidate exists.
+    scored_candidates : list[ScoredCandidate]
+        All extracted cluster representatives with independently computed
+        scores. The list is sorted by descending finite score, with non-finite
+        scores last. Candidate-quality criteria do not remove entries here;
+        they only affect ``best``.
     """
     # input (CPU numpy arrays for fast plotting)
     time: np.ndarray
@@ -154,6 +176,7 @@ class AnomalyResult:
     # best candidate
     best: Optional[BestCandidate]
     observed_signal_scale: Optional[ObservedSignalScale] = None
+    scored_candidates: List[ScoredCandidate] = field(default_factory=list)
 
     def summary_dict(self) -> Dict[str, Any]:
         """
@@ -163,6 +186,7 @@ class AnomalyResult:
             "n_points": int(self.time.size),
             "n_seasons": int(len(self.seasons)),
             "n_clusters": int(self.clusters_all.shape[0]),
+            "n_scored_candidates": int(len(self.scored_candidates)),
             "n_grid_total": int(sum(s.n_grid for s in self.seasons)),
             "chi2_dof": float(self.chi2_dof),
             "has_best": bool(self.best is not None),

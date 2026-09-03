@@ -27,7 +27,13 @@ from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .runner import SeasonGridRunner
-from .models import AnomalyResult, BestCandidate, CandidateQuality, SeasonSummary
+from .models import (
+    AnomalyResult,
+    BestCandidate,
+    CandidateQuality,
+    ScoredCandidate,
+    SeasonSummary,
+)
 from .template_free import TemplateFreeScanner, TemplateFreeSearchConfig, TemplateFreeSearchResult
 from .pspl_fft import PSPLFFTScanner
 from .effect_detection import (
@@ -794,11 +800,12 @@ class Finder:
             log=log,
         )
 
-        best_obj = self._pick_best_candidate(
+        scored_candidates = self._score_candidates(
             clusters_all,
             grid_metrics_all,
             seasons=seasons,
         )
+        best_obj = self._best_from_scored_candidates(scored_candidates)
 
         result = AnomalyResult(
             time=time_np,
@@ -812,6 +819,7 @@ class Finder:
             clusters_all=clusters_all,
             grid_metrics_all=grid_metrics_all,
             best=best_obj,
+            scored_candidates=scored_candidates,
             observed_signal_scale=measure_observed_signal_scale(
                 time_np,
                 residual_np / np.maximum(ferr_np, 1.0e-12),
@@ -2002,51 +2010,128 @@ class Finder:
         seasons: Optional[Sequence[SeasonSummary]] = None,
     ) -> Optional[BestCandidate]:
         """
-        Select the strongest accepted candidate and score it against raw clusters.
+        Select the strongest accepted candidate from all-season scores.
 
-        Candidate-quality criteria are intentionally applied only after raw
-        cluster extraction. The score background therefore does not change
-        when selection thresholds are adjusted.
+        This compatibility helper retains the historical private method name
+        used by the physical-model workflows. The score itself is now computed
+        for every extracted cluster by :meth:`_score_candidates`.
         """
+        scored_candidates = self._score_candidates(
+            clusters_all,
+            grid_metrics_all,
+            seasons=seasons,
+        )
+        return self._best_from_scored_candidates(scored_candidates)
+
+    def _score_candidates(
+        self,
+        clusters_all: np.ndarray,
+        grid_metrics_all: np.ndarray,
+        *,
+        seasons: Optional[Sequence[SeasonSummary]] = None,
+    ) -> list[ScoredCandidate]:
+        """Score every finite extracted cluster against an all-season background.
+
+        ``seasons`` remains in the private signature for compatibility with
+        callers that already pass the runner's season summaries. It is
+        intentionally not used for normalization: the score background spans
+        all seasons. The ``teff`` locality and robust upper clipping are still
+        applied independently for each candidate.
+
+        The returned list is sorted by descending finite score. Non-finite
+        scores are retained at the end so that small-reference diagnostics are
+        not silently discarded.
+        """
+        del seasons
         if clusters_all is None or clusters_all.size == 0:
-            return None
+            return []
 
         raw_clusters = np.asarray(clusters_all, dtype=float)
         raw_clusters = raw_clusters[np.isfinite(raw_clusters).all(axis=1)]
         if raw_clusters.size == 0:
-            return None
+            return []
 
-        candidates = self._accepted_candidates(raw_clusters, grid_metrics_all)
-        if candidates.size == 0:
-            return None
-
-        max_ind = int(np.argmax(candidates[:, 2]))
-        best = candidates[max_ind]
-        references = self._score_reference_clusters(
-            best,
-            raw_clusters,
-            seasons=seasons,
+        scored = [
+            self._score_candidate(
+                candidate,
+                raw_clusters,
+                grid_metrics_all,
+            )
+            for candidate in raw_clusters
+        ]
+        return sorted(
+            scored,
+            key=lambda candidate: (
+                bool(np.isfinite(candidate.score)),
+                float(candidate.score) if np.isfinite(candidate.score) else -np.inf,
+                float(candidate.dchi2),
+            ),
+            reverse=True,
         )
+
+    def _score_candidate(
+        self,
+        candidate: np.ndarray,
+        raw_clusters: np.ndarray,
+        grid_metrics_all: np.ndarray,
+    ) -> ScoredCandidate:
+        references = self._score_reference_clusters(candidate, raw_clusters)
         bulk_dchi2 = self._upper_clip_score_background(references[:, 2])
 
         if bulk_dchi2.shape[0] >= 2:
             med = float(np.median(bulk_dchi2))
             std = self._robust_scale(bulk_dchi2)
-            score = (best[2] - med) / std if std > 0 else float("nan")
+            score = (candidate[2] - med) / std if std > 0 else float("nan")
         else:
             med = std = score = float("nan")
 
-        quality = self._quality_for_point(float(best[0]), float(best[1]), grid_metrics_all)
-
-        return BestCandidate(
-            t0=float(best[0]),
-            teff=float(best[1]),
-            dchi2=float(best[2]),
+        quality = self._quality_for_point(
+            float(candidate[0]),
+            float(candidate[1]),
+            grid_metrics_all,
+        )
+        return ScoredCandidate(
+            t0=float(candidate[0]),
+            teff=float(candidate[1]),
+            dchi2=float(candidate[2]),
             med_others=med,
             std_others=std,
             score=float(score),
             quality=quality,
             n_score_reference=int(bulk_dchi2.shape[0]),
+        )
+
+    def _best_from_scored_candidates(
+        self,
+        scored_candidates: Sequence[ScoredCandidate],
+    ) -> Optional[BestCandidate]:
+        """Return the maximum-``dchi2`` accepted scored candidate."""
+        if not scored_candidates:
+            return None
+
+        criteria = self.config.candidate_criteria
+        eligible = [
+            candidate
+            for candidate in scored_candidates
+            if criteria is None
+            or criteria.accepts(
+                dchi2=float(candidate.dchi2),
+                quality=candidate.quality,
+            )
+        ]
+        if not eligible:
+            return None
+
+        selected = max(eligible, key=lambda candidate: float(candidate.dchi2))
+        return BestCandidate(
+            t0=selected.t0,
+            teff=selected.teff,
+            dchi2=selected.dchi2,
+            med_others=selected.med_others,
+            std_others=selected.std_others,
+            score=selected.score,
+            quality=selected.quality,
+            n_score_reference=selected.n_score_reference,
         )
 
     def _accepted_candidates(
@@ -2073,26 +2158,24 @@ class Finder:
 
     def _score_reference_clusters(
         self,
-        best: np.ndarray,
+        candidate: np.ndarray,
         raw_clusters: np.ndarray,
         *,
         seasons: Optional[Sequence[SeasonSummary]] = None,
     ) -> np.ndarray:
+        """Return all-season, comparable-timescale background clusters.
+
+        ``seasons`` is retained for compatibility with the former
+        same-season implementation, but is intentionally ignored. The score
+        is normalized from the complete event-wide cluster population.
+        """
+        del seasons
         references = np.asarray(raw_clusters, dtype=float)
 
-        if seasons is not None:
-            for season in seasons:
-                if float(season.t_start) <= float(best[0]) <= float(season.t_end):
-                    references = references[
-                        (references[:, 0] >= float(season.t_start))
-                        & (references[:, 0] <= float(season.t_end))
-                    ]
-                    break
-
         same = (
-            np.isclose(references[:, 0], best[0], rtol=0.0, atol=1e-9)
-            & np.isclose(references[:, 1], best[1], rtol=1e-12, atol=1e-12)
-            & np.isclose(references[:, 2], best[2], rtol=1e-12, atol=1e-12)
+            np.isclose(references[:, 0], candidate[0], rtol=0.0, atol=1e-9)
+            & np.isclose(references[:, 1], candidate[1], rtol=1e-12, atol=1e-12)
+            & np.isclose(references[:, 2], candidate[2], rtol=1e-12, atol=1e-12)
         )
         same_idx = np.flatnonzero(same)
         if same_idx.size:
@@ -2108,7 +2191,7 @@ class Finder:
         ratio = float(self.config.best_score_teff_ratio)
         if not np.isfinite(ratio) or ratio < 1.0:
             raise ValueError("best_score_teff_ratio must be finite and >= 1.")
-        log_distance = np.abs(np.log(references[:, 1] / float(best[1])))
+        log_distance = np.abs(np.log(references[:, 1] / float(candidate[1])))
         local = references[log_distance <= np.log(ratio) + 1e-12]
 
         min_reference = int(self.config.best_score_min_reference_clusters)

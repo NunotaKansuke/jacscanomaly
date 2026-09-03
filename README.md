@@ -159,30 +159,28 @@ The workflow of `jacscanomaly` is:
 
 ## Anomaly Score
 
-To quantify how significant the best anomaly candidate is relative to others,
-we define a **score**:
+To quantify how significant each extracted anomaly candidate is relative to
+others, we define a **score**:
 
 ```
-score = (Δχ²_best − median(Δχ²_others)) / robust_scale(Δχ²_others)
+score(c) = (Δχ²_c − median(Δχ²_others(c))) / robust_scale(Δχ²_others(c))
 ```
 
-The reference population is restricted to raw clusters from the same observing
-season and a comparable `teff`. Candidate-quality cuts are applied only after
-raw cluster extraction, so changing those cuts does not redefine the score
-background. The center and scale are estimated robustly with the median and
-MAD. Strong secondary candidates are removed with adaptive one-sided clipping
-rather than an unconditional percentile cut.
+The reference population contains raw clusters from all observing seasons and
+a comparable `teff`. Candidate-quality cuts are applied only after raw cluster
+extraction, so changing those cuts does not redefine the score background. The
+center and scale are estimated robustly with the median and MAD. Strong
+secondary candidates are removed with adaptive one-sided clipping rather than
+an unconditional percentile cut.
 
-This measures how strongly the best candidate stands out from the rest of the grid.
+The finder computes this independently for every extracted cluster and exposes
+the sorted results as `result.scored_candidates`. `result.best` remains the
+maximum-`dchi2` candidate accepted by the quality criteria; it is not a
+score-based selection.
 
-Since v0.4.0, the score background is local to the candidate's observing
-season and timescale, with robust median/MAD normalization. Quality cuts do not
-change that background, and strong secondary clusters are removed only by
-adaptive one-sided clipping. In checks on four retained Roman light curves,
-the selected candidate and its ``Δχ²`` were unchanged while the score changed
-moderately, indicating that the normalization is less sensitive to unrelated
-seasons and timescales. Existing ``simscan`` efficiency maps using score
-thresholds should be recalibrated with v0.4.0 scores.
+The score background is event-wide but remains local in timescale, with robust
+median/MAD normalization. Existing efficiency maps or thresholds using the
+older same-season score should be recalibrated.
 
 ---
 

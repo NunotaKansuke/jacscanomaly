@@ -7,7 +7,13 @@ jax_config.update("jax_enable_x64", True)
 from .config import FinderConfig
 from .criteria import CandidateCriteria
 from .finder import Finder
-from .models import AnomalyResult, BestCandidate, CandidateQuality, SeasonSummary
+from .models import (
+    AnomalyResult,
+    BestCandidate,
+    CandidateQuality,
+    ScoredCandidate,
+    SeasonSummary,
+)
 from .plot import AnomalyPlotter
 from .singlelens_fit import (
     SingleLensFitResult,
@@ -128,6 +134,7 @@ __all__ = [
     "Finder",
     "AnomalyResult",
     "BestCandidate",
+    "ScoredCandidate",
     "CandidateQuality",
     "SeasonSummary",
     "AnomalyPlotter",

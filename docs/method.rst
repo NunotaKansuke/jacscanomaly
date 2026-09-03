@@ -84,27 +84,33 @@ and measure local physical constraints after detection.
 Candidate score
 ---------------
 
-The candidate ``score`` measures how strongly the best cluster stands out
+The candidate ``score`` measures how strongly an extracted cluster stands out
 relative to other extracted clusters:
 
 .. math::
 
    \mathrm{score}
    =
-   \frac{\Delta\chi^2_{\mathrm{best}} - \mathrm{median}(\Delta\chi^2_{\mathrm{others}})}
+   \frac{\Delta\chi^2_{c} - \mathrm{median}(\Delta\chi^2_{\mathrm{others}})}
         {\mathrm{MAD\ scale}(\Delta\chi^2_{\mathrm{others}})}
 
-The background contains raw cluster peaks from the same observing season and a
-comparable ``teff`` range. Candidate-quality cuts are applied after clustering
-and therefore do not censor this background population. The reported
-``std_others`` is a robust MAD-based scale retained under its historical field
-name. A one-sided, MAD-based upper clip removes strong secondary candidates
-without discarding a fixed percentile of ordinary background clusters.
+The background contains raw cluster peaks from all observing seasons and a
+comparable ``teff`` range for the candidate ``c``. Candidate-quality cuts are
+applied after clustering and therefore do not censor this background
+population. The reported ``std_others`` is a robust MAD-based scale retained
+under its historical field name. A one-sided, MAD-based upper clip removes
+strong secondary candidates without discarding a fixed percentile of ordinary
+background clusters.
 
-This makes the score a local comparison: in validation checks, candidate
-locations and ``dchi2`` values stayed fixed while the score changed only
-through the background normalization. Efficiency thresholds calibrated with
-older score definitions should therefore be regenerated for v0.4.0.
+The finder applies this calculation independently to every extracted cluster
+and exposes the results through ``AnomalyResult.scored_candidates``. The
+backward-compatible ``AnomalyResult.best`` remains the candidate with the
+largest ``dchi2`` after candidate-quality criteria are applied; it is not
+necessarily the candidate with the largest score.
+
+This makes the score an event-wide, timescale-matched comparison. Efficiency
+thresholds calibrated with the previous same-season score definition must be
+regenerated.
 
 Effective number of points
 --------------------------

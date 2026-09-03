@@ -43,6 +43,7 @@ Result containers
 
    jacscanomaly.AnomalyResult
    jacscanomaly.BestCandidate
+   jacscanomaly.ScoredCandidate
    jacscanomaly.CandidateQuality
    jacscanomaly.SeasonSummary
 

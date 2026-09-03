@@ -54,7 +54,7 @@ def test_quality_criteria_select_after_raw_background_is_built():
     assert np.isfinite(best.score)
 
 
-def test_score_uses_only_same_season_and_nearby_timescales():
+def test_score_uses_all_seasons_and_nearby_timescales():
     local = np.asarray(
         [
             [10.0, 1.0, 100.0],
@@ -87,6 +87,60 @@ def test_score_uses_only_same_season_and_nearby_timescales():
     assert best is not None
     assert best.n_score_reference == 3
     assert best.med_others == 2.0
+
+
+def test_all_clusters_receive_scores_and_best_keeps_dchi2_selection():
+    clusters = np.asarray(
+        [
+            [10.0, 1.0, 100.0],
+            [110.0, 1.0, 80.0],
+            [1.0, 1.0, 1.0],
+            [2.0, 1.0, 2.0],
+            [3.0, 1.0, 3.0],
+        ]
+    )
+    seasons = [
+        _season(0.0, 20.0, clusters[[0, 2, 3, 4]]),
+        _season(100.0, 120.0, clusters[[1]]),
+    ]
+    finder = Finder(FinderConfig(best_score_min_reference_clusters=2))
+
+    scored = finder._score_candidates(
+        clusters,
+        _metrics(clusters),
+        seasons=seasons,
+    )
+    best = finder._pick_best_candidate(
+        clusters,
+        _metrics(clusters),
+        seasons=seasons,
+    )
+
+    assert len(scored) == len(clusters)
+    assert all(np.isfinite(candidate.score) for candidate in scored)
+    assert scored[0].score >= scored[-1].score
+    assert best is not None
+    assert best.t0 == 10.0
+    matching = next(candidate for candidate in scored if candidate.t0 == best.t0)
+    assert best.score == matching.score
+
+    # The score background is event-wide: moving the season boundary must not
+    # change a candidate's normalization.
+    shifted_seasons = [
+        _season(0.0, 5.0, clusters[[2, 3, 4]]),
+        _season(5.0, 120.0, clusters[[0, 1]]),
+    ]
+    shifted = finder._score_candidates(
+        clusters,
+        _metrics(clusters),
+        seasons=shifted_seasons,
+    )
+    by_t0 = {candidate.t0: candidate for candidate in scored}
+    shifted_by_t0 = {candidate.t0: candidate for candidate in shifted}
+    for t0 in by_t0:
+        assert shifted_by_t0[t0].med_others == by_t0[t0].med_others
+        assert shifted_by_t0[t0].std_others == by_t0[t0].std_others
+        assert shifted_by_t0[t0].score == by_t0[t0].score
 
 
 def test_score_adaptively_clips_strong_secondary_cluster():
