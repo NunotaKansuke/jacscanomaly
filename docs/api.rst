@@ -18,6 +18,8 @@ Main workflow
    jacscanomaly.PlanetSignalConfig
    jacscanomaly.PlanetSignalResult
    jacscanomaly.PlanetSignalTiming
+   jacscanomaly.PlanetScanDecision
+   jacscanomaly.PlanetDetectionRecord
    jacscanomaly.PlanetFeatureConfig
    jacscanomaly.PlanetFeatureResult
    jacscanomaly.TemplateFreeScanner

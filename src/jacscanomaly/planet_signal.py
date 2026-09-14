@@ -216,6 +216,7 @@ class PlanetSignalIteration:
     n_masked_after: int
     added_points: int
     fit: SingleLensFitResult
+    accepted: bool = True
 
 
 @dataclass(frozen=True)
@@ -315,6 +316,36 @@ class PlanetScanDecision:
             }
         )
         return row
+
+
+@dataclass(frozen=True)
+class PlanetDetectionRecord:
+    """One stage-specific planet detection kept by the orchestrator.
+
+    Detection is deliberately separate from baseline fitting. ``fit_adopted``
+    says whether the baseline associated with this scan survived model
+    selection; it does not change the scan decision itself. The final frozen
+    scan is the only record marked ``canonical`` by the high-level pipeline.
+    """
+
+    stage: str
+    decision: PlanetScanDecision
+    model_kind: str
+    fit_adopted: bool = False
+    canonical: bool = False
+
+    @property
+    def detected(self) -> bool:
+        return bool(self.decision.detected)
+
+    def summary_dict(self) -> dict[str, object]:
+        return {
+            "stage": str(self.stage),
+            "model_kind": str(self.model_kind),
+            "fit_adopted": bool(self.fit_adopted),
+            "canonical": bool(self.canonical),
+            "decision": self.decision.summary_dict(),
+        }
 
 
 @dataclass(frozen=True)
@@ -568,15 +599,35 @@ class PlanetSignalResult:
     scan_decision: Optional[PlanetScanDecision] = None
     finder_support: Optional[np.ndarray] = None
 
-    def finder_support_array(self) -> np.ndarray:
-        """Return the Finder's anomaly-support region for characterization.
+    @property
+    def accepted_iterations(self) -> tuple[PlanetSignalIteration, ...]:
+        """Return only mask/refit iterations whose fit was accepted."""
+        return tuple(iteration for iteration in self.iterations if iteration.accepted)
 
-        ``signal_mask`` belongs to baseline fitting: its points may be removed
-        or downweighted to keep a localized anomaly out of the single-lens
-        solution.  A frozen final-residual scan has no fit mask.  It instead
-        stores the support of the independent, all-data Finder pass in
-        ``finder_support``.  Older in-memory results fall back to
-        ``signal_mask``.
+    @property
+    def fit_exclusion_mask(self) -> np.ndarray:
+        """Return points actually excluded from the baseline fit.
+
+        ``signal_mask`` is retained as a compatibility field, but callers
+        should use this property when they need a fit mask. Robust mode may
+        carry fractional weights, and rejected proposals must never become
+        fit exclusions.
+        """
+        signal = np.asarray(self.signal_mask, dtype=bool).reshape(-1)
+        weights = np.asarray(self.point_weight, dtype=float).reshape(-1)
+        if weights.size == signal.size:
+            return signal & (weights <= 0.0)
+        return signal.copy()
+
+    def finder_support_array(self) -> np.ndarray:
+        """Return the Finder's anomaly-support region for detection flow.
+
+        This support region is separate from ``fit_exclusion_mask``. In a
+        refining pass it is derived from localized signal support; in a
+        frozen final-residual scan it is the independent all-data Finder
+        support. It may carry a detection through physical routing and
+        characterization, but never acts as a fit or display mask. Older
+        in-memory results fall back to ``signal_mask``.
         """
 
         source = (
@@ -638,7 +689,7 @@ class PlanetSignalResult:
         feature_config: Optional[PlanetFeatureConfig] = None,
     ):
         """
-        Plot the refined baseline and highlight extracted signal points.
+        Plot the refined baseline and highlight fit-excluded points.
 
         Parameters
         ----------
@@ -665,7 +716,7 @@ class PlanetSignalResult:
         t = self.time
         # Orange/fit-exclusion points are the only mask shown as excluded.
         # Finder support is an alert region, not a fit mask.
-        signal = np.asarray(self.signal_mask, dtype=bool)
+        signal = np.asarray(self.fit_exclusion_mask, dtype=bool)
         normal = ~signal
         z = self.refined_residual / self.ferr
 
@@ -773,7 +824,7 @@ class PlanetSignalResult:
             np.asarray(self.time, dtype=float),
             np.asarray(self.flux, dtype=float),
             center=t0,
-            valid_mask=~np.asarray(self.signal_mask, dtype=bool),
+            valid_mask=~np.asarray(self.fit_exclusion_mask, dtype=bool),
             source="planet_signal_magnification",
         )
         resolved = resolve_event_signal_scale(
@@ -1966,31 +2017,31 @@ class PlanetSignalExtractor:
                 combined_prior_mask,
                 current_fit,
             )
+            and not freeze_baseline
         ):
-            signal_mask = combined_prior_mask
-            point_weight = np.where(signal_mask, 0.0, point_weight)
-            if not freeze_baseline:
-                candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
-                    time_j=time_j,
-                    flux_j=flux_j,
-                    ferr_j=ferr_j,
-                    keep_mask_np=~signal_mask,
-                    x0_j=self._seed_for_refit(current_fit),
-                    model_kind=getattr(current_fit, "model_kind", None),
+            candidate_fit = self._fit_masked_single_lens_and_evaluate_full(
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                keep_mask_np=~combined_prior_mask,
+                x0_j=self._seed_for_refit(current_fit),
+                model_kind=getattr(current_fit, "model_kind", None),
+            )
+            if (
+                not self._fit_is_catastrophically_worse(
+                    current_fit,
+                    candidate_fit,
                 )
-                if (
-                    not self._fit_is_catastrophically_worse(
-                        current_fit,
-                        candidate_fit,
-                    )
-                    and self._mask_is_compact_for_fit(
-                        time_np,
-                        signal_mask,
-                        candidate_fit,
-                        reference_fit=current_fit,
-                    )
-                ):
-                    current_fit = candidate_fit
+                and self._mask_is_compact_for_fit(
+                    time_np,
+                    combined_prior_mask,
+                    candidate_fit,
+                    reference_fit=current_fit,
+                )
+            ):
+                current_fit = candidate_fit
+                signal_mask = combined_prior_mask
+                point_weight = np.where(signal_mask, 0.0, point_weight)
 
         flat_diagnostic = self._flat_baseline_diagnostic(current_fit, signal_mask)
         if freeze_baseline and flat_diagnostic.use_flat_baseline:
@@ -2466,15 +2517,15 @@ class PlanetSignalExtractor:
                 break
             allowed = current_unmasked_chi2_dof * (1.0 + float(self.config.max_unmasked_chi2_dof_increase))
             if np.isfinite(current_unmasked_chi2_dof) and new_unmasked_chi2_dof > allowed:
-                signal_mask = combined
                 iterations.append(
                     PlanetSignalIteration(
                         iteration=iteration,
                         seed=seed,
                         n_masked_before=before,
-                        n_masked_after=int(np.sum(signal_mask)),
+                        n_masked_after=int(np.sum(combined)),
                         added_points=added,
                         fit=current_fit,
+                        accepted=False,
                     )
                 )
                 break
@@ -2610,6 +2661,8 @@ class PlanetSignalExtractor:
                 float(self.config.robust_min_weight),
                 1.0,
             )
+            if self._mask_protection is not None:
+                updated_weight[np.asarray(self._mask_protection, dtype=bool)] = 1.0
             max_change = float(np.max(np.abs(updated_weight - point_weight)))
             before = int(np.sum(signal_mask))
 
@@ -3669,7 +3722,16 @@ class PlanetSignalExtractor:
         return (
             (point_weight <= float(self.config.signal_weight_threshold))
             & (np.abs(z) >= float(self.config.signal_min_abs_z))
-        )
+        ) & ~self._protected_mask_for_size(point_weight.size)
+
+    def _protected_mask_for_size(self, size: int) -> np.ndarray:
+        protection = self._mask_protection
+        if protection is None:
+            return np.zeros(int(size), dtype=bool)
+        protection = np.asarray(protection, dtype=bool).reshape(-1)
+        if protection.size != int(size):
+            raise ValueError("Internal mask protection does not match time.")
+        return protection
 
     def _flat_baseline_diagnostic(
         self,

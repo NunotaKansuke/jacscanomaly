@@ -26,9 +26,12 @@ data. The result consequently has two residual series:
    Residual against the final baseline, including signal points in the
    evaluation but not necessarily in its fit.
 
-``signal_mask`` identifies hard-excluded points. ``point_weight`` records the
-continuous weights used by robust mode. ``iterations`` records every accepted
-or terminating mask/refit decision.
+``fit_exclusion_mask`` identifies points actually excluded by the adopted
+baseline fit. ``signal_mask`` is retained for compatibility and extraction
+provenance; it is not the canonical fit mask. ``point_weight`` records the
+continuous weights used by robust mode. ``iterations`` records accepted or
+terminating mask/refit decisions, while ``accepted_iterations`` filters that
+history to proposals whose fits were adopted.
 
 Hard-mask mode
 --------------
@@ -60,9 +63,11 @@ new baseline is then fitted with weighted residuals. Iteration stops when the
 largest weight change is below ``robust_min_weight_change`` or the
 ``robust_max_iter`` limit is reached.
 
-The final hard ``signal_mask`` is derived from low weights and residual support
-for reporting. Use this mode for broad or poorly bounded structure; use a hard
-mask when the excluded intervals themselves are scientifically meaningful.
+The final ``signal_mask`` may be derived from low weights and residual support
+for reporting, but robust weights are not hard fit exclusions. Use
+``fit_exclusion_mask`` when the caller needs the points removed from the fit.
+Use robust mode for broad or poorly bounded structure; use a hard mask when
+the excluded intervals themselves are scientifically meaningful.
 
 Beam-interval mode
 ------------------
@@ -99,5 +104,7 @@ PSPL peak with a flat model. This protects events in which the apparent peak
 was entirely masked away.
 
 ``prior_signal_windows=((center, half_width), ...)`` forces known intervals
-into the final signal mask and performs one guarded refit. It is appropriate
-for manual follow-up windows, not for encoding a final physical-model result.
+into the final signal mask and performs one guarded refit. When accepted,
+those points are included in ``fit_exclusion_mask`` even though they do not
+come from a new scan iteration. It is appropriate for manual follow-up
+windows, not for encoding a final physical-model result.

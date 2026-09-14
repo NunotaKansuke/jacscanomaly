@@ -9,6 +9,7 @@ import numpy as np
 
 from .effect_routing import RoutingThresholds
 from .planet_signal import (
+    PlanetDetectionRecord,
     PlanetFeatureConfig,
     PlanetFeatureResult,
     PlanetSignalConfig,
@@ -99,7 +100,13 @@ class AnomalyCandidate:
 
 @dataclass(frozen=True)
 class AnomalyPipelineResult:
-    """Complete adopted-model anomaly result returned by the one-line API."""
+    """Complete adopted-model anomaly result returned by the one-line API.
+
+    ``detection_records`` keeps stage history, while
+    ``canonical_detection`` selects the single final-residual discovery
+    decision. Fit masks and detection-support regions are exposed separately
+    from both.
+    """
 
     effect_aware: object
     adopted_fit: object
@@ -112,6 +119,7 @@ class AnomalyPipelineResult:
     reason_codes: tuple[str, ...]
     diagnostics: dict[str, object]
     observed_signal_scale: ObservedSignalScale | None = None
+    detection_records: tuple[PlanetDetectionRecord, ...] = ()
 
     @property
     def has_anomaly_candidate(self) -> bool:
@@ -139,15 +147,46 @@ class AnomalyPipelineResult:
 
     @property
     def finder_support(self) -> np.ndarray:
-        """Finder alert region used only for anomaly characterization."""
+        """Finder detection-support region for routing and characterization."""
 
         return self.final_measurement.finder_support_array()
 
     @property
     def final_detection(self):
-        """The final frozen-scan decision, independent of characterization."""
+        """Backward-compatible alias for :attr:`canonical_detection`."""
+        return self.canonical_detection
 
+    @property
+    def canonical_detection(self):
+        """The one discovery decision for the adopted final baseline."""
+        for record in self.detection_records:
+            if record.canonical:
+                return record.decision
         return getattr(self.final_measurement, "scan_decision", None)
+
+    @property
+    def pre_physical_detection(self):
+        """The detection made before physical-model fallback, if any."""
+        for record in self.detection_records:
+            if record.stage == "pre_physical":
+                return record.decision
+        return None
+
+    @property
+    def post_physical_detection(self):
+        """The detection made after physical-model fallback, if any."""
+        for record in self.detection_records:
+            if record.stage == "post_physical":
+                return record.decision
+        return None
+
+    @property
+    def post_physical_fit_adopted(self) -> bool:
+        """Whether the post-physical baseline survived final model checks."""
+        for record in self.detection_records:
+            if record.stage == "post_physical":
+                return bool(record.fit_adopted)
+        return False
 
 
 def build_anomaly_candidates(

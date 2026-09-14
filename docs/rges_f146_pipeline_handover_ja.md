@@ -1,6 +1,6 @@
 # RGES F146 anomaly finder パイプライン引き継ぎ
 
-最終更新: 2026-08-09
+最終更新: 2026-08-13
 対象コード: `/rogue1_8/nunota/jacscanomaly`
 公開先: `http://133.1.160.32/ou-moa/public/rges_anomaly_finder/`
 
@@ -17,7 +17,7 @@ GitHubへの公開はしていない。
 output:  /moao39_13/nunota/rges-data/anomaly_finder_result
 ```
 
-scan起動コマンド（HTML・同期は別watcherでイベント単位）:
+scan起動コマンド（HTMLは別watcherで生成し、同期要求はrun完了時に1回）:
 
 ```bash
 cd /rogue1_8/nunota/jacscanomaly
@@ -30,7 +30,8 @@ env OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
       >> /moao39_13/nunota/rges-data/rges_f146_serial_current.log 2>&1
 ```
 
-別tmuxで次を起動すると、完了済みJSONを検知するたびにHTML生成とportal同期を行う。
+別tmuxで次を起動すると、完了済みJSONを検知するたびにHTMLをローカル生成する。
+scan終了後、全ページの再構成とportal同期要求を1回だけ行う。
 
 ```bash
 tools/watch_rges_html_sync.sh
@@ -125,12 +126,32 @@ series.fit_exclusion_mask   最終fitで実際に除外された点
 series.display_signal_mask  HTMLのオレンジ表示に使うmask
 ```
 
-`display_signal_mask` は、accepted iterationとzero-weight点から作る実際のfit除外maskで
-ある。post-physical refinementが0回、または採用physical fitより悪化してrollbackした場合は
-全点0になる。HTML側も`display_signal_mask`だけを優先して使い、存在しない古いJSONの
-`signal_mask`へフォールバックしない。
+`display_signal_mask` は採用fitの`fit_exclusion_mask`から作る実際のfit除外maskである。
+post-physical refinementが0回、または採用physical fitより悪化してrollbackした場合は全点0に
+なる。HTML側も`display_signal_mask`だけを優先して使い、存在しない古いJSONの`signal_mask`へ
+フォールバックしない。
 
 これは、測定窓全体がオレンジになる問題を防ぐための重要な仕様である。
+
+## 検出の段階とcanonical decision
+
+maskと検出は別のAPIである。高レベルの
+`Finder.run_anomaly_pipeline()`は、検出履歴を`detection_records`に保存する。
+レコードの`stage`は次の意味を持つ。
+
+```text
+pre_physical   物理効果fallback前のplanet scan
+post_physical  fallback後のplanet scan（fallback採用時のみ）
+final          採用fitを固定したfinal residual scan
+```
+
+`canonical_detection`が一つだけの正式な検出判定で、`final`レコードに対応する。
+`final_detection`は後方互換の別名である。`pre_physical_detection`と
+`post_physical_detection`は比較・provenance用の段階別判定で、
+`fit_adopted=false`のpost-physicalレコードは、検出自体は残るが継続fitがrollbackされた
+ことを意味する。`features`や`anomaly_candidates`は検出後のcharacterization/reportingであり、
+検出判定を上書きしない。physical routingにはfit除外点ではなく、惑星らしい
+`finder_support`を渡すため、robust modeのようにdownweightだけされた信号も消えない。
 
 ## モデル線とデータ点
 
@@ -186,11 +207,13 @@ indexのMain参照は`http://133.1.160.32/ou-moa/index.html`である。
 
 ## portal同期とRagan公開
 
-`tools/watch_rges_html_sync.sh`が新しいイベントJSONごとに次を実行する。
+`tools/watch_rges_html_sync.sh`は新しいイベントJSONごとにページをローカル生成し、
+scan終了時に全ページを再構成して次を1回だけ実行する。
 
 ```text
-build_rges_anomaly_html.py（対象イベント）
-  → /rogue1_8/nunota/html_portal/tool/request_sync.sh
+build_rges_anomaly_html.py（対象イベント、ローカル）
+  → scan終了後にbuild_rges_anomaly_html.py（全ページ）
+  → /rogue1_8/nunota/html_portal/tool/request_sync.sh（1回）
   → .sync/requestへトークンを書く
   → watch_sync_html_portal.shがportalを再構築
   → rsyncでprime@ragan:/home/prime/Public/ou-moa/へ転送
@@ -205,7 +228,7 @@ tail -f /rogue1_8/nunota/html_portal/watch_sync.log
 ```
 
 `request`と`done`が一致すれば、その同期要求は完了している。一時的に`ragan`の名前解決や
-SSHが失敗しても、request tokenは消えずwatcherが再試行する。公開側の確認は次で行う。
+SSHが失敗してもrequest tokenは消えず、watcherは既定300秒間隔で再試行する。公開側の確認は次で行う。
 
 ```bash
 curl -fsS http://133.1.160.32/ou-moa/public/rges_anomaly_finder/index.html \

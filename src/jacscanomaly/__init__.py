@@ -49,6 +49,7 @@ from .planet_signal import (
     PlanetSignalResult,
     PlanetSignalTiming,
     PlanetScanDecision,
+    PlanetDetectionRecord,
 )
 from .anomaly_pipeline import (
     AnomalyCandidate,
@@ -167,6 +168,7 @@ __all__ = [
     "PlanetSignalResult",
     "PlanetSignalTiming",
     "PlanetScanDecision",
+    "PlanetDetectionRecord",
     "AnomalyPipelineConfig",
     "AnomalyPipelineResult",
     "AnomalyCandidate",

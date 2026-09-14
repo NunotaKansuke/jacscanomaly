@@ -17,13 +17,15 @@ process_pending() {
         if grep -Fqx "$event_key" "$STATE_FILE"; then
             continue
         fi
+        # Build each page locally while the scan is running.  Publishing here
+        # used to invoke a full portal rsync once per event, which made a
+        # 2k-event run generate thousands of overlapping sync requests.
         if python tools/build_rges_anomaly_html.py \
             --result-dir "$RESULT_DIR" \
             --out-dir "$PORTAL_DIR" \
-            --event-json "$event_json" >> "$LOG_FILE" 2>&1 \
-            && "$SYNC_SCRIPT" >> "$LOG_FILE" 2>&1; then
+            --event-json "$event_json" >> "$LOG_FILE" 2>&1; then
             printf '%s\n' "$event_key" >> "$STATE_FILE"
-            printf '[realtime-sync] published %s\n' "$event_key" >> "$LOG_FILE"
+            printf '[realtime-sync] built %s (publish deferred)\n' "$event_key" >> "$LOG_FILE"
         else
             printf '[realtime-sync] failed %s; will retry\n' "$event_key" >> "$LOG_FILE"
         fi

@@ -128,6 +128,56 @@ def test_planet_signal_extractor_masks_local_unexplained_signal():
     assert result.best.max_abs_z > 5.0
 
 
+def test_rejected_mask_proposal_is_not_reported_as_fit_exclusion(monkeypatch):
+    time = np.linspace(0.0, 20.0, 80)
+    params = np.array([10.0, 4.0, 0.2])
+    ferr = np.full_like(time, 0.02)
+    flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
+    finder = Finder(FinderConfig(grid_backend="jax", single_fit_backend="jax"))
+    initial_fit = finder.fit_single_lens(time, flux, ferr, x0=params)
+    extractor = PlanetSignalExtractor(
+        finder,
+        PlanetSignalConfig(
+            baseline_mode="mask",
+            max_iter=1,
+            seed_min_dchi2=20.0,
+        ),
+    )
+    seed = BestCandidate(
+        t0=10.0,
+        teff=0.2,
+        dchi2=100.0,
+        med_others=0.0,
+        std_others=1.0,
+        score=100.0,
+        quality=CandidateQuality(10, 5, 5.0, 0.2, 0.0, 5),
+    )
+    proposal = np.abs(time - 10.0) < 0.5
+    extractor._scan_best = lambda *args, **kwargs: seed
+    extractor._observed_seed_half_width = lambda **kwargs: 0.5
+    extractor._template_improvement_mask_from_seed = lambda **kwargs: proposal
+    extractor._fit_masked_single_lens_and_evaluate_full = (
+        lambda **kwargs: initial_fit
+    )
+    extractor._mask_is_compact_for_fit = lambda *args, **kwargs: True
+    chi2_values = iter((1.0, 2.0))
+    extractor._masked_chi2_dof = lambda *args, **kwargs: next(chi2_values)
+
+    result = extractor.run(
+        time,
+        flux,
+        ferr,
+        initial_fit=initial_fit,
+        refit=False,
+    )
+
+    assert len(result.iterations) == 1
+    assert result.iterations[0].accepted is False
+    assert not result.signal_mask.any()
+    assert not result.fit_exclusion_mask.any()
+    assert not result.accepted_iterations
+
+
 def test_planet_signal_extractor_frozen_baseline_never_refits(monkeypatch):
     time = np.linspace(0.0, 20.0, 240)
     params = np.array([10.0, 5.0, 0.2])

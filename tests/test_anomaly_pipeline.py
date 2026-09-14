@@ -7,6 +7,7 @@ from jacscanomaly import (
     Finder,
     PlanetFeature,
     PlanetFeatureResult,
+    PlanetScanDecision,
     PlanetSignalConfig,
     TemplateFreeCandidate,
     TemplateFreeSearchResult,
@@ -39,6 +40,10 @@ def _install_pipeline_stubs(
         iterations=tuple(post_iterations),
         signal_mask=np.asarray(post_mask, dtype=bool),
         point_weight=np.asarray(post_weights, dtype=float),
+        scan_decision=PlanetScanDecision.none(
+            stage="post_physical_scan",
+            dchi2_threshold=100.0,
+        ),
     )
     effect_result = SimpleNamespace(
         selected_fit=parent_fit,
@@ -65,6 +70,10 @@ def _install_pipeline_stubs(
         refined_fit=parent_fit,
         signal_mask=np.array([False, True, False]),
         finder_support=np.array([True, False, True]),
+        scan_decision=PlanetScanDecision.none(
+            stage="final_residual_scan",
+            dchi2_threshold=100.0,
+        ),
         finder_support_array=lambda: measurement.finder_support,
         measure_features=lambda config: features,
     )
@@ -85,6 +94,33 @@ def _install_pipeline_stubs(
         lambda *args, **kwargs: template_free,
     )
     return features, template_free, seen
+
+
+def test_pipeline_keeps_stage_detections_and_one_canonical_detection(monkeypatch):
+    finder = Finder()
+    parent = _fit()
+    _, _, _ = _install_pipeline_stubs(
+        monkeypatch,
+        finder,
+        parent_fit=parent,
+        post_fit=parent,
+    )
+
+    result = finder.run_anomaly_pipeline(
+        np.array([9.0, 10.0, 11.0]),
+        np.ones(3),
+        np.full(3, 0.1),
+    )
+
+    assert [record.stage for record in result.detection_records] == [
+        "post_physical",
+        "final",
+    ]
+    assert sum(record.canonical for record in result.detection_records) == 1
+    assert result.canonical_detection is result.final_detection
+    assert result.pre_physical_detection is None
+    assert result.post_physical_detection is not None
+    assert result.post_physical_fit_adopted is True
 
 
 def test_complete_pipeline_measures_features_when_post_refit_is_empty(monkeypatch):
@@ -152,6 +188,7 @@ def test_complete_pipeline_rolls_back_degraded_post_refinement(monkeypatch):
     assert not result.fit_exclusion_mask.any()
     assert result.diagnostics["post_physical_refinement_reset"] is True
     assert result.diagnostics["post_physical_refits_completed"] == 0
+    assert result.post_physical_fit_adopted is False
 
 
 def test_complete_pipeline_keeps_actual_exclusion_mask_for_accepted_refit(monkeypatch):

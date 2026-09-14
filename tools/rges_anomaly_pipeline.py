@@ -387,9 +387,13 @@ def _fit_exclusion_mask(result: Any) -> np.ndarray:
     ``PlanetSignalResult.signal_mask`` is the extractor's working mask.  It
     is suitable for analysis provenance, but it must not be assumed to be an
     HTML display mask: a frozen/measurement pass can use the same field for a
-    broad residual-measurement window.  In the RGES beam path, an actual mask
-    is represented by an accepted iteration and zero point weights.
+    broad residual-measurement window. In the RGES beam path, an actual mask
+    is represented by the extractor's explicit adopted-fit mask; the
+    compatibility fallback uses accepted iterations and zero point weights.
     """
+    explicit = getattr(result, "fit_exclusion_mask", None)
+    if explicit is not None:
+        return np.asarray(explicit, dtype=bool).reshape(-1)
     signal = np.asarray(getattr(result, "signal_mask", ()), dtype=bool).reshape(-1)
     if signal.size == 0 or not tuple(getattr(result, "iterations", ())):
         return np.zeros(signal.shape, dtype=bool)
@@ -620,6 +624,15 @@ def _run_one(
                     "reason_codes": getattr(stage, "reason_codes", ()),
                 }
             )
+    detection_records = [
+        record.summary_dict() for record in pipeline_result.detection_records
+    ]
+    canonical_detection = pipeline_result.canonical_detection
+    canonical_detection_payload = (
+        None
+        if canonical_detection is None
+        else canonical_detection.summary_dict()
+    )
     plot_indices = _plot_indices(time_values, display_mask, plot_points)
     payload = {
         "schema_version": 2,
@@ -689,6 +702,11 @@ def _run_one(
         "has_anomaly_candidate": pipeline_result.has_anomaly_candidate,
         "best_anomaly_candidate": pipeline_result.best_anomaly_candidate,
         "anomaly_candidates": pipeline_result.anomaly_candidates,
+        "canonical_detection": _json_safe(canonical_detection_payload),
+        # ``final_detection`` remains the report/HTML spelling; it is the
+        # canonical final-residual decision, not a feature or mask result.
+        "final_detection": _json_safe(canonical_detection_payload),
+        "detection_records": _json_safe(detection_records),
         "plot": {
             "peak_xlim": display_xlim,
             "saved_xlim": saved_xlim,

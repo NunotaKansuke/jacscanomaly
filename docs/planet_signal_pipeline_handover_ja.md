@@ -43,12 +43,23 @@
   → Ragan公開
 ```
 
+## 検出・support・fit maskの境界
+
+高レベルの`Finder.run_anomaly_pipeline()`では、検出判定とfit操作を同じ配列で表さない。
+`detection_records`に`pre_physical`、`post_physical`、`final`の段階別判定を保存し、
+採用single-lensを固定した`final`だけを`canonical_detection`として正式な一つの検出にする。
+`fit_exclusion_mask`は採用されたfitから実際に除外された点だけ、`finder_support`は検出を
+physical routingとcharacterizationへ渡す支持領域だけを表す。後者はfitやHTMLの除外maskではない。
+post-physicalの検出履歴は、継続fitがrollbackされても`fit_adopted=false`として残る。
+
 ## 主要実装
 
 ### `jacscanomaly`
 
 - `src/jacscanomaly/finder.py`
   - `evaluate_saved_physical_solution()` が物理解を再評価する。
+  - `run_effect_aware()` は`pre_physical_detection`と`post_physical_detection`を段階別に保持し、
+    `run_anomaly_pipeline()`はfinal frozen scanを`canonical_detection`にする。
   - FSPL+parallaxではpublic `rho` をnative seed用の `log_rho` に変換する。
   - 過去の不具合: `log_rho` の綴りを認識せず、`rho=0.02` を対数値として渡したため `exp(0.02)≈1.02` になった。`9143a7e`で修正済み。
 

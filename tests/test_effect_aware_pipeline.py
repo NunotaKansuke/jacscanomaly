@@ -88,6 +88,8 @@ def test_native_fallback_preserves_planet_candidate_through_after_scan(
     np.testing.assert_array_equal(selection, hard | soft)
     assert result.planet_before is not None and result.planet_before.candidates
     assert result.planet_after is not None and result.planet_after.candidates
+    assert result.pre_physical_detection is result.planet_before.scan_decision
+    assert result.post_physical_detection is result.planet_after.scan_decision
     assert result.planet_after.iterations
     assert result.planet_after.refined_fit.param_names == (
         "t0",

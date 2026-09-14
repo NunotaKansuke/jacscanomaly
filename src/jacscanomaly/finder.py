@@ -967,7 +967,7 @@ class Finder:
         planet_mask = (
             None
             if planet_before is None
-            else np.asarray(planet_before.signal_mask, dtype=bool)
+            else np.asarray(planet_before.finder_support_array(), dtype=bool)
         )
         effects = tuple(
             self.detect_effects(
@@ -1010,7 +1010,7 @@ class Finder:
             known_anomaly_mask = (
                 np.zeros(time_np.size, dtype=bool)
                 if planet_before is None
-                else np.asarray(planet_before.signal_mask, dtype=bool).copy()
+                else np.asarray(planet_before.finder_support_array(), dtype=bool).copy()
             )
             selection_exclusion_mask = known_anomaly_mask.copy()
             if planet_before is not None and planet_before.candidates:
@@ -1210,7 +1210,7 @@ class Finder:
             AnomalyPipelineResult,
             build_anomaly_candidates,
         )
-        from .planet_signal import PlanetSignalExtractor
+        from .planet_signal import PlanetDetectionRecord, PlanetSignalExtractor
 
         resolved = AnomalyPipelineConfig() if config is None else config
         effect_aware = self.run_effect_aware(
@@ -1251,7 +1251,10 @@ class Finder:
         post_refinement_reset = False
         post_refits_completed = 0
         if refinement_source is not None:
-            refinement_iterations = len(tuple(refinement_source.iterations))
+            refinement_iterations = sum(
+                bool(getattr(iteration, "accepted", True))
+                for iteration in tuple(refinement_source.iterations)
+            )
             if fallback_accepted:
                 post_refits_completed = refinement_iterations
             candidate_fit = refinement_source.refined_fit
@@ -1273,26 +1276,40 @@ class Finder:
                 adopted_fit = candidate_fit
 
         fit_exclusion_mask = np.zeros(time_np.shape, dtype=bool)
-        if (
-            refinement_source is not None
-            and not post_refinement_reset
-            and tuple(refinement_source.iterations)
-        ):
-            signal_mask = np.asarray(
-                refinement_source.signal_mask, dtype=bool
-            ).reshape(-1)
-            point_weight = np.asarray(
-                refinement_source.point_weight, dtype=float
-            ).reshape(-1)
-            if signal_mask.size != time_np.size:
-                raise RuntimeError(
-                    "Refinement signal mask does not match the input light curve."
-                )
-            fit_exclusion_mask = (
-                signal_mask & (point_weight <= 0.0)
-                if point_weight.size == signal_mask.size
-                else signal_mask.copy()
+        accepted_iterations = ()
+        if refinement_source is not None:
+            accepted_iterations = tuple(
+                iteration
+                for iteration in tuple(getattr(refinement_source, "iterations", ()))
+                if bool(getattr(iteration, "accepted", True))
             )
+        if refinement_source is not None and not post_refinement_reset:
+            explicit_mask = getattr(refinement_source, "fit_exclusion_mask", None)
+            if explicit_mask is not None:
+                # The extractor has already removed rejected proposals from
+                # this mask.  This also preserves an accepted prior window,
+                # which is a real fit exclusion but has no scan iteration.
+                fit_exclusion_mask = np.asarray(explicit_mask, dtype=bool).reshape(-1)
+            elif accepted_iterations:
+                signal_mask = np.asarray(
+                    refinement_source.signal_mask, dtype=bool
+                ).reshape(-1)
+                point_weight = np.asarray(
+                    refinement_source.point_weight, dtype=float
+                ).reshape(-1)
+                if signal_mask.size != time_np.size:
+                    raise RuntimeError(
+                        "Refinement signal mask does not match the input light curve."
+                    )
+                fit_exclusion_mask = (
+                    signal_mask & (point_weight <= 0.0)
+                    if point_weight.size == signal_mask.size
+                    else signal_mask.copy()
+                )
+            if fit_exclusion_mask.size != time_np.size:
+                raise RuntimeError(
+                    "Fit exclusion mask does not match the input light curve."
+                )
 
         # Enforce the invariant even when a caller supplies a custom final
         # measurement configuration: this stage scans the complete residual
@@ -1336,6 +1353,53 @@ class Finder:
             fit=adopted_fit,
             config=resolved.template_free,
         )
+
+        detection_records = []
+        if effect_aware.planet_before is not None:
+            decision = getattr(effect_aware.planet_before, "scan_decision", None)
+            if decision is not None:
+                detection_records.append(
+                    PlanetDetectionRecord(
+                        stage="pre_physical",
+                        decision=decision,
+                        model_kind=str(
+                            getattr(
+                                effect_aware.planet_before.refined_fit,
+                                "model_kind",
+                                "unknown",
+                            )
+                        ),
+                        fit_adopted=not fallback_accepted,
+                    )
+                )
+        if fallback_accepted and effect_aware.planet_after is not None:
+            decision = getattr(effect_aware.planet_after, "scan_decision", None)
+            if decision is not None:
+                detection_records.append(
+                    PlanetDetectionRecord(
+                        stage="post_physical",
+                        decision=decision,
+                        model_kind=str(
+                            getattr(
+                                effect_aware.planet_after.refined_fit,
+                                "model_kind",
+                                "unknown",
+                            )
+                        ),
+                        fit_adopted=not post_refinement_reset,
+                    )
+                )
+        final_decision = getattr(final_measurement, "scan_decision", None)
+        if final_decision is not None:
+            detection_records.append(
+                PlanetDetectionRecord(
+                    stage="final",
+                    decision=final_decision,
+                    model_kind=str(getattr(adopted_fit, "model_kind", "unknown")),
+                    fit_adopted=True,
+                    canonical=True,
+                )
+            )
         candidates = build_anomaly_candidates(
             features,
             template_free,
@@ -1356,7 +1420,10 @@ class Finder:
         diagnostics = {
             **dict(effect_aware.diagnostics),
             "planet_before_refits_completed": int(
-                len(tuple(effect_aware.planet_before.iterations))
+                sum(
+                    bool(getattr(iteration, "accepted", True))
+                    for iteration in tuple(effect_aware.planet_before.iterations)
+                )
                 if effect_aware.planet_before is not None
                 else 0
             ),
@@ -1376,6 +1443,9 @@ class Finder:
                 if getattr(final_measurement, "scan_decision", None) is None
                 else final_measurement.scan_decision.summary_dict()
             ),
+            "detection_records": [
+                record.summary_dict() for record in detection_records
+            ],
             "observed_signal_scale": (
                 None
                 if getattr(final_measurement, "observed_signal_scale", None)
@@ -1397,6 +1467,7 @@ class Finder:
             observed_signal_scale=getattr(
                 final_measurement, "observed_signal_scale", None
             ),
+            detection_records=tuple(detection_records),
         )
 
     @staticmethod
@@ -1955,20 +2026,31 @@ class Finder:
             max_grid_points=int(cfg.auto_init_fft_max_grid_points),
             fft_workers=int(cfg.auto_init_fft_workers),
         )
+        # ``top_k`` is only a post-ranking truncation inside the FFT scanner.
+        # Ask for the complete one-peak-per-template pool here so a handful of
+        # gap/cancellation artefacts cannot hide the first usable seed.
+        candidate_pool_size = max(1, n_u0 * n_tE, int(cfg.auto_init_fft_top_k))
         search = scanner.search_tE(
             time_np,
             np.asarray(jax.device_get(flux_j), dtype=float),
             np.asarray(jax.device_get(ferr_j), dtype=float),
             u0_grid=u0_grid,
             tE_grid=tE_grid,
-            top_k=top_k,
+            top_k=candidate_pool_size,
         )
 
-        if search.candidates:
+        flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
+        candidates = self._filter_pspl_fft_initial_candidates(
+            search.candidates,
+            time_np=time_np,
+            flux_np=flux_np,
+            limit=top_k,
+        )
+        if candidates:
             return np.asarray(
                 [
                     self._build_initial_vector(candidate.t0, candidate.tE, candidate.u0)
-                    for candidate in search.candidates
+                    for candidate in candidates
                 ],
                 dtype=float,
             )
@@ -1976,12 +2058,77 @@ class Finder:
         # Keep the automatic workflow recoverable for flat or numerically
         # singular light curves. The subsequent fitter will decide whether
         # this conservative seed is usable.
-        flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
         i_peak = int(np.nanargmax(flux_np))
         t0 = float(time_np[i_peak])
         teff = float(np.sqrt(float(cfg.auto_init_teff_min) * float(cfg.auto_init_teff_max)))
         u0 = float(np.sqrt(float(cfg.auto_init_u0_min) * float(cfg.auto_init_u0_max)))
         return np.asarray([self._build_initial_vector(t0, teff / u0, u0)], dtype=float)
+
+    def _filter_pspl_fft_initial_candidates(
+        self,
+        candidates: Sequence,
+        *,
+        time_np: np.ndarray,
+        flux_np: np.ndarray,
+        limit: int,
+    ) -> list:
+        """Reject FFT seeds that are not supported by actual observations.
+
+        The profiled FFT score can be dominated by a tiny PSPL wing in a long
+        seasonal gap when the source and blend fluxes nearly cancel.  The
+        continuous PSPL fitter has an explicit support guard for this case, but
+        it is too late if every top-ranked seed already violates that guard.
+        Apply the same support condition before ranking seeds, and reject the
+        corresponding cancellation pathology at the initializer boundary.
+        """
+        cfg = self.config
+        minimum_support = int(cfg.pspl_fit_min_t0_support_points)
+        support_coeff = float(cfg.pspl_fit_t0_support_tE_coeff)
+        nearest_coeff = float(cfg.auto_init_nearest_support_tE_coeff)
+        cancellation_limit = float(cfg.auto_init_max_flux_cancellation_ratio)
+        if minimum_support < 1 or support_coeff <= 0.0:
+            raise ValueError(
+                "PSPL automatic-initialization support settings must be positive."
+            )
+        if nearest_coeff <= 0.0:
+            raise ValueError(
+                "auto_init_nearest_support_tE_coeff must be positive."
+            )
+
+        time_values = np.asarray(time_np, dtype=float)
+        flux_values = np.asarray(flux_np, dtype=float)
+        median_flux = float(np.median(np.abs(flux_values)))
+        selected = []
+        max_selected = max(1, int(limit))
+
+        for candidate in candidates:
+            t0 = float(candidate.t0)
+            t_e = abs(float(candidate.tE))
+            u0 = abs(float(candidate.u0))
+            fs = float(candidate.fs)
+            fb = float(candidate.fb)
+            if not all(np.isfinite(value) for value in (t0, t_e, u0, fs, fb)):
+                continue
+            if t_e <= 0.0 or u0 < float(cfg.pspl_fit_u0_min):
+                continue
+
+            distances = np.abs(time_values - t0)
+            support = int(np.count_nonzero(distances <= support_coeff * t_e))
+            if support < minimum_support:
+                continue
+            if float(np.min(distances)) > nearest_coeff * t_e:
+                continue
+
+            baseline = max(abs(fs + fb), median_flux, 1.0e-30)
+            cancellation = (abs(fs) + abs(fb)) / baseline
+            if np.isfinite(cancellation_limit) and cancellation > cancellation_limit:
+                continue
+
+            selected.append(candidate)
+            if len(selected) >= max_selected:
+                break
+
+        return selected
 
     @staticmethod
     def _grid_quality_for_cluster(t0: float, teff: float, metrics: np.ndarray) -> tuple[float, float]:

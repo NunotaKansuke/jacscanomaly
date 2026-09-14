@@ -130,7 +130,9 @@ API:
 
    print(result.has_anomaly_candidate)
    print(result.best_anomaly_candidate)
-   print(result.final_detection.summary_dict())
+   print(result.canonical_detection.summary_dict())
+   for record in result.detection_records:
+       print(record.stage, record.detected, record.fit_adopted)
    for candidate in result.anomaly_candidates:
        print(candidate["rank"], candidate["t_center"], candidate["max_abs_z"])
    print(result.adopted_fit.model_kind)
@@ -144,15 +146,23 @@ first row or ``None``. The deliberately cautious name
 ``has_anomaly_candidate`` means that a false value is not a proof that no
 physical anomaly exists.
 
-``result.final_detection`` is a separate ``PlanetScanDecision`` from the
-frozen residual scan after model selection. It is the discovery decision;
+``result.canonical_detection`` is the one discovery decision: a separate
+``PlanetScanDecision`` from the frozen residual scan after model selection.
+``result.final_detection`` is retained as a compatibility alias. Earlier
+decisions are preserved in ``result.detection_records`` with stages
+``pre_physical`` and, when fallback ran, ``post_physical``. Those records are
+history/provenance; only the record marked ``canonical`` is the public final
+discovery decision. ``fit_adopted`` tells whether the baseline associated with
+an earlier scan survived model selection, so a post-physical detection can be
+real without its continuation fit being adopted.
+
 ``result.features`` and ``result.anomaly_candidates`` are characterization and
-reporting layers and must not be used to rewrite that decision.
+reporting layers and must not be used to rewrite the canonical detection.
 
 ``result.fit_exclusion_mask`` contains only points excluded by an accepted
-continuation fit. ``result.finder_support`` is the union of supports from all
-accepted clusters in the independent full-residual Finder pass. It is an
-anomaly alert region used for characterization and must not be used as a fit
+continuation fit. ``result.finder_support`` is the detection-support region
+used to carry a localized signal through physical routing and final
+characterization. It is an anomaly alert region and must not be used as a fit
 or HTML removal mask.
 
 Physical routing and observed time scale

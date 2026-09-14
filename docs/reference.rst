@@ -31,6 +31,11 @@ always performs a frozen final-residual measurement after model selection, so
 feature reporting does not depend on whether a post-physical continuation fit
 accepted an exclusion mask.
 
+The lower-level ``Finder.run_effect_aware`` result exposes
+``pre_physical_detection`` and ``post_physical_detection`` for stage-level
+inspection. The one-line pipeline additionally records those decisions and
+selects its frozen final scan as the canonical decision.
+
 .. autoclass:: jacscanomaly.AnomalyPipelineConfig
    :no-index:
 
@@ -71,12 +76,19 @@ Planet signal extraction API
 .. automethod:: jacscanomaly.PlanetSignalExtractor.run
 
 .. autoclass:: jacscanomaly.PlanetSignalResult
+   :no-index:
 
 ``PlanetScanDecision`` records the scan-only discovery decision separately
-from peak/dip characterization. The complete high-level result exposes it as
-``AnomalyPipelineResult.final_detection``.
+from peak/dip characterization. ``PlanetDetectionRecord`` adds the pipeline
+stage and whether that stage's baseline was adopted. The complete high-level
+result exposes one canonical decision plus the pre/post history through
+``AnomalyPipelineResult.canonical_detection`` and
+``AnomalyPipelineResult.detection_records``.
 
 .. autoclass:: jacscanomaly.PlanetScanDecision
+   :no-index:
+
+.. autoclass:: jacscanomaly.PlanetDetectionRecord
    :no-index:
 
 .. automethod:: jacscanomaly.PlanetSignalResult.measure_features
@@ -87,10 +99,13 @@ from peak/dip characterization. The complete high-level result exposes it as
    :no-index:
 
 The extractor returns both ``initial_fit`` and ``refined_fit``. Use
-``signal_mask`` to identify excluded points, ``point_weight`` to inspect the
-fit weighting, ``finder_support_array()`` to inspect independent final Finder
-support, and ``iterations`` to audit accepted refinement steps. See
-:doc:`planet_features` for the three baseline modes and their controls.
+``fit_exclusion_mask`` for points actually excluded by the adopted fit;
+``signal_mask`` is retained as a compatibility/provenance field. Use
+``point_weight`` to inspect fit weighting, ``finder_support_array()`` to
+inspect detection support independent of hard exclusions, and
+``accepted_iterations`` to
+audit accepted refinement steps. See :doc:`planet_features` for the three
+baseline modes and their controls.
 
 ``timing`` records the extractor wall-clock total, time spent in residual-grid
 scans, and the number of scans.  In effect-aware runs, the default routing

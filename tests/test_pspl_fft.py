@@ -3,7 +3,13 @@ import pytest
 import jax.numpy as jnp
 
 import jacscanomaly
-from jacscanomaly import Finder, FinderConfig, PSPLFFTScanner, pspl_excess_magnification
+from jacscanomaly import (
+    Finder,
+    FinderConfig,
+    PSPLFFTCandidate,
+    PSPLFFTScanner,
+    pspl_excess_magnification,
+)
 
 
 def test_public_package_exports():
@@ -280,3 +286,37 @@ def test_finder_uses_tE_outer_batched_pspl_fft_initialization():
     assert np.all(guesses[:, 1] <= 5.0)
     assert np.all(guesses[:, 1] > 0.0)
     assert np.all(guesses[:, 2] > 0.0)
+
+
+def test_finder_rejects_gap_and_cancellation_fft_seeds():
+    finder = Finder(FinderConfig())
+    time = np.r_[np.linspace(0.0, 10.0, 21), np.linspace(100.0, 110.0, 21)]
+    flux = np.ones_like(time)
+
+    def candidate(t0, tE, fs, fb):
+        return PSPLFFTCandidate(
+            t0=t0,
+            teff=0.2,
+            u0=0.2,
+            tE=tE,
+            fs=fs,
+            f0=fs + fb,
+            fb=fb,
+            chi2=1.0,
+            delta_chi2=10.0,
+            grid_index=0,
+        )
+
+    selected = finder._filter_pspl_fft_initial_candidates(
+        [
+            candidate(50.0, 1.0, 1.0, 0.0),
+            candidate(5.0, 1.0, 1_000.0, -999.0),
+            candidate(5.0, 1.0, 1.0, 0.0),
+        ],
+        time_np=time,
+        flux_np=flux,
+        limit=1,
+    )
+
+    assert len(selected) == 1
+    assert selected[0].t0 == pytest.approx(5.0)

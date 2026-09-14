@@ -181,6 +181,26 @@ class FinderConfig:
     auto_init_fft_top_k: int = 4
     """Number of ranked PSPL FFT seeds passed to the fitter."""
 
+    auto_init_max_flux_cancellation_ratio: float = 50.0
+    """
+    Maximum source/blend cancellation ratio allowed for an automatic PSPL seed.
+
+    The FFT initializer profiles ``fs`` and ``fb`` independently.  A trial
+    whose two terms are much larger than the observed baseline can therefore
+    obtain a large apparent improvement while placing ``t0`` in an unobserved
+    gap.  Such a seed is not useful to the continuous fitter.
+    """
+
+    auto_init_nearest_support_tE_coeff: float = 1.0
+    """
+    Require one observation within this many ``tE`` of an automatic ``t0``.
+
+    This is a local-support guard in addition to the broader
+    ``pspl_fit_t0_support_tE_coeff`` window.  It keeps a one-sided event near a
+    season boundary usable while rejecting a model supported only by a distant
+    wing across a large gap.
+    """
+
     auto_init_fft_workers: int = -1
     """SciPy worker count for batched PSPL FFTs; -1 uses all available CPUs."""
 

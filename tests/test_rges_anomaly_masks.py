@@ -37,6 +37,19 @@ def test_fit_exclusion_mask_keeps_only_zero_weight_signal_points():
     )
 
 
+def test_fit_exclusion_mask_prefers_explicit_adopted_mask():
+    result = SimpleNamespace(
+        fit_exclusion_mask=np.array([False, True, False]),
+        signal_mask=np.array([True, True, True]),
+        point_weight=np.array([0.0, 0.0, 0.0]),
+        iterations=(),
+    )
+    np.testing.assert_array_equal(
+        _fit_exclusion_mask(result),
+        np.array([False, True, False]),
+    )
+
+
 def test_rges_observer_positions_become_geocentric_space_ephemeris(tmp_path):
     times = np.array([2459000.0, 2459001.0, 2459002.0])
     earth = _earth_position_at(times)

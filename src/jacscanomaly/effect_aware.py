@@ -36,6 +36,16 @@ class EffectAwareFinderResult:
     reason_codes: tuple[str, ...]
     diagnostics: dict[str, object]
 
+    @property
+    def pre_physical_detection(self):
+        """The scan decision made before physical-effect fallback."""
+        return getattr(self.planet_before, "scan_decision", None)
+
+    @property
+    def post_physical_detection(self):
+        """The scan decision made after physical-effect fallback."""
+        return getattr(self.planet_after, "scan_decision", None)
+
 
 def _candidate_interval(candidate) -> tuple[float, float]:
     return float(candidate.t_start), float(candidate.t_end)
