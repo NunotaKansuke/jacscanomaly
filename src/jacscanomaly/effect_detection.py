@@ -13,7 +13,7 @@ available explicitly for cross-validation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
@@ -48,6 +48,150 @@ class ProjectionDiagnostics:
 
 
 @dataclass(frozen=True)
+class EffectMorphologyConfig:
+    """Fast, model-independent morphology thresholds.
+
+    The values are deliberately dimensionless where possible.  They are a
+    provisional RMDC/F146 calibration, not a replacement for the physical
+    score-test thresholds: ``residual_sigma`` is the residual floor used to
+    form morphology weights, ``fspl_short_days`` controls the short PSPL
+    brightening branch, and the parallax length scale is in the input time
+    unit (days for the normal RMDC contract).
+
+    This configuration only controls the cheap pre-score.  It does not alter
+    the existing ``EffectCandidate.score`` (the projected ``Delta chi2``).
+    """
+
+    residual_sigma: float = 2.5
+    model_low_quantile: float = 0.10
+    model_high_quantile: float = 0.90
+    residual_low_quantile: float = 0.10
+    residual_high_quantile: float = 0.90
+    profile_bins: int = 96
+
+    # The weak-parallax branch aggregates signed residuals in time blocks.
+    # These thresholds are applied to the block-level excess significance,
+    # not to individual data points, so a low-amplitude signal can accumulate
+    # over many observations without making isolated noise look broad.
+    # A block statistic has an approximately chi-square null distribution;
+    # require a modest global excess before broad support contributes.
+    parallax_block_evidence_soft: float = 2.0
+    parallax_block_evidence_hard: float = 4.0
+    parallax_block_effective_bins_soft: float = 1.5
+    parallax_block_effective_bins_hard: float = 4.0
+    parallax_block_clip_sigma: float = 5.0
+
+    # A short PSPL brightening is the first FSPL cue.  The soft interval avoids
+    # a brittle yes/no cut for sparse cadence.
+    # RMDC26 event 3008 has a PSPL brightening width of about 0.42 d at the
+    # F146 cadence.  Use that as the hard end of the "very short" branch and
+    # keep a soft tail so the score is not a discontinuous event veto.
+    fspl_short_days: float = 0.50
+    fspl_short_days_soft: float = 2.0
+    # Kept as a diagnostic threshold for downstream calibration.  It is not
+    # used as the primary FSPL shortness score.
+    fspl_short_ratio: float = 0.25
+    fspl_short_ratio_soft: float = 0.60
+    fspl_shape_sigma: float = 2.5
+
+    # RMDC-like long-event scale.  The score is continuous over this interval
+    # and does not veto short events; broad residual support is still allowed
+    # to produce a parallax score for a short event.
+    parallax_long_days_soft: float = 10.0
+    parallax_long_days: float = 45.0
+    parallax_broad_days_soft: float = 1.0
+    parallax_broad_days: float = 8.0
+    parallax_broad_ratio_soft: float = 0.15
+    parallax_broad_ratio: float = 0.45
+
+
+@dataclass(frozen=True)
+class EffectMorphologyScores:
+    """Cheap morphology scores computed directly from a PSPL fit.
+
+    ``fspl_score`` is the maximum of a compactness score and the signed
+    ``+ - +`` residual-shape score.  ``parallax_score`` requires residual
+    support spread over time, then boosts that score when the PSPL brightening
+    is long.  In particular, a large residual amplitude is not penalized: a
+    very long event with a strong but broad residual is intentionally kept.
+
+    All score fields are in ``[0, 1]``.  They are ranking features only; the
+    physical detector's ``EffectCandidate.score`` remains a Delta-chi-square
+    quantity.
+    """
+
+    model_width: float
+    model_width_cadences: float
+    model_center: float
+    residual_width: float
+    residual_width_cadences: float
+    residual_center: float
+    residual_model_width_ratio: float
+    residual_peak_z: float
+    residual_evidence: float
+    residual_support_points: int
+    residual_profile_support_fraction: float
+    residual_profile_effective_bins: float
+    model_censored: bool
+    residual_censored: bool
+    fspl_short_score: float
+    fspl_shape_score: float
+    fspl_score: float
+    parallax_long_score: float
+    parallax_broad_score: float
+    parallax_weak_broad_score: float
+    parallax_strong_broad_score: float
+    parallax_score: float
+    residual_block_width: float = 0.0
+    residual_block_width_ratio: float = 0.0
+    residual_block_support_fraction: float = 0.0
+    residual_block_effective_bins: float = 0.0
+    residual_block_evidence: float = 0.0
+    parallax_block_score: float = 0.0
+
+    def summary_dict(self) -> dict[str, object]:
+        """Return JSON-friendly diagnostics for logs and candidate output."""
+        return {
+            "model_width": float(self.model_width),
+            "model_width_cadences": float(self.model_width_cadences),
+            "model_center": float(self.model_center),
+            "residual_width": float(self.residual_width),
+            "residual_width_cadences": float(self.residual_width_cadences),
+            "residual_center": float(self.residual_center),
+            "residual_model_width_ratio": float(self.residual_model_width_ratio),
+            "residual_peak_z": float(self.residual_peak_z),
+            "residual_evidence": float(self.residual_evidence),
+            "residual_support_points": int(self.residual_support_points),
+            "residual_profile_support_fraction": float(
+                self.residual_profile_support_fraction
+            ),
+            "residual_profile_effective_bins": float(
+                self.residual_profile_effective_bins
+            ),
+            "residual_block_width": float(self.residual_block_width),
+            "residual_block_width_ratio": float(self.residual_block_width_ratio),
+            "residual_block_support_fraction": float(
+                self.residual_block_support_fraction
+            ),
+            "residual_block_effective_bins": float(
+                self.residual_block_effective_bins
+            ),
+            "residual_block_evidence": float(self.residual_block_evidence),
+            "model_censored": bool(self.model_censored),
+            "residual_censored": bool(self.residual_censored),
+            "fspl_short_score": float(self.fspl_short_score),
+            "fspl_shape_score": float(self.fspl_shape_score),
+            "fspl_score": float(self.fspl_score),
+            "parallax_long_score": float(self.parallax_long_score),
+            "parallax_broad_score": float(self.parallax_broad_score),
+            "parallax_weak_broad_score": float(self.parallax_weak_broad_score),
+            "parallax_strong_broad_score": float(self.parallax_strong_broad_score),
+            "parallax_block_score": float(self.parallax_block_score),
+            "parallax_score": float(self.parallax_score),
+        }
+
+
+@dataclass(frozen=True)
 class EffectCandidate:
     """Physical detector output used by the routing policy.
 
@@ -76,6 +220,8 @@ class EffectCandidate:
     planet_overlap: float = 0.0
     morphology: str = "unclassified"
     observed_signal_scale: Optional[ObservedSignalScale] = None
+    morphology_score: float = float("nan")
+    morphology_diagnostics: Optional[dict[str, object]] = None
 
     def with_decision(self, decision: str, reason_codes: Iterable[str]) -> "EffectCandidate":
         """Return a copy with the routing decision attached."""
@@ -106,6 +252,10 @@ class EffectCandidate:
             planet_overlap=float(self.planet_overlap),
             morphology=str(self.morphology),
             observed_signal_scale=self.observed_signal_scale,
+            morphology_score=float(self.morphology_score),
+            morphology_diagnostics=None
+            if self.morphology_diagnostics is None
+            else dict(self.morphology_diagnostics),
         )
 
     def with_probe(
@@ -138,6 +288,25 @@ class EffectCandidate:
             planet_overlap=self.planet_overlap,
             morphology=self.morphology,
             observed_signal_scale=self.observed_signal_scale,
+            morphology_score=float(self.morphology_score),
+            morphology_diagnostics=None
+            if self.morphology_diagnostics is None
+            else dict(self.morphology_diagnostics),
+        )
+
+    def with_morphology(
+        self,
+        *,
+        score: float,
+        diagnostics: Optional[dict[str, object]] = None,
+    ) -> "EffectCandidate":
+        """Attach the cheap morphology score without changing physical scores."""
+        return replace(
+            self,
+            morphology_score=float(score),
+            morphology_diagnostics=(
+                None if diagnostics is None else _json_safe(dict(diagnostics))
+            ),
         )
 
     def summary_dict(self) -> dict[str, object]:
@@ -155,6 +324,8 @@ class EffectCandidate:
             "score_without_planet": float(self.score_without_planet),
             "planet_overlap": float(self.planet_overlap),
             "morphology": self.morphology,
+            "morphology_score": float(self.morphology_score),
+            "morphology_diagnostics": _json_safe(self.morphology_diagnostics),
             "observed_signal_scale": (
                 None
                 if self.observed_signal_scale is None
@@ -475,6 +646,629 @@ def _weighted_span(time: np.ndarray, weights: np.ndarray) -> float:
     lo = float(np.interp(0.05, cumulative, ts))
     hi = float(np.interp(0.95, cumulative, ts))
     return max(hi - lo, 0.0)
+
+
+def _weighted_interval(
+    time: np.ndarray,
+    weights: np.ndarray,
+    *,
+    low: float,
+    high: float,
+) -> tuple[float, float, float]:
+    """Return weighted low/high endpoints and total weight."""
+    t = np.asarray(time, dtype=float).reshape(-1)
+    w = np.asarray(weights, dtype=float).reshape(-1)
+    valid = np.isfinite(t) & np.isfinite(w) & (w > 0.0)
+    if np.count_nonzero(valid) < 2:
+        return float("nan"), float("nan"), 0.0
+    order = np.argsort(t[valid])
+    ts = t[valid][order]
+    ws = w[valid][order]
+    cumulative = np.cumsum(ws)
+    total = float(cumulative[-1])
+    if not np.isfinite(total) or total <= 0.0:
+        return float("nan"), float("nan"), 0.0
+    # The cumulative coordinate is monotone and can contain repeated values
+    # only for zero weights, which were removed above.
+    quantiles = np.interp(
+        [float(low), 0.50, float(high)],
+        cumulative / total,
+        ts,
+    )
+    return float(quantiles[0]), float(quantiles[2]), total
+
+
+def _ramp(value: float, soft: float, hard: float) -> float:
+    """Continuous increasing ramp with stable behavior for bad inputs."""
+    value = float(value)
+    soft = float(soft)
+    hard = float(hard)
+    if not np.isfinite(value):
+        return 0.0
+    if hard <= soft:
+        return float(value >= hard)
+    return float(np.clip((value - soft) / (hard - soft), 0.0, 1.0))
+
+
+def _decreasing_ramp(value: float, hard: float, soft: float) -> float:
+    """Continuous decreasing ramp, one for ``value <= hard``."""
+    value = float(value)
+    hard = float(hard)
+    soft = float(soft)
+    if not np.isfinite(value):
+        return 0.0
+    if soft <= hard:
+        return float(value <= hard)
+    return float(np.clip((soft - value) / (soft - hard), 0.0, 1.0))
+
+
+def _median_for_mask(values: np.ndarray, mask: np.ndarray) -> float:
+    selected = np.asarray(values, dtype=float)[np.asarray(mask, dtype=bool)]
+    return float(np.nanmedian(selected)) if selected.size else float("nan")
+
+
+def _profile_residual_morphology(
+    time: np.ndarray,
+    standardized_residual: np.ndarray,
+    *,
+    floor: float,
+    n_bins: int,
+) -> tuple[float, float, float, int, float]:
+    """Summarize broad residual support with a small equal-time profile.
+
+    The median in each bin deliberately makes a one-point spike disappear
+    when it is surrounded by normal points, while a weak residual repeated
+    over a long interval remains visible.  Point-level widths are still used
+    separately for the sparse FSPL branch.
+    """
+    t = np.asarray(time, dtype=float).reshape(-1)
+    z = np.asarray(standardized_residual, dtype=float).reshape(-1)
+    valid = np.isfinite(t) & np.isfinite(z)
+    if np.count_nonzero(valid) < 4:
+        return 0.0, 0.0, 0.0, 0, 0.0
+    tv = t[valid]
+    zv = z[valid]
+    order = np.argsort(tv)
+    tv = tv[order]
+    zv = zv[order]
+    left, right = float(tv[0]), float(tv[-1])
+    if not np.isfinite(left) or not np.isfinite(right) or right <= left:
+        return 0.0, 0.0, 0.0, 0, 0.0
+    bins = max(8, min(int(n_bins), int(max(8, 2 * np.sqrt(tv.size)))))
+    edges = np.linspace(left, right, bins + 1)
+    index = np.searchsorted(edges, tv, side="right") - 1
+    index = np.clip(index, 0, bins - 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    profile = np.full(bins, np.nan, dtype=float)
+    occupied = np.zeros(bins, dtype=bool)
+    for bin_index in range(bins):
+        selected = index == bin_index
+        if np.any(selected):
+            occupied[bin_index] = True
+            profile[bin_index] = float(np.nanmedian(np.abs(zv[selected])))
+    profile_weights = np.square(np.maximum(profile - max(float(floor), 0.0), 0.0))
+    profile_weights[~occupied] = 0.0
+    active = profile_weights > 0.0
+    n_occupied = int(np.count_nonzero(occupied))
+    n_active = int(np.count_nonzero(active))
+    support_fraction = float(n_active / max(n_occupied, 1))
+    total = float(np.sum(profile_weights))
+    effective_bins = (
+        float(total * total / np.sum(profile_weights * profile_weights))
+        if total > 0.0 and np.sum(profile_weights * profile_weights) > 0.0
+        else 0.0
+    )
+    profile_evidence = (
+        float(1.0 - np.exp(-np.sqrt(total) / 3.0))
+        if total > 0.0
+        else 0.0
+    )
+    if total <= 0.0:
+        return 0.0, support_fraction, effective_bins, n_active, profile_evidence
+    valid_profile = profile_weights > 0.0
+    profile_left, profile_right, _ = _weighted_interval(
+        centers[valid_profile],
+        profile_weights[valid_profile],
+        low=0.10,
+        high=0.90,
+    )
+    width = (
+        max(float(profile_right - profile_left), 0.0)
+        if np.isfinite(profile_left) and np.isfinite(profile_right)
+        else 0.0
+    )
+    return width, support_fraction, effective_bins, n_active, profile_evidence
+
+
+def _signed_block_residual_morphology(
+    time: np.ndarray,
+    standardized_residual: np.ndarray,
+    *,
+    n_bins: int,
+    clip_sigma: float,
+) -> tuple[float, float, float, float, float]:
+    """Accumulate weak, signed residuals over broad time blocks.
+
+    A parallax residual can be much smaller than one per-point sigma while
+    remaining coherent over thousands of observations.  For each equal-time
+    block, estimate its signed mean and compare it with the standard error of
+    that mean.  The total block statistic is compared with its null
+    expectation, rather than thresholding individual points.  A clipped mean
+    keeps one bad datum from manufacturing a broad signal.
+
+    Returns ``(width, support_fraction, effective_bins, evidence, excess)``.
+    ``evidence`` is the approximate normal-equivalent excess significance of
+    the block chi-square, and ``excess`` is retained for diagnostics.
+    """
+    t = np.asarray(time, dtype=float).reshape(-1)
+    z = np.asarray(standardized_residual, dtype=float).reshape(-1)
+    valid = np.isfinite(t) & np.isfinite(z)
+    if np.count_nonzero(valid) < 8:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    tv = t[valid]
+    zv = z[valid]
+    order = np.argsort(tv)
+    tv = tv[order]
+    zv = zv[order]
+    left, right = float(tv[0]), float(tv[-1])
+    if not np.isfinite(left) or not np.isfinite(right) or right <= left:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    bins = max(8, min(int(n_bins), int(max(8, 2 * np.sqrt(tv.size)))))
+    edges = np.linspace(left, right, bins + 1)
+    index = np.searchsorted(edges, tv, side="right") - 1
+    index = np.clip(index, 0, bins - 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    global_center = float(np.nanmedian(zv))
+    global_mad = float(np.nanmedian(np.abs(zv - global_center)))
+    noise_scale = max(1.0, 1.4826 * global_mad)
+    clip = max(float(clip_sigma), 1.0) * noise_scale
+    block_q2 = np.zeros(bins, dtype=float)
+    occupied = np.zeros(bins, dtype=bool)
+    for bin_index in range(bins):
+        selected = index == bin_index
+        if not np.any(selected):
+            continue
+        occupied[bin_index] = True
+        values = zv[selected]
+        block_center = float(np.nanmedian(values))
+        clipped = np.clip(values, block_center - clip, block_center + clip)
+        block_mean = float(np.nanmean(clipped))
+        count = float(values.size)
+        block_q2[bin_index] = count * (block_mean / noise_scale) ** 2
+
+    occupied_count = int(np.count_nonzero(occupied))
+    if occupied_count < 2:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    q2 = block_q2[occupied]
+    expected = float(occupied_count)
+    total = float(np.sum(q2))
+    excess = total - expected
+    evidence = max(0.0, excess / np.sqrt(max(2.0 * expected, 1.0)))
+
+    weights = np.maximum(block_q2 - 1.0, 0.0)
+    weights[~occupied] = 0.0
+    active = weights > 0.0
+    active_count = int(np.count_nonzero(active))
+    support_fraction = float(active_count / max(occupied_count, 1))
+    weight_total = float(np.sum(weights))
+    effective_bins = (
+        float(weight_total * weight_total / np.sum(weights * weights))
+        if weight_total > 0.0 and np.sum(weights * weights) > 0.0
+        else 0.0
+    )
+    if weight_total <= 0.0:
+        return 0.0, support_fraction, effective_bins, evidence, excess
+    block_left, block_right, _ = _weighted_interval(
+        centers[active],
+        weights[active],
+        low=0.10,
+        high=0.90,
+    )
+    width = (
+        max(float(block_right - block_left), 0.0)
+        if np.isfinite(block_left) and np.isfinite(block_right)
+        else 0.0
+    )
+    return width, support_fraction, effective_bins, evidence, excess
+
+
+def _coherent_support_mask(
+    time: np.ndarray,
+    support: np.ndarray,
+    *,
+    cadence: float,
+    min_run: int = 2,
+) -> np.ndarray:
+    """Keep short time-contiguous residual runs and remove isolated noise."""
+    t = np.asarray(time, dtype=float).reshape(-1)
+    mask = np.asarray(support, dtype=bool).reshape(-1)
+    if t.size != mask.size or not np.any(mask):
+        return np.zeros(mask.size, dtype=bool)
+    indices = np.flatnonzero(mask)
+    if indices.size < int(min_run):
+        return np.zeros(mask.size, dtype=bool)
+    gap_limit = max(3.0 * float(cadence), 1.0e-6) if np.isfinite(cadence) else np.inf
+    breaks = np.flatnonzero(
+        (np.diff(indices) > 1)
+        | (np.diff(t[indices]) > gap_limit)
+    )
+    starts = np.r_[0, breaks + 1]
+    ends = np.r_[breaks + 1, indices.size]
+    lengths = ends - starts
+    coherent = np.zeros(mask.size, dtype=bool)
+    # A physical compact residual normally supplies several consecutive
+    # cadences.  Keep every sufficiently long run; if the data contain only
+    # two-point runs, retain only the longest one so two unrelated noise
+    # excursions cannot manufacture a huge weighted span.
+    long_runs = [(start, end) for start, end in zip(starts, ends) if end - start >= 3]
+    if long_runs:
+        selected_runs = long_runs
+    elif np.any(lengths >= int(min_run)):
+        selected_index = int(np.argmax(lengths))
+        selected_runs = [(starts[selected_index], ends[selected_index])]
+    else:
+        selected_runs = []
+    for start, end in selected_runs:
+        coherent[indices[start:end]] = True
+    return coherent
+
+
+def compute_effect_morphology_scores(
+    fit,
+    *,
+    config: Optional[EffectMorphologyConfig] = None,
+) -> EffectMorphologyScores:
+    """Compute fast FSPL/parallax morphology scores from a PSPL fit.
+
+    This is an ``O(n log n + B*n/B)`` NumPy pass (one time sort and a small
+    profile with ``B`` bins) and does not call VBMicrolensing, JAX, SVD, or an
+    optimizer.  It is intended for the first-stage ``detect_effects`` gate:
+
+    * FSPL gets an ``OR`` score from a very short PSPL brightening or a
+      signed positive/negative/positive residual around the PSPL peak.
+    * parallax requires temporally broad residual support.  Long PSPL events
+      boost that score, but neither short events nor large residual amplitude
+      are hard vetoes.
+
+    The returned values are deliberately separate from the physical
+    projected-Delta-chi-square scores, so routing calibration remains intact.
+    """
+    cfg = EffectMorphologyConfig() if config is None else config
+    time = np.asarray(fit.time, dtype=float).reshape(-1)
+    residual = np.asarray(fit.residual, dtype=float).reshape(-1)
+    ferr = np.asarray(fit.ferr, dtype=float).reshape(-1)
+    params = np.asarray(fit.params, dtype=float).reshape(-1)
+    if not (time.size == residual.size == ferr.size):
+        raise ValueError("fit time, residual, and ferr must have equal lengths.")
+    if params.size < 3:
+        raise ValueError("A PSPL fit must contain at least (t0, tE, u0).")
+    if int(cfg.profile_bins) < 8:
+        raise ValueError("profile_bins must be at least 8.")
+    if float(cfg.residual_sigma) < 0.0:
+        raise ValueError("residual_sigma must be non-negative.")
+
+    valid = np.isfinite(time) & np.isfinite(residual) & np.isfinite(ferr) & (ferr > 0.0)
+    if np.count_nonzero(valid) < 4:
+        nan = float("nan")
+        return EffectMorphologyScores(
+            model_width=nan,
+            model_width_cadences=nan,
+            model_center=float(params[0]),
+            residual_width=0.0,
+            residual_width_cadences=0.0,
+            residual_center=nan,
+            residual_model_width_ratio=nan,
+            residual_peak_z=0.0,
+            residual_evidence=0.0,
+            residual_support_points=0,
+            residual_profile_support_fraction=0.0,
+            residual_profile_effective_bins=0.0,
+            model_censored=True,
+            residual_censored=False,
+            fspl_short_score=0.0,
+            fspl_shape_score=0.0,
+            fspl_score=0.0,
+            parallax_long_score=0.0,
+            parallax_broad_score=0.0,
+            parallax_weak_broad_score=0.0,
+            parallax_strong_broad_score=0.0,
+            parallax_score=0.0,
+        )
+
+    t = time[valid]
+    z = residual[valid] / np.maximum(ferr[valid], 1.0e-12)
+    order = np.argsort(t)
+    t = t[order]
+    z = z[order]
+    ferr_valid = ferr[valid][order]
+    A0, _ = _pspl_magnification_and_jacobian(t, params[:3])
+    model_excess = np.maximum(A0 - 1.0, 0.0)
+    model_peak = float(np.nanmax(model_excess)) if model_excess.size else 0.0
+    # Square-root weights retain the wings of a high-magnification event while
+    # still making the central brightening dominate the interval.
+    model_weights = np.sqrt(
+        np.maximum(model_excess / max(model_peak, 1.0e-30), 0.0)
+    )
+    model_left, model_right, _ = _weighted_interval(
+        t,
+        model_weights,
+        low=cfg.model_low_quantile,
+        high=cfg.model_high_quantile,
+    )
+    model_width = (
+        max(model_right - model_left, 0.0)
+        if np.isfinite(model_left) and np.isfinite(model_right)
+        else float("nan")
+    )
+    model_center = float(params[0])
+    positive_steps = np.diff(t)
+    positive_steps = positive_steps[np.isfinite(positive_steps) & (positive_steps > 0.0)]
+    cadence = float(np.median(positive_steps)) if positive_steps.size else float("nan")
+    cadence_floor = max(cadence if np.isfinite(cadence) else 0.0, 1.0e-12)
+    model_width_cadences = (
+        float(model_width / cadence_floor) if np.isfinite(model_width) else float("nan")
+    )
+    model_active = model_excess >= max(0.05 * model_peak, 1.0e-30)
+    model_censored = bool(
+        np.any(model_active)
+        and (model_active[0] or model_active[-1])
+    )
+
+    residual_peak_z = float(np.nanmax(np.abs(z))) if z.size else 0.0
+    floor = float(cfg.residual_sigma)
+    residual_excess = np.maximum(np.abs(z) - floor, 0.0)
+    residual_weights = np.square(residual_excess)
+    raw_support = residual_weights > 0.0
+    support = _coherent_support_mask(
+        t,
+        raw_support,
+        cadence=cadence,
+        min_run=2,
+    )
+    residual_weights[~support] = 0.0
+    residual_support_points = int(np.count_nonzero(support))
+    if residual_support_points >= 2:
+        cap = float(np.nanpercentile(residual_weights[support], 95.0))
+        if np.isfinite(cap) and cap > 0.0:
+            residual_weights = np.minimum(residual_weights, cap)
+    residual_left, residual_right, residual_weight_total = _weighted_interval(
+        t,
+        residual_weights,
+        low=cfg.residual_low_quantile,
+        high=cfg.residual_high_quantile,
+    )
+    residual_width = (
+        max(residual_right - residual_left, 0.0)
+        if np.isfinite(residual_left) and np.isfinite(residual_right)
+        else 0.0
+    )
+    _, residual_center_right, _ = _weighted_interval(
+        t,
+        residual_weights,
+        low=0.50,
+        high=0.50,
+    )
+    residual_center = (
+        float(residual_center_right)
+        if np.isfinite(residual_center_right)
+        else float("nan")
+    )
+    residual_width_cadences = float(residual_width / cadence_floor)
+    residual_censored = bool(
+        residual_support_points > 0
+        and (support[0] or support[-1])
+    )
+    point_residual_evidence = (
+        float(1.0 - np.exp(-np.sqrt(max(residual_weight_total, 0.0)) / 3.0))
+        if residual_weight_total > 0.0
+        else 0.0
+    )
+    residual_model_width_ratio = (
+        float(residual_width / max(model_width, 2.0 * cadence_floor))
+        if np.isfinite(model_width)
+        else float("nan")
+    )
+
+    profile_width, profile_support_fraction, profile_effective_bins, _, profile_evidence = (
+        _profile_residual_morphology(
+            t,
+            z,
+            # The profile is a broad-support detector, so it may use a lower
+            # floor than the point-level coherent-run detector.  A median over
+            # a bin suppresses isolated Gaussian excursions at this level.
+            floor=max(1.0, 0.5 * floor),
+            n_bins=cfg.profile_bins,
+        )
+    )
+    (
+        block_width,
+        block_support_fraction,
+        block_effective_bins,
+        block_evidence,
+        _block_excess,
+    ) = _signed_block_residual_morphology(
+        t,
+        z,
+        n_bins=cfg.profile_bins,
+        clip_sigma=cfg.parallax_block_clip_sigma,
+    )
+    residual_evidence = max(point_residual_evidence, profile_evidence)
+    short_score = _decreasing_ramp(
+        model_width,
+        cfg.fspl_short_days,
+        cfg.fspl_short_days_soft,
+    ) * residual_evidence
+
+    # Signed FSPL topology: positive shoulders, negative centre.  The window
+    # is learned from the observed residual width, not from rho or a template
+    # bank, so this remains cheap and works when only a few cadence points land
+    # on the crossing.
+    fspl_shape_score = 0.0
+    if residual_width > 0.0 and np.isfinite(residual_center):
+        shape_half_width = max(0.5 * residual_width, 2.0 * cadence_floor)
+        dt = t - model_center
+        core = np.abs(dt) <= 0.5 * shape_half_width
+        left = (dt < -0.5 * shape_half_width) & (dt >= -1.5 * shape_half_width)
+        right = (dt > 0.5 * shape_half_width) & (dt <= 1.5 * shape_half_width)
+        core_mean = _median_for_mask(z, core)
+        left_mean = _median_for_mask(z, left)
+        right_mean = _median_for_mask(z, right)
+        if np.all(np.isfinite([core_mean, left_mean, right_mean])):
+            positive = min(left_mean, right_mean)
+            positive_score = _ramp(positive, 1.0, cfg.fspl_shape_sigma)
+            negative_score = _ramp(-core_mean, 1.0, cfg.fspl_shape_sigma)
+            symmetry = float(
+                np.clip(
+                    1.0 - abs(left_mean - right_mean)
+                    / max(abs(left_mean) + abs(right_mean), 1.0e-12),
+                    0.0,
+                    1.0,
+                )
+            )
+            count_score = min(
+                1.0,
+                min(np.count_nonzero(core), np.count_nonzero(left), np.count_nonzero(right))
+                / 3.0,
+            )
+            centre_offset = abs(float(residual_center) - model_center)
+            centre_score = float(
+                np.exp(-0.5 * (centre_offset / max(shape_half_width, cadence_floor)) ** 2)
+            )
+            fspl_shape_score = (
+                positive_score
+                * negative_score
+                * symmetry
+                * count_score
+                * centre_score
+            )
+    fspl_score = float(np.clip(max(short_score, fspl_shape_score), 0.0, 1.0))
+
+    # Longness uses both the measured PSPL envelope and tE.  The latter keeps
+    # high-magnification events with a narrow peak from being called short
+    # merely because |u0| is small.
+    tE = abs(float(params[1]))
+    event_duration = max(
+        float(model_width) if np.isfinite(model_width) else 0.0,
+        0.5 * tE,
+    )
+    parallax_long_score = _ramp(
+        event_duration,
+        cfg.parallax_long_days_soft,
+        cfg.parallax_long_days,
+    )
+    broad_width = max(residual_width, profile_width)
+    broad_days_score = _ramp(
+        broad_width,
+        cfg.parallax_broad_days_soft,
+        cfg.parallax_broad_days,
+    )
+    broad_ratio_score = _ramp(
+        residual_model_width_ratio,
+        cfg.parallax_broad_ratio_soft,
+        cfg.parallax_broad_ratio,
+    )
+    occupancy_score = float(
+        np.clip((profile_effective_bins - 1.0) / 4.0, 0.0, 1.0)
+    )
+    profile_broad_score = float(
+        np.clip(max(broad_days_score, broad_ratio_score)
+                * (0.5 + 0.5 * occupancy_score), 0.0, 1.0)
+    ) * residual_evidence
+    block_width_ratio = (
+        float(block_width / max(model_width, 2.0 * cadence_floor))
+        if np.isfinite(model_width)
+        else float("nan")
+    )
+    block_days_score = _ramp(
+        block_width,
+        cfg.parallax_broad_days_soft,
+        cfg.parallax_broad_days,
+    )
+    block_ratio_score = _ramp(
+        block_width_ratio,
+        cfg.parallax_broad_ratio_soft,
+        cfg.parallax_broad_ratio,
+    )
+    block_occupancy_score = _ramp(
+        block_effective_bins,
+        cfg.parallax_block_effective_bins_soft,
+        cfg.parallax_block_effective_bins_hard,
+    )
+    block_evidence_score = _ramp(
+        block_evidence,
+        cfg.parallax_block_evidence_soft,
+        cfg.parallax_block_evidence_hard,
+    )
+    parallax_block_score = float(
+        np.clip(
+            max(block_days_score, block_ratio_score)
+            * block_occupancy_score
+            * block_evidence_score,
+            0.0,
+            1.0,
+        )
+    )
+    # Keep the old point/profile branch for strong broad residuals, but let
+    # the signed block branch carry weak residuals that accumulate over time.
+    parallax_broad_score = float(
+        np.clip(max(profile_broad_score, parallax_block_score), 0.0, 1.0)
+    )
+    strong_amplitude = _ramp(residual_peak_z, 5.0, 12.0)
+    parallax_weak_broad_score = float(
+        np.clip(
+            parallax_block_score * (0.55 + 0.45 * parallax_long_score),
+            0.0,
+            1.0,
+        )
+    )
+    parallax_strong_broad_score = float(
+        np.clip(
+            parallax_broad_score
+            * strong_amplitude
+            * (0.55 + 0.45 * parallax_long_score),
+            0.0,
+            1.0,
+        )
+    )
+    parallax_score = float(
+        np.clip(
+            max(parallax_weak_broad_score, parallax_strong_broad_score),
+            0.0,
+            1.0,
+        )
+    )
+    return EffectMorphologyScores(
+        model_width=float(model_width),
+        model_width_cadences=float(model_width_cadences),
+        model_center=float(model_center),
+        residual_width=float(residual_width),
+        residual_width_cadences=float(residual_width_cadences),
+        residual_center=float(residual_center),
+        residual_model_width_ratio=float(residual_model_width_ratio),
+        residual_peak_z=float(residual_peak_z),
+        residual_evidence=float(np.clip(residual_evidence, 0.0, 1.0)),
+        residual_support_points=residual_support_points,
+        residual_profile_support_fraction=float(profile_support_fraction),
+        residual_profile_effective_bins=float(profile_effective_bins),
+        model_censored=model_censored,
+        residual_censored=residual_censored,
+        fspl_short_score=float(np.clip(short_score, 0.0, 1.0)),
+        fspl_shape_score=float(np.clip(fspl_shape_score, 0.0, 1.0)),
+        fspl_score=fspl_score,
+        parallax_long_score=float(np.clip(parallax_long_score, 0.0, 1.0)),
+        parallax_broad_score=float(np.clip(parallax_broad_score, 0.0, 1.0)),
+        parallax_weak_broad_score=parallax_weak_broad_score,
+        parallax_strong_broad_score=parallax_strong_broad_score,
+        parallax_score=parallax_score,
+        residual_block_width=float(block_width),
+        residual_block_width_ratio=float(block_width_ratio),
+        residual_block_support_fraction=float(block_support_fraction),
+        residual_block_effective_bins=float(block_effective_bins),
+        residual_block_evidence=float(block_evidence),
+        parallax_block_score=parallax_block_score,
+    )
 
 
 def _central_symmetry(
@@ -1426,6 +2220,8 @@ def detect_parallax_from_pspl_fit(
     *,
     space: bool = False,
     planet_mask: Optional[np.ndarray] = None,
+    morphology_scores: Optional[EffectMorphologyScores] = None,
+    morphology_config: Optional[EffectMorphologyConfig] = None,
     **kwargs,
 ) -> EffectCandidate:
     """Build the exact observer-geometry tangent and run a parallax score test."""
@@ -1438,7 +2234,7 @@ def detect_parallax_from_pspl_fit(
         projector,
         space=space,
     )
-    return parallax_score_test(
+    candidate = parallax_score_test(
         np.asarray(fit.time, dtype=float),
         z,
         nuisance,
@@ -1447,6 +2243,15 @@ def detect_parallax_from_pspl_fit(
         seed_parameters=params[:3],
         planet_mask=planet_mask,
         **kwargs,
+    )
+    morphology = (
+        morphology_scores
+        if morphology_scores is not None
+        else compute_effect_morphology_scores(fit, config=morphology_config)
+    )
+    return candidate.with_morphology(
+        score=morphology.parallax_score,
+        diagnostics=morphology.summary_dict(),
     )
 
 
@@ -1661,8 +2466,15 @@ def detect_fspl_from_pspl_fit(
     projection_rtol: float = 1.0e-10,
     min_coverage: float = 0.05,
     planet_mask: Optional[np.ndarray] = None,
+    morphology_scores: Optional[EffectMorphologyScores] = None,
+    morphology_config: Optional[EffectMorphologyConfig] = None,
 ) -> EffectCandidate:
     """Score a PSPL residual against a projected joint FSPL template bank."""
+    morphology = (
+        morphology_scores
+        if morphology_scores is not None
+        else compute_effect_morphology_scores(fit, config=morphology_config)
+    )
     t = np.asarray(fit.time, dtype=float)
     ferr = np.maximum(np.asarray(fit.ferr, dtype=float), 1.0e-12)
     p = np.asarray(fit.params, dtype=float)[:3]
@@ -1714,7 +2526,7 @@ def detect_fspl_from_pspl_fit(
     h_best = standardized_bank[best_index]
     seed_meta = metadata[best_index]
     seed = np.asarray([p[0], seed_meta[4], seed_meta[5], np.log(seed_meta[3])], dtype=float)
-    return _candidate_from_template(
+    candidate = _candidate_from_template(
         effect="fspl",
         time=t,
         z=z,
@@ -1729,6 +2541,10 @@ def detect_fspl_from_pspl_fit(
         min_coverage=min_coverage,
         planet_mask=planet_mask,
     )
+    return candidate.with_morphology(
+        score=morphology.fspl_score,
+        diagnostics=morphology.summary_dict(),
+    )
 
 
 def detect_physical_effects(
@@ -1739,6 +2555,7 @@ def detect_physical_effects(
     include_fspl: bool = True,
     skip_unavailable: bool = True,
     planet_mask: Optional[np.ndarray] = None,
+    morphology_config: Optional[EffectMorphologyConfig] = None,
     **fspl_kwargs,
 ) -> tuple[EffectCandidate, ...]:
     """Run available detector-only probes against a PSPL fit.
@@ -1749,10 +2566,20 @@ def detect_physical_effects(
     dependency error to callers that explicitly request it.
     """
     candidates: list[EffectCandidate] = []
+    morphology_scores = (
+        compute_effect_morphology_scores(fit, config=morphology_config)
+        if parallax_projector is not None
+        or space_parallax_projector is not None
+        or include_fspl
+        else None
+    )
     if parallax_projector is not None:
         candidates.append(
             detect_parallax_from_pspl_fit(
-                fit, parallax_projector, planet_mask=planet_mask
+                fit,
+                parallax_projector,
+                planet_mask=planet_mask,
+                morphology_scores=morphology_scores,
             )
         )
     if space_parallax_projector is not None:
@@ -1762,13 +2589,17 @@ def detect_physical_effects(
                 space_parallax_projector,
                 space=True,
                 planet_mask=planet_mask,
+                morphology_scores=morphology_scores,
             )
         )
     if include_fspl:
         try:
             candidates.append(
                 detect_fspl_from_pspl_fit(
-                    fit, planet_mask=planet_mask, **fspl_kwargs
+                    fit,
+                    planet_mask=planet_mask,
+                    morphology_scores=morphology_scores,
+                    **fspl_kwargs,
                 )
             )
         except ImportError:
@@ -1779,11 +2610,14 @@ def detect_physical_effects(
 
 __all__ = [
     "EffectCandidate",
+    "EffectMorphologyConfig",
+    "EffectMorphologyScores",
     "ProjectionDiagnostics",
     "build_fspl_template_bank",
     "detect_fspl_from_pspl_fit",
     "detect_parallax_from_pspl_fit",
     "detect_physical_effects",
+    "compute_effect_morphology_scores",
     "find_compact_blocks",
     "parallax_score_test",
     "project_out_nuisance",

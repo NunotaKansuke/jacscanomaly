@@ -10,6 +10,7 @@ import jacscanomaly.trajectory as trajectory_module
 from jacscanomaly import Finder, FinderConfig, FSPLFitter, ObservedSignalScale
 from jacscanomaly.effect_detection import (
     EffectCandidate,
+    EffectMorphologyConfig,
     _fspl_sparse_high_snr_topology,
     _fspl_signed_topology,
     _pspl_nuisance_and_parallax_jacobians,
@@ -17,6 +18,7 @@ from jacscanomaly.effect_detection import (
     _projected_template_scores,
     _pspl_magnification_and_jacobian,
     build_fspl_template_bank,
+    compute_effect_morphology_scores,
     detect_fspl_from_pspl_fit,
     find_compact_blocks,
     parallax_score_test,
@@ -35,6 +37,97 @@ from jacscanomaly.effect_routing import route_candidate, routing_pareto_curve
 from jacscanomaly.exact_probe import run_fspl_exact_probe
 from jacscanomaly import parallax
 from jacscanomaly.trajectory import make_parallax_projector
+
+
+def _morphology_fit(time, params, standardized_residual):
+    time = np.asarray(time, dtype=float)
+    z = np.asarray(standardized_residual, dtype=float)
+    return SimpleNamespace(
+        time=time,
+        residual=z,
+        ferr=np.ones_like(time),
+        params=np.asarray(params, dtype=float),
+        fs=1.0,
+        fb=0.0,
+    )
+
+
+def test_fast_morphology_scores_short_fspl_from_rmdc_like_shape():
+    time = np.linspace(-5.0, 5.0, 6001)
+    params = np.asarray([0.0, 0.06, 0.38])
+    rng = np.random.default_rng(3008)
+    z = 0.08 * rng.normal(size=time.size)
+    z += (
+        8.0 * np.exp(-0.5 * ((time + 0.045) / 0.015) ** 2)
+        - 10.0 * np.exp(-0.5 * (time / 0.012) ** 2)
+        + 8.0 * np.exp(-0.5 * ((time - 0.045) / 0.015) ** 2)
+    )
+
+    scores = compute_effect_morphology_scores(_morphology_fit(time, params, z))
+
+    assert scores.model_width < 0.5
+    assert scores.fspl_short_score > 0.9
+    assert scores.fspl_shape_score > 0.8
+    assert scores.fspl_score > 0.9
+    assert scores.parallax_score < 0.2
+
+
+def test_fast_morphology_scores_broad_strong_parallax_without_amplitude_veto():
+    time = np.linspace(-100.0, 100.0, 24001)
+    params = np.asarray([0.0, 100.0, 0.5])
+    broad = 15.0 * np.exp(-0.5 * (time / 20.0) ** 2)
+    compact = 15.0 * np.exp(-0.5 * (time / 0.1) ** 2)
+
+    broad_scores = compute_effect_morphology_scores(
+        _morphology_fit(time, params, broad)
+    )
+    compact_scores = compute_effect_morphology_scores(
+        _morphology_fit(time, params, compact)
+    )
+
+    assert broad_scores.parallax_long_score > 0.9
+    assert broad_scores.parallax_strong_broad_score > 0.8
+    assert broad_scores.parallax_score > 0.8
+    assert compact_scores.parallax_score < 0.2
+    assert broad_scores.fspl_short_score == pytest.approx(0.0)
+
+
+def test_fast_morphology_scores_accumulate_weak_broad_residuals():
+    time = np.linspace(-100.0, 100.0, 24001)
+    params = np.asarray([0.0, 100.0, 0.5])
+    rng = np.random.default_rng(3208)
+    z = rng.normal(size=time.size)
+    z += 0.12 * np.exp(-0.5 * (time / 30.0) ** 2)
+
+    scores = compute_effect_morphology_scores(
+        _morphology_fit(time, params, z)
+    )
+
+    assert scores.residual_block_effective_bins > 4.0
+    assert scores.residual_block_evidence > 3.0
+    assert scores.parallax_block_score > 0.5
+    assert scores.parallax_score > 0.5
+
+
+def test_fast_morphology_scores_ignore_isolated_noise_excursions():
+    time = np.linspace(-50.0, 50.0, 12001)
+    params = np.asarray([0.0, 20.0, 0.3])
+    rng = np.random.default_rng(42)
+    z = rng.normal(size=time.size)
+    z[rng.choice(time.size, size=80, replace=False)] += 4.0
+
+    scores = compute_effect_morphology_scores(
+        _morphology_fit(
+            time,
+            params,
+            z,
+        ),
+        config=EffectMorphologyConfig(residual_sigma=2.5),
+    )
+
+    assert scores.residual_support_points < 20
+    assert scores.fspl_score < 0.2
+    assert scores.parallax_score < 0.2
 
 
 @pytest.mark.parametrize(

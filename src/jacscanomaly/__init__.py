@@ -70,8 +70,11 @@ from .pspl_fft import (
 )
 from .effect_detection import (
     EffectCandidate,
+    EffectMorphologyConfig,
+    EffectMorphologyScores,
     ProjectionDiagnostics,
     build_fspl_template_bank,
+    compute_effect_morphology_scores,
     detect_fspl_from_pspl_fit,
     detect_parallax_from_pspl_fit,
     detect_physical_effects,
@@ -176,8 +179,11 @@ __all__ = [
     "PSPLFFTSearchResult",
     "pspl_excess_magnification",
     "EffectCandidate",
+    "EffectMorphologyConfig",
+    "EffectMorphologyScores",
     "ProjectionDiagnostics",
     "build_fspl_template_bank",
+    "compute_effect_morphology_scores",
     "detect_fspl_from_pspl_fit",
     "detect_parallax_from_pspl_fit",
     "detect_physical_effects",
