@@ -3,10 +3,15 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.build_rges_anomaly_html import _canonical_scripts, _roman_payload
+from tools.build_rges_anomaly_html import (
+    ROMAN_MAKE_HTML,
+    _canonical_scripts,
+    _roman_payload,
+)
 from tools.rges_anomaly_pipeline import (
     _ecliptic_to_icrf,
     _earth_position_at,
@@ -120,6 +125,11 @@ def test_html_preserves_explicit_partial_display_mask():
 
 
 def test_html_plot_scripts_use_display_mask_and_final_detection_marker():
+    if ROMAN_MAKE_HTML is None or not ROMAN_MAKE_HTML.is_file():
+        pytest.skip(
+            "optional Roman HTML template is unavailable; set "
+            "JACSCANOMALY_ROMAN_MAKE_HTML to run this integration check."
+        )
     scripts = _canonical_scripts()
     assert "s.display_signal_mask" in scripts["EVENT_JS"]
     assert "d.series?.display_signal_mask" in scripts["EVENT_JS"]

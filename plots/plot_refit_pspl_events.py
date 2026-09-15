@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -17,9 +18,10 @@ from jacscanomaly.singlelens_model import A_pspl_func
 ROOT = Path(__file__).resolve().parents[1]
 OUTDIR = Path(__file__).resolve().parent
 FIGSIZE = (8.0, 6.0)
+RESULTS_ROOT = Path(os.environ.get("JACSCANOMALY_ROMAN_RESULTS_ROOT", "roman-results"))
 EVENTS = {
-    "0_161_832": ROOT.parent / "roman_simu/anomaly_finder_result/planet_signal_data/planet_signal_result_1654_832.json",
-    "0_952_1403": ROOT.parent / "roman_simu/anomaly_finder_result/planet_signal_data/planet_signal_result_1339_1403.json",
+    "0_161_832": RESULTS_ROOT / "planet_signal_data" / "planet_signal_result_1654_832.json",
+    "0_952_1403": RESULTS_ROOT / "planet_signal_data" / "planet_signal_result_1339_1403.json",
 }
 
 

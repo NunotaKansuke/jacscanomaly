@@ -20,10 +20,10 @@ from matplotlib.ticker import MaxNLocator, MultipleLocator
 
 EVENT = os.environ.get("JAC_EVENT", "0_2_2705")
 ROOT = Path(__file__).resolve().parents[1]
-INPUT = Path(os.environ.get(
-    "JAC_JSON",
-    str(ROOT.parent / "roman_simu" / "anomaly_finder_result" / "planet_signal_data" / "planet_signal_result_605_2705.json"),
-))
+RESULTS_ROOT = Path(os.environ.get("JACSCANOMALY_ROMAN_RESULTS_ROOT", "roman-results"))
+INPUT = Path(os.environ["JAC_JSON"]) if "JAC_JSON" in os.environ else (
+    RESULTS_ROOT / "planet_signal_data" / "planet_signal_result_605_2705.json"
+)
 OUTDIR = Path(__file__).resolve().parent
 
 

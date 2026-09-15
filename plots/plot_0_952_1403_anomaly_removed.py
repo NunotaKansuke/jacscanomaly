@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import json
+import os
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -13,7 +14,8 @@ from jacscanomaly.singlelens_model import A_pspl_func
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT.parent / "roman_simu/anomaly_finder_result/planet_signal_data/planet_signal_result_1339_1403.json"
+RESULTS_ROOT = Path(os.environ.get("JACSCANOMALY_ROMAN_RESULTS_ROOT", "roman-results"))
+DATA = RESULTS_ROOT / "planet_signal_data" / "planet_signal_result_1339_1403.json"
 OUTDIR = Path(__file__).resolve().parent
 FIGSIZE = (8.0, 6.0)
 

@@ -13,7 +13,11 @@ EVENT = os.environ.get("JAC_EVENT", "0_2_2705")
 OUT = Path(__file__).resolve().parent / f"{EVENT}_weak_planet_signal"
 DATA = Path(os.environ.get(
     "JAC_JSON",
-    str(Path(__file__).resolve().parents[2] / "roman_simu/anomaly_finder_result/planet_signal_data/planet_signal_result_605_2705.json"),
+    str(
+        Path(os.environ.get("JACSCANOMALY_ROMAN_RESULTS_ROOT", "roman-results"))
+        / "planet_signal_data"
+        / "planet_signal_result_605_2705.json"
+    ),
 ))
 
 

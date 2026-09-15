@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,11 +22,16 @@ from jacscanomaly.trajectory import (
 )
 
 
-ROMAN_SATELLITE1 = Path("/rogue1_8/nunota/sample_rtmodel_v2.4/satellitedir/satellite1.txt")
+_satellite_path = os.environ.get("JACSCANOMALY_ROMAN_SATELLITE_PATH")
+ROMAN_SATELLITE1 = Path(_satellite_path).expanduser() if _satellite_path else None
+
+
+def _has_roman_satellite() -> bool:
+    return ROMAN_SATELLITE1 is not None and ROMAN_SATELLITE1.is_file()
 
 
 def test_vbm_satellite_loader_reads_roman_table():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
 
     table = parallax.load_vbm_satellite_file(str(ROMAN_SATELLITE1))
@@ -55,7 +61,7 @@ def test_satellite_ephemeris_converts_radec_distance_to_cartesian_au():
 
 
 def test_space_parallax_projector_adds_satellite_offsets():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
 
     ra_deg = 267.623337808
@@ -109,7 +115,7 @@ def test_annual_projector_honors_explicit_reduced_time_offset():
 
 
 def test_gulls_projector_honors_explicit_reduced_time_offset():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
 
     offset = 2_460_000.0
@@ -183,7 +189,7 @@ def test_gulls_space_parallax_uses_reference_frame_subtraction():
 
 
 def test_gulls_factory_adds_geocentric_satellite_offset_to_earth():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
 
     projector = make_space_parallax_projector(
@@ -201,7 +207,7 @@ def test_gulls_factory_adds_geocentric_satellite_offset_to_earth():
 
 
 def test_space_parallax_matches_vbm_source_coordinate_formula():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
 
     ra_deg = 267.623337808
@@ -253,12 +259,13 @@ def test_space_parallax_matches_vbm_source_coordinate_formula():
 
 
 def test_space_parallax_is_consistent_with_vbmicrolensing_runtime():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
     vb = pytest.importorskip("VBMicrolensing")
 
-    coord_path = Path("/rogue1_8/nunota/sample_rtmodel_v2.4/event_2_675_639/Data/event.coordinates")
-    if not coord_path.exists():
+    coordinate_path = os.environ.get("JACSCANOMALY_ROMAN_COORDINATE_PATH")
+    coord_path = Path(coordinate_path).expanduser() if coordinate_path else None
+    if coord_path is None or not coord_path.is_file():
         pytest.skip("Roman coordinate sample file is not available.")
 
     ra_deg = 267.623337808
@@ -302,7 +309,7 @@ def test_space_parallax_is_consistent_with_vbmicrolensing_runtime():
 
 
 def test_finder_builds_pspl_space_geometry_as_an_option():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
 
     finder = Finder(
@@ -368,7 +375,7 @@ def test_finder_fspl_auto_initialization_uses_duration_seed_path():
 
 
 def test_finder_supports_gulls_as_a_space_geometry_option():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
     finder = Finder(
         FinderConfig(
@@ -389,7 +396,7 @@ def test_finder_supports_gulls_as_a_space_geometry_option():
 
 
 def test_finder_fit_single_lens_supports_pspl_space_geometry_option():
-    if not ROMAN_SATELLITE1.exists():
+    if not _has_roman_satellite():
         pytest.skip("Roman satellite sample file is not available.")
 
     tref = 9000.0

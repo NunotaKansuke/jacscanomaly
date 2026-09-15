@@ -15,12 +15,23 @@ import pandas as pd
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-WORKSPACE = REPOSITORY.parent
-ROMAN_TOOL = WORKSPACE / "roman_simu" / "tool"
-RESULT_ROOT = WORKSPACE / "roman_simu" / "anomaly_finder_result"
-PORTAL_ROOT = WORKSPACE / "roman_simu" / "html_portal"
-EVENT_CSV = WORKSPACE / "sample_rtmodel_v2.4" / "OMPLDG_croin_cassan.sample.csv"
-SYNC_REQUEST = WORKSPACE / "html_portal" / "tool" / "request_sync.sh"
+WORKSPACE = Path(
+    os.environ.get("JACSCANOMALY_WORKSPACE", str(REPOSITORY.parent))
+).expanduser()
+ROMAN_ROOT = Path(
+    os.environ.get("JACSCANOMALY_ROMAN_ROOT", str(WORKSPACE / "roman_simu"))
+).expanduser()
+ROMAN_TOOL = ROMAN_ROOT / "tool"
+RESULT_ROOT = ROMAN_ROOT / "anomaly_finder_result"
+PORTAL_ROOT = ROMAN_ROOT / "html_portal"
+EVENT_CSV = Path(
+    os.environ.get(
+        "JACSCANOMALY_EVENT_CSV",
+        str(WORKSPACE / "sample_rtmodel_v2.4" / "OMPLDG_croin_cassan.sample.csv"),
+    )
+).expanduser()
+_sync_request = os.environ.get("JACSCANOMALY_SYNC_REQUEST")
+SYNC_REQUEST = Path(_sync_request).expanduser() if _sync_request else None
 DEFAULT_EVENTS = (
     "0_680_836",
     "0_676_2084",
@@ -284,6 +295,11 @@ def main() -> None:
     run([sys.executable, str(ROMAN_TOOL / "make_html.py")], env=portal_env)
 
     if args.publish:
+        if SYNC_REQUEST is None:
+            parser.error(
+                "--publish requires JACSCANOMALY_SYNC_REQUEST to point to the "
+                "portal synchronization script"
+            )
         run([str(SYNC_REQUEST)], env=env)
     print(f"trial site: {site_dir / 'index.html'}", flush=True)
 

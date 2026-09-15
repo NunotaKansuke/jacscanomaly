@@ -16,7 +16,6 @@ version = release
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
-    "sphinx.ext.intersphinx",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "myst_parser",
@@ -44,11 +43,6 @@ exclude_patterns = [
 
 html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
-
-intersphinx_mapping = {
-    "python": ("https://docs.python.org/3", None),
-    "numpy": ("https://numpy.org/doc/stable/", None),
-}
 
 nitpicky = False
 

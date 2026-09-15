@@ -18,7 +18,8 @@ from jacscanomaly import Finder, FinderConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT.parent / "roman_simu/anomaly_finder_result/planet_signal_data/planet_signal_result_602_345.json"
+RESULTS_ROOT = Path(os.environ.get("JACSCANOMALY_ROMAN_RESULTS_ROOT", "roman-results"))
+DATA = RESULTS_ROOT / "planet_signal_data" / "planet_signal_result_602_345.json"
 OUTDIR = Path(__file__).resolve().parent
 STEM = "0_2_345_t0_teff_dchi2_map"
 ZOOM_STEM = "0_2_345_t0_teff_dchi2_map_zoom"

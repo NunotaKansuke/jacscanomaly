@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -u
 
-RESULT_DIR=/moao39_13/nunota/rges-data/anomaly_finder_result
-PORTAL_DIR=/rogue1_8/nunota/html_portal/rges_anomaly_finder
-SYNC_SCRIPT=/rogue1_8/nunota/html_portal/tool/request_sync.sh
-LOG_FILE=/moao39_13/nunota/rges-data/rges_f146_realtime_sync.log
-STATE_FILE=/moao39_13/nunota/rges-data/rges_f146_realtime_sync.state
+DATA_ROOT=${JACSCANOMALY_RGES_DATA_ROOT:-rges-data}
+RESULT_DIR=${JACSCANOMALY_RGES_RESULT_DIR:-$DATA_ROOT/anomaly_finder_result}
+PORTAL_DIR=${JACSCANOMALY_RGES_PORTAL_ROOT:-html_portal/rges_anomaly_finder}
+SYNC_SCRIPT=${JACSCANOMALY_RGES_SYNC_SCRIPT:-}
+LOG_FILE=${JACSCANOMALY_RGES_LOG_FILE:-$DATA_ROOT/rges_f146_realtime_sync.log}
+STATE_FILE=${JACSCANOMALY_RGES_STATE_FILE:-$DATA_ROOT/rges_f146_realtime_sync.state}
 SCAN_SESSION=rges_f146_serial_current
 
 mkdir -p "$PORTAL_DIR"
@@ -44,4 +45,7 @@ process_pending
 python tools/build_rges_anomaly_html.py \
     --result-dir "$RESULT_DIR" \
     --out-dir "$PORTAL_DIR" >> "$LOG_FILE" 2>&1 \
-    && "$SYNC_SCRIPT" >> "$LOG_FILE" 2>&1
+    || exit $?
+if [[ -n "$SYNC_SCRIPT" ]]; then
+    "$SYNC_SCRIPT" >> "$LOG_FILE" 2>&1
+fi

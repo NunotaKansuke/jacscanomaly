@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from time import perf_counter
 
@@ -25,7 +26,9 @@ from jacscanomaly import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_ROOT = PROJECT_ROOT.parent / "sample_rtmodel_v2.4"
+SAMPLE_ROOT = Path(
+    os.environ.get("JACSCANOMALY_SAMPLE_ROOT", "sample_rtmodel_v2.4")
+).expanduser()
 SATELLITE = SAMPLE_ROOT / "satellitedir" / "satellite1.txt"
 EVENTS = {
     "2_755_3280": {
@@ -258,7 +261,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/tmp/robust_fspl_parallax_regression.json"),
+        default=Path("robust_fspl_parallax_regression.json"),
     )
     args = parser.parse_args()
     payload = {

@@ -2,6 +2,7 @@
 """Wide residual view with the scan-template and flat fits for 0_2_345."""
 
 import json
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -12,8 +13,9 @@ from jacscanomaly.anomaly_models import get_anom_plot_model_masked
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SIGNAL_JSON = ROOT.parent / "roman_simu/anomaly_finder_result/planet_signal_data/planet_signal_result_602_345.json"
-SCAN_DAT = ROOT.parent / "roman_simu/anomaly_finder_result/result_0000-2370.dat"
+RESULTS_ROOT = Path(os.environ.get("JACSCANOMALY_ROMAN_RESULTS_ROOT", "roman-results"))
+SIGNAL_JSON = RESULTS_ROOT / "planet_signal_data" / "planet_signal_result_602_345.json"
+SCAN_DAT = RESULTS_ROOT / "result_0000-2370.dat"
 OUTDIR = Path(__file__).resolve().parent
 
 

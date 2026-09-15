@@ -9,21 +9,35 @@ from datetime import datetime, timezone
 import html
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 from typing import Any
 
 
 FILT = "F146"
-DATA_ROOT = Path("/moao39_13/nunota/rges-data")
+DATA_ROOT = Path(os.environ.get("JACSCANOMALY_RGES_DATA_ROOT", "rges-data"))
 DEFAULT_RESULT_DIR = DATA_ROOT / "anomaly_finder_result"
-DEFAULT_PORTAL_OUTPUT = Path(__file__).resolve().parents[2] / "html_portal" / "rges_anomaly_finder"
-ROMAN_MAKE_HTML = Path(__file__).resolve().parents[2] / "roman_simu" / "tool" / "make_html.py"
-PLOTLY_SOURCE = Path("/moao39_13/nunota/autolens/html/assets/plotly-1.58.5.min.js")
+DEFAULT_PORTAL_OUTPUT = Path(
+    os.environ.get("JACSCANOMALY_RGES_PORTAL_ROOT", "html_portal/rges_anomaly_finder")
+)
+_roman_make_html = os.environ.get("JACSCANOMALY_ROMAN_MAKE_HTML")
+ROMAN_MAKE_HTML = Path(_roman_make_html).expanduser() if _roman_make_html else None
+_plotly_source = os.environ.get("JACSCANOMALY_PLOTLY_SOURCE")
+PLOTLY_SOURCE = Path(_plotly_source).expanduser() if _plotly_source else None
 
 
 def _canonical_scripts() -> dict[str, str]:
     """Read the literal CSS/JS blocks from the real Roman HTML generator."""
+    if ROMAN_MAKE_HTML is None:
+        raise FileNotFoundError(
+            "Set JACSCANOMALY_ROMAN_MAKE_HTML to the optional Roman HTML "
+            "template before building RGES pages."
+        )
+    if not ROMAN_MAKE_HTML.is_file():
+        raise FileNotFoundError(
+            f"Roman HTML template does not exist: {ROMAN_MAKE_HTML}"
+        )
     tree = ast.parse(ROMAN_MAKE_HTML.read_text(encoding="utf-8"))
     wanted = {"CSS", "EVENT_JS", "FEATURE_EVENT_JS", "JS"}
     found: dict[str, str] = {}
@@ -638,7 +652,11 @@ def _event_page(
         ("template_free_zoom", "Template-free Result (zoomed)", "template_free_figures"),
     ):
         source_name = plots.get(key)
-        source = row["source"].parents[2] / str(source_name) if source_name else Path("/nonexistent")
+        source = (
+            row["source"].parents[2] / str(source_name)
+            if source_name
+            else Path("__missing_figure__")
+        )
         if source_name and not source.exists():
             source = row["source"].parents[2] / "figures" / row["tier"] / Path(str(source_name)).name
         if not source.exists() and key == "template_free_zoom":
@@ -789,7 +807,7 @@ def build_html(
         manifest.sort(key=lambda row: (-(row.get("score") if row.get("score") is not None else float("-inf")), row.get("event", "")))
 
     (out_dir / "assets").mkdir(parents=True, exist_ok=True)
-    if PLOTLY_SOURCE.exists():
+    if PLOTLY_SOURCE is not None and PLOTLY_SOURCE.is_file():
         shutil.copy2(PLOTLY_SOURCE, out_dir / "assets" / "plotly-1.58.5.min.js")
     (out_dir / "manifest.json").write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
     _index_page(manifest, scripts, out_dir)

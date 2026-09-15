@@ -2,6 +2,7 @@
 """Standalone data-only and PSPL-residual figures for Roman event 0_2_345."""
 
 import json
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -10,7 +11,8 @@ from matplotlib.ticker import MaxNLocator
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT.parent / "roman_simu/anomaly_finder_result/planet_signal_data/planet_signal_result_602_345.json"
+RESULTS_ROOT = Path(os.environ.get("JACSCANOMALY_ROMAN_RESULTS_ROOT", "roman-results"))
+DATA = RESULTS_ROOT / "planet_signal_data" / "planet_signal_result_602_345.json"
 OUTDIR = Path(__file__).resolve().parent
 
 

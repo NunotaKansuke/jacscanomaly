@@ -29,10 +29,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-DATA_ROOT = Path("/moao39_13/nunota/rges-data")
+DATA_ROOT = Path(os.environ.get("JACSCANOMALY_RGES_DATA_ROOT", "rges-data"))
 DEFAULT_OUTPUT = DATA_ROOT / "anomaly_finder_result"
-DEFAULT_HTML_OUTPUT = Path(__file__).resolve().parents[2] / "html_portal" / "rges_anomaly_finder"
-DEFAULT_SYNC_SCRIPT = Path(__file__).resolve().parents[2] / "html_portal" / "tool" / "request_sync.sh"
+DEFAULT_HTML_OUTPUT = Path(
+    os.environ.get("JACSCANOMALY_RGES_PORTAL_ROOT", "html_portal/rges_anomaly_finder")
+)
+_sync_script = os.environ.get("JACSCANOMY_RGES_SYNC_SCRIPT")
+DEFAULT_SYNC_SCRIPT = Path(_sync_script).expanduser() if _sync_script else None
 DEFAULT_PROGRESS_FILE = DATA_ROOT / "anomaly_finder_progress.txt"
 TIERS = {
     "beginner": {
@@ -758,11 +761,12 @@ def _publish_event(output_dir: Path, event_json: Path) -> None:
         from tools.build_rges_anomaly_html import build_html
 
     build_html(output_dir, DEFAULT_HTML_OUTPUT, event_json=event_json)
-    subprocess.run(
-        [str(DEFAULT_SYNC_SCRIPT)],
-        cwd=str(DEFAULT_SYNC_SCRIPT.parent.parent),
-        check=True,
-    )
+    if DEFAULT_SYNC_SCRIPT is not None:
+        subprocess.run(
+            [str(DEFAULT_SYNC_SCRIPT)],
+            cwd=str(DEFAULT_SYNC_SCRIPT.parent.parent),
+            check=True,
+        )
 
 
 def _write_progress(

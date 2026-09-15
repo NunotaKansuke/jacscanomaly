@@ -11,13 +11,20 @@ from jacscanomaly.singlelens_model import A_pspl_space_parallax_func
 from jacscanomaly.trajectory import make_space_parallax_projector, u_space_parallax_tau_beta
 
 
-SATELLITE_PATH = Path("/rogue1_8/nunota/sample_rtmodel_v2.4/satellitedir/satellite1.txt")
-SATELLITE_DIR = SATELLITE_PATH.parent
-COORDINATE_PATH = Path("/rogue1_8/nunota/sample_rtmodel_v2.4/event_2_675_639/Data/event.coordinates")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--satellite-path",
+        type=Path,
+        required=True,
+        help="Path to the VBMicrolensing satellite table.",
+    )
+    parser.add_argument(
+        "--coordinate-path",
+        type=Path,
+        required=True,
+        help="Path to the VBMicrolensing event.coordinates file.",
+    )
     parser.add_argument("--plot", action="store_true", help="Save light-curve and trajectory plots.")
     parser.add_argument("--show", action="store_true", help="Show the plot window after saving.")
     parser.add_argument(
@@ -26,11 +33,14 @@ def main() -> None:
         help="Path for the plot when --plot is used.",
     )
     args = parser.parse_args()
+    satellite_path = args.satellite_path.expanduser()
+    coordinate_path = args.coordinate_path.expanduser()
+    satellite_dir = satellite_path.parent
 
-    if not SATELLITE_PATH.exists():
-        raise SystemExit(f"Satellite table not found: {SATELLITE_PATH}")
-    if not COORDINATE_PATH.exists():
-        raise SystemExit(f"Coordinate file not found: {COORDINATE_PATH}")
+    if not satellite_path.is_file():
+        raise SystemExit(f"Satellite table not found: {satellite_path}")
+    if not coordinate_path.is_file():
+        raise SystemExit(f"Coordinate file not found: {coordinate_path}")
 
     ra_deg = 267.623337808
     dec_deg = -29.1164180355
@@ -40,7 +50,7 @@ def main() -> None:
         ra_deg,
         dec_deg,
         tref,
-        str(SATELLITE_PATH),
+        str(satellite_path),
         use_HJD=True,
     )
 
@@ -57,7 +67,7 @@ def main() -> None:
     vbm = VBMicrolensing.VBMicrolensing()
     sun_table = Path(VBMicrolensing.__file__).parent / "data" / "SunEphemeris.txt"
     vbm.LoadSunTable(str(sun_table))
-    vbm.SetObjectCoordinates(str(COORDINATE_PATH), str(SATELLITE_DIR))
+    vbm.SetObjectCoordinates(str(coordinate_path), str(satellite_dir))
     vbm.parallaxsystem = 1
     vbm.t0_par_fixed = 1
     vbm.t0_par = tref
