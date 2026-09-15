@@ -54,9 +54,9 @@ def _compile_and_link_args() -> tuple[list[str], list[str]]:
 class build_ext(_build_ext):
     """Build the C++ backend as a required extension.
 
-    The default PSPL workflow uses ``grid_backend='cpp'`` and
-    ``single_fit_backend='cpp'``, so the package should fail during install if
-    the compiled backend cannot be built instead of installing a package that
+    The default workflow uses the compiled anomaly grid and the canonical
+    SciPy-based fitter API, so the package should fail during install if the
+    compiled backend cannot be built instead of installing a package that
     later fails at runtime.
     """
 

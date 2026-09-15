@@ -25,23 +25,12 @@ Supported values:
    Finite-source point-lens model.
 
 ``"pspl_parallax"``
-   PSPL with annual parallax. Requires ``ra_deg`` and ``dec_deg``.
+   PSPL with annual or space parallax. Requires ``ra_deg`` and ``dec_deg``;
+   choose the observer geometry with ``parallax_geometry``.
 
 ``"fspl_parallax"``
-   FSPL with annual parallax. Requires ``ra_deg`` and ``dec_deg``.
-
-``"pspl_space_parallax"``
-   PSPL with annual parallax plus a spacecraft ephemeris. Requires
-   ``ra_deg``, ``dec_deg``, and ``satellite_ephemeris_path``.
-
-``"fspl_space_parallax"``
-   FSPL with annual parallax plus a spacecraft ephemeris. Requires
-   ``ra_deg``, ``dec_deg``, and ``satellite_ephemeris_path``.
-
-``"bic_single_lens"``
-   Compare PSPL and FSPL fits by BIC, then return the
-   selected fit. Set ``bic_include_space_parallax=True`` to also compare the
-   native C++/VBMicrolensing FSPL space-parallax model.
+   FSPL with annual or space parallax. Requires ``ra_deg`` and ``dec_deg``;
+   choose the observer geometry with ``parallax_geometry``.
 
 For parallax models:
 
@@ -51,7 +40,8 @@ For parallax models:
        fitter_kind="pspl_parallax",
        ra_deg=270.0,
        dec_deg=-30.0,
-       tref=None,  # defaults to median observation time
+       tref=None,  # defaults to the observed brightening peak
+       parallax_geometry="annual",
    )
 
 For space-parallax models, pass a VBMicrolensing/RTModel satellite table:
@@ -59,10 +49,11 @@ For space-parallax models, pass a VBMicrolensing/RTModel satellite table:
 .. code-block:: python
 
    config = FinderConfig(
-       fitter_kind="pspl_space_parallax",
+       fitter_kind="pspl_parallax",
        ra_deg=267.623337808,
        dec_deg=-29.1164180355,
        tref=2459000.0,
+       parallax_geometry="space",
        satellite_ephemeris_path="satellitedir/satellite1.txt",
    )
 
@@ -70,16 +61,17 @@ The satellite table is expected to contain rows of
 ``JD RA_deg Dec_deg distance_AU`` inside an optional ``$$SOE`` / ``$$EOE``
 block, matching the VBMicrolensing satellite-table convention.
 
-All parallax model kinds use the native C++ trajectory/VBMicrolensing
-evaluator and SciPy trust-region optimization. Select the observer convention
-explicitly with ``parallax_observer_convention``; ``"gulls"`` is available
-for GULLS-format simulations. Parallax components are bounded by ``max_piE``:
+Both parallax model kinds use the same compiled trajectory/evaluator and the
+same SciPy LM optimizer. Select the observer convention explicitly with
+``parallax_observer_convention``; ``"gulls"`` is available for GULLS-format
+simulations. Parallax components are bounded by ``max_piE``; a bounded SciPy
+fallback is used only if an unconstrained LM step leaves that domain:
 
 .. code-block:: python
 
    config = FinderConfig(
-       fitter_kind="bic_single_lens",
-       bic_include_space_parallax=True,
+       fitter_kind="fspl_parallax",
+       parallax_geometry="space",
        ra_deg=267.623337808,
        dec_deg=-29.1164180355,
        tref=2459000.0,
@@ -89,35 +81,22 @@ for GULLS-format simulations. Parallax components are bounded by ``max_piE``:
        max_piE=1.0,
    )
 
-The BIC-selection result includes ``model_kind``, ``bic``, and
-``model_selection`` attributes that record the selected model and the BIC
-values of successful trials.
-
 Automatic single-lens initialization
 ------------------------------------
 
-When no initial guess is passed to :meth:`jacscanomaly.Finder.run` for a PSPL
-fit, the finder loops over a logarithmic ``tE`` bank and evaluates every
-``(u0, t0)`` row with batched FFT correlations.  It passes the best candidates
-to the final fitter. Important options
+When no initial guess is passed to :meth:`jacscanomaly.Finder.run`, PSPL uses
+a logarithmic ``tE`` bank and batched FFT correlations.  For FSPL and
+FSPL-parallax, ``fspl_template_initial_guesses`` measures the observed
+brightening width, converts it to the validated crossing-time/rho/
+``u0/rho`` grid, profiles ``Fs`` and ``Fb`` for every complete FSPL model
+with the compiled ``ESPLMag2`` evaluator, and passes the lowest-chi-square
+seeds to the canonical fitter.  With the default grid this is 180 direct
+original-flux trials.  A PSPL parameter triplet may be supplied only to
+locate the observed interval; PSPL residuals are not used as a template.
+Important options include:
 include:
 
-``auto_init_tE_min`` / ``auto_init_tE_max`` / ``auto_init_fft_tE_grid_n``
-   Einstein-timescale range and number of logarithmic outer FFT scales.
-
-``auto_init_u0_min`` / ``auto_init_u0_max`` / ``auto_init_u0_grid_n``
-   Impact-parameter range and number of logarithmic ``u0`` templates.
-
-``auto_init_fft_grid_dt``
-   Regular FFT calculation-grid spacing. Smaller values improve short-event
-   resolution but increase runtime and memory use.
-
-``auto_init_fft_top_k``
-   Number of ranked FFT seeds passed to the PSPL fitter.
-
-``auto_init_fft_workers``
-   SciPy FFT worker count for the batched transforms. ``-1`` uses all
-   available CPUs.
+``auto_init_fspl_template_top_k``
 
 The ``auto_init_teff_*``, ``auto_init_dt0_coeff``, and
 ``auto_init_min_n_eff`` options remain relevant to non-PSPL initialization;
@@ -182,31 +161,31 @@ Any threshold set to ``None`` is ignored.
 Backend selection
 -----------------
 
-The PSPL workflow uses C++ backends by default:
+``grid_backend`` controls only anomaly-grid evaluation. The continuous
+single-lens fitters are selected by ``fitter_kind`` and share one optimizer
+contract:
 
 .. code-block:: python
 
    config = FinderConfig(
        grid_backend="cpp",
-       single_fit_backend="cpp",
+       fitter_kind="fspl",
+       fitter_maxiter=1000,
+       fitter_tol=1.0e-6,
    )
 
-The nonlinear PSPL initial-value search itself uses the FFT ``(u0, teff)``
-bank; ``single_fit_backend`` controls the final continuous fit after those
-seeds are generated.
+PSPL uses the analytic point-source kernel. FSPL uses the compiled
+finite-source magnification kernel. Both use SciPy LM; parallax fitters use
+the same SciPy LM orchestration around the compiled trajectory evaluator.
+``magnification_tol`` and ``magnification_reltol`` control the FSPL kernel.
 
-Use the JAX backend when you want the original vectorized implementation or
-when comparing backend behavior:
+Use ``grid_backend="jax"`` when comparing anomaly-grid implementations:
 
 .. code-block:: python
 
    config = FinderConfig(
        grid_backend="jax",
-       single_fit_backend="jax",
    )
-
-``single_fit_backend="cpp"`` applies to ``fitter_kind="pspl"``. Other baseline
-model families use the JAX fitters.
 
 For large JAX grids, set ``grid_chunked=True`` to always process the grid in
 chunks, or set ``grid_chunk_auto=True`` to enable chunking only when the number

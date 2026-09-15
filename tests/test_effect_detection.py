@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import jacscanomaly.finder as finder_module
 import jacscanomaly.trajectory as trajectory_module
-from jacscanomaly import Finder, FinderConfig
+from jacscanomaly import Finder, FinderConfig, FSPLFitter, ObservedSignalScale
 from jacscanomaly.effect_detection import (
     EffectCandidate,
     _fspl_sparse_high_snr_topology,
@@ -22,6 +22,7 @@ from jacscanomaly.effect_detection import (
     parallax_score_test,
     project_out_nuisance,
 )
+from jacscanomaly.fspl_initialization import fspl_template_initial_guesses
 from jacscanomaly.singlelens_model import (
     A_fspl_from_u,
     A_fspl_logrho_func,
@@ -87,6 +88,45 @@ def test_detect_effects_constructs_only_selected_parallax_geometry(
     }
     assert (observed["parallax_projector"] is annual) == expected_annual
     assert (observed["space_parallax_projector"] is space) == expected_space
+
+
+def test_default_parallax_tref_uses_brightening_peak_not_time_median():
+    time = np.linspace(-100.0, 100.0, 401)
+    flux = 1.0 + np.exp(-0.5 * ((time - 37.0) / 4.0) ** 2)
+    finder = Finder(
+        FinderConfig(
+            fitter_kind="pspl_parallax",
+            ra_deg=267.6,
+            dec_deg=-29.1,
+            tref=None,
+        )
+    )
+
+    tref = finder._resolve_parallax_tref(time, flux, for_parallax=True)
+
+    assert tref == pytest.approx(37.0, abs=1.0)
+    assert abs(tref - float(np.median(time))) > 20.0
+
+
+def test_explicit_parallax_seed_t0_sets_default_tref():
+    time = np.linspace(-100.0, 100.0, 401)
+    flux = np.ones_like(time)
+    finder = Finder(
+        FinderConfig(
+            fitter_kind="pspl_parallax",
+            ra_deg=267.6,
+            dec_deg=-29.1,
+            tref=None,
+        )
+    )
+
+    tref = finder._resolve_parallax_tref(
+        time,
+        flux,
+        x0=np.asarray([23.5, 100.0, 0.2, 0.0, 0.0]),
+    )
+
+    assert tref == pytest.approx(23.5)
 
 
 def test_projection_removes_nuisance_tangent_without_dense_projector():
@@ -369,6 +409,127 @@ def test_fspl_template_bank_profiles_pspl_nuisance_and_forwards_fft_size():
 
     assert bank.shape == (1, time.size)
     np.testing.assert_allclose(bank[0], expected, rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_fspl_template_initial_guesses_rank_direct_compiled_chi2_seed():
+    pytest.importorskip("jacscanomaly._vbm_cpp")
+    from jacscanomaly.effect_detection import _compiled_fspl_magnification
+
+    time = np.linspace(-20.0, 20.0, 161)
+    pspl = np.asarray([0.0, 10.0, 0.1])
+    rho = 0.1
+    u = np.sqrt(((time - pspl[0]) / pspl[1]) ** 2 + pspl[2] ** 2)
+    A_fspl = _compiled_fspl_magnification(u, rho)
+    fit = SimpleNamespace(
+        time=time,
+        flux=1.7 * A_fspl + 0.2,
+        params=pspl,
+        ferr=np.full(time.size, 0.01),
+    )
+
+    guesses = fspl_template_initial_guesses(
+        fit,
+        top_k=1,
+        rho_over_u0=(0.5, 1.0, 2.0),
+        tE_factors=(0.5, 1.0, 2.0),
+        u0_signs=(1.0,),
+    )
+
+    assert len(guesses) == 1
+    np.testing.assert_allclose(
+        guesses[0], [0.0, 10.0, 0.1, np.log(rho)], rtol=0.0, atol=1.0e-12
+    )
+
+
+def test_fspl_grid_chi2_can_move_pspl_center_parameters():
+    pytest.importorskip("jacscanomaly._vbm_cpp")
+    from jacscanomaly.fitters import FSPLFitter
+
+    time = np.linspace(-20.0, 20.0, 161)
+    pspl_center = np.asarray([0.0, 10.0, 0.1])
+    true = np.asarray([0.25, 10.0, 0.2, np.log(0.2)])
+    fitter = FSPLFitter()
+    flux = 1.7 * fitter._magnification(time, true) + 0.2
+    fit = SimpleNamespace(
+        time=time,
+        flux=flux,
+        params=pspl_center,
+        ferr=np.full(time.size, 0.01),
+    )
+
+    guesses = fspl_template_initial_guesses(
+        fit,
+        top_k=1,
+        rho_over_u0=(1.0,),
+        tE_factors=(1.0,),
+        u0_factors=(1.0, 2.0),
+        t0_offsets=(0.0, 0.25),
+        u0_signs=(1.0,),
+    )
+
+    np.testing.assert_allclose(guesses[0], true, rtol=0.0, atol=1.0e-12)
+
+
+def test_fspl_template_initial_guesses_default_to_duration_grid(monkeypatch):
+    native = pytest.importorskip("jacscanomaly._vbm_cpp")
+    if not hasattr(native, "score_fspl_seeds"):
+        pytest.skip("The batch FSPL scorer is not available.")
+    captured = {}
+
+    def fake_score(time, flux, ferr, seeds, **kwargs):
+        captured["seeds"] = np.asarray(seeds, dtype=float).copy()
+        return np.arange(captured["seeds"].shape[0], dtype=float)
+
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization._vbm_cpp.score_fspl_seeds",
+        fake_score,
+    )
+    time = np.linspace(9.0, 11.0, 21)
+    fit = SimpleNamespace(
+        time=time,
+        flux=np.ones_like(time),
+        ferr=np.full_like(time, 0.01),
+        params=None,
+    )
+    scale = ObservedSignalScale(
+        t_center=10.0,
+        t_left=9.9,
+        t_right=10.1,
+        half_width=0.1,
+        cadence=0.1,
+        n_points=time.size,
+        n_weighted_points=3,
+        left_coverage=1.0,
+        right_coverage=1.0,
+        asymmetry=1.0,
+    )
+
+    guesses = fspl_template_initial_guesses(
+        fit,
+        top_k=1,
+        observed_scale=scale,
+    )
+
+    assert captured["seeds"].shape == (180, 4)
+    np.testing.assert_allclose(guesses[0], captured["seeds"][0])
+    np.testing.assert_allclose(guesses[0][0], 9.95)
+
+
+def test_fspl_fitter_calls_duration_initializer_when_p0_is_missing(monkeypatch):
+    time = np.linspace(-5.0, 5.0, 81)
+    seed = np.asarray([0.0, 2.0, 0.2, np.log(0.3)])
+    fitter = FSPLFitter(maxiter=100)
+    flux = 1.4 * fitter._magnification(time, seed) + 0.2
+    ferr = np.full_like(time, 0.01)
+
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization.fspl_template_initial_guesses",
+        lambda *args, **kwargs: (seed.copy(),),
+    )
+    fit = fitter.fit(time, flux, ferr)
+
+    assert fit.model_kind == "fspl"
+    assert float(fit.chi2) < 1.0e-8
 
 
 def test_fspl_sign_degeneracy_reuses_one_physical_curve(monkeypatch):

@@ -168,14 +168,15 @@ Backends
    scans and is useful for large light curves because it has lower peak memory
    use.
 
-``single_fit_backend="cpp"``
-   Uses the C++ PSPL fitter for ``fitter_kind="pspl"``.
-
 ``grid_backend="jax"``
    Uses JAX vectorized or chunked grid evaluation. This remains available for
    development and comparison.
 
-Other single-lens model families continue to use the JAX fitters.
+The four public single-lens model families use the same SciPy LM fitting
+orchestration. FSPL magnification and parallax trajectories are evaluated by
+the compiled numerical backend; ``parallax_geometry`` selects annual or space
+observer geometry, and ``parallax_observer_convention`` selects the observer
+coordinate convention.
 
 What the standard scan does not do
 ----------------------------------

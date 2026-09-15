@@ -350,14 +350,19 @@ def light_time_corrected_time(t, t0, dt, rv, n_hat, au_c_day=AU_C_DAY, n_iter=5)
 @jax.tree_util.register_pytree_node_class
 class EarthOrbitalParallaxProjector:
     def __init__(self, eph: HeliocentricEphemeris, RA_deg, Dec_deg, tref, *,
-                 use_HJD: bool = True, light_time_iters: int = 5, au_c_day: float = AU_C_DAY):
+                 use_HJD: bool = True, light_time_iters: int = 5,
+                 au_c_day: float = AU_C_DAY, time_add=None):
         dtype = eph.t.dtype
         self.t0 = eph.t[0]
         self.dt = eph.t[1] - eph.t[0]
 
         tref_user = jnp.asarray(tref, dtype=dtype)
         origin = jnp.asarray(2450000.0, dtype=dtype)
-        self.time_add = jnp.where(tref_user < origin, origin, jnp.asarray(0.0, dtype=dtype))
+        if time_add is None:
+            time_add = jnp.where(
+                tref_user < origin, origin, jnp.asarray(0.0, dtype=dtype)
+            )
+        self.time_add = jnp.asarray(time_add, dtype=dtype)
         self.tref = tref_user + self.time_add
 
         self.use_HJD = bool(use_HJD)
@@ -411,7 +416,8 @@ class VBMEarthOrbitalParallaxProjector(EarthOrbitalParallaxProjector):
     """
 
     def __init__(self, eph: HeliocentricEphemeris, RA_deg, Dec_deg, tref, *,
-                 use_HJD: bool = False, light_time_iters: int = 5, au_c_day: float = AU_C_DAY):
+                 use_HJD: bool = False, light_time_iters: int = 5,
+                 au_c_day: float = AU_C_DAY, time_add=None):
         super().__init__(
             eph,
             RA_deg,
@@ -420,6 +426,7 @@ class VBMEarthOrbitalParallaxProjector(EarthOrbitalParallaxProjector):
             use_HJD=use_HJD,
             light_time_iters=light_time_iters,
             au_c_day=au_c_day,
+            time_add=time_add,
         )
         south, west, obj = get_vbm_south_west(RA_deg, Dec_deg)
         self.sky_east = -west
@@ -544,7 +551,7 @@ class GullsSpaceParallaxProjector:
     is projected onto the sky and converted to trajectory shifts.
     """
 
-    def __init__(self, observer: SatelliteEphemeris, RA_deg, Dec_deg, tref, *, time_add=0.0):
+    def __init__(self, observer: SatelliteEphemeris, RA_deg, Dec_deg, tref, *, time_add=None):
         dtype = observer.t.dtype
         self.t = observer.t
         self.r = observer.r
@@ -552,7 +559,11 @@ class GullsSpaceParallaxProjector:
 
         tref_user = jnp.asarray(tref, dtype=dtype)
         origin = jnp.asarray(2450000.0, dtype=dtype)
-        self.time_add = jnp.where(tref_user < origin, origin, jnp.asarray(time_add, dtype=dtype))
+        if time_add is None:
+            time_add = jnp.where(
+                tref_user < origin, origin, jnp.asarray(0.0, dtype=dtype)
+            )
+        self.time_add = jnp.asarray(time_add, dtype=dtype)
         self.tref = tref_user + self.time_add
 
         self.sky_north, self.sky_east = get_north_east(RA_deg, Dec_deg)

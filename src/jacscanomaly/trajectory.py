@@ -36,9 +36,18 @@ def get_heliocentric_ephemeris():
         _EPH = parallax.HeliocentricEphemeris.from_horizons_table(arr)
     return _EPH
 
-def make_parallax_projector(RA: float, Dec: float, tref: float, *, use_HJD: bool = True):
+def make_parallax_projector(
+    RA: float,
+    Dec: float,
+    tref: float,
+    *,
+    use_HJD: bool = True,
+    time_offset: float | None = None,
+):
     eph = get_heliocentric_ephemeris()
-    return parallax.EarthOrbitalParallaxProjector(eph, RA, Dec, tref, use_HJD=use_HJD)
+    return parallax.EarthOrbitalParallaxProjector(
+        eph, RA, Dec, tref, use_HJD=use_HJD, time_add=time_offset
+    )
 
 
 def make_space_parallax_projector(
@@ -49,6 +58,7 @@ def make_space_parallax_projector(
     *,
     use_HJD: bool = True,
     convention: str = "vbm",
+    time_offset: float | None = None,
 ):
     sat = _cached_satellite_ephemeris(str(satellite_ephemeris_path))
     if convention == "gulls":
@@ -60,11 +70,15 @@ def make_space_parallax_projector(
         # displacement by roughly two orders of magnitude and drives piE to
         # its configured bound.
         observer = _cached_gulls_observer(str(satellite_ephemeris_path))
-        return parallax.GullsSpaceParallaxProjector(observer, RA, Dec, tref)
+        return parallax.GullsSpaceParallaxProjector(
+            observer, RA, Dec, tref, time_add=time_offset
+        )
     if convention != "vbm":
         raise ValueError("space parallax convention must be 'vbm' or 'gulls'.")
     eph = get_heliocentric_ephemeris()
-    earth = parallax.EarthOrbitalParallaxProjector(eph, RA, Dec, tref, use_HJD=use_HJD)
+    earth = parallax.EarthOrbitalParallaxProjector(
+        eph, RA, Dec, tref, use_HJD=use_HJD, time_add=time_offset
+    )
     return parallax.SpaceOrbitalParallaxProjector(earth, sat)
 
 

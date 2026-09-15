@@ -115,13 +115,11 @@ def make_effect_fitter(config, effect: str, tref: float) -> EffectFitterSpec:
     ``Finder``.  It validates sky/ephemeris metadata and exposes the parameter
     dimension before any fit call is attempted.
     """
-    from .singlelens_fit import CPPVBMFSPLFitter, FSPLFitter
+    from .fitters import FSPLFitter
     from .parallax_backend import (
         Ephemeris,
-        NativeFSPLAnnualParallaxFitter,
-        NativeFSPLSpaceParallaxFitter,
-        NativePSPLAnnualParallaxFitter,
-        NativePSPLSpaceParallaxFitter,
+        FSPLParallaxFitter,
+        PSPLParallaxFitter,
         TimeSpec,
         default_earth_ephemeris,
         load_vbm_satellite_ephemeris,
@@ -130,7 +128,6 @@ def make_effect_fitter(config, effect: str, tref: float) -> EffectFitterSpec:
     effect = str(effect)
     if effect == "mixed":
         raise ValueError("mixed requires an explicit resolved effect before fitter construction.")
-    backend = str(getattr(config, "single_fit_backend", "jax"))
     convention = str(getattr(config, "parallax_observer_convention", "earth_geocentric_offset"))
     if convention not in {
         "earth_geocentric_offset",
@@ -143,13 +140,20 @@ def make_effect_fitter(config, effect: str, tref: float) -> EffectFitterSpec:
         offset=float(getattr(config, "parallax_time_offset", 0.0)),
     )
     extrapolation = str(getattr(config, "parallax_extrapolation", "reject"))
-    earth = getattr(config, "parallax_earth_ephemeris", None)
-    if earth is None:
-        earth = default_earth_ephemeris(time_spec=time_spec)
-    if getattr(earth, "extrapolation", extrapolation) != extrapolation:
-        earth = replace(earth, extrapolation=extrapolation)
+    earth = None
+
+    def native_earth_input():
+        nonlocal earth
+        if earth is None:
+            earth = getattr(config, "parallax_earth_ephemeris", None)
+            if earth is None:
+                earth = default_earth_ephemeris(time_spec=time_spec)
+            if getattr(earth, "extrapolation", extrapolation) != extrapolation:
+                earth = replace(earth, extrapolation=extrapolation)
+        return earth
 
     def native_space_inputs():
+        earth_input = native_earth_input()
         path = getattr(config, "satellite_ephemeris_path", None)
         if path is None:
             raise ValueError("space parallax fallback requires satellite_ephemeris_path.")
@@ -159,67 +163,106 @@ def make_effect_fitter(config, effect: str, tref: float) -> EffectFitterSpec:
             extrapolation=extrapolation,
         )
         if convention == "earth_geocentric_offset":
-            return earth, satellite, None
+            return earth_input, satellite, None
         observer = getattr(config, "parallax_observer_ephemeris", None)
         reference = getattr(config, "parallax_reference_ephemeris", None)
         if observer is None:
             # RTModel/GULLS satellite tables are Earth-relative perturbations.
             # Build a complete observer orbit explicitly at the table times.
-            earth_r = np.column_stack([np.interp(satellite.time, earth.time, earth.position_au[:, j]) for j in range(3)])
+            earth_r = np.column_stack([np.interp(satellite.time, earth_input.time, earth_input.position_au[:, j]) for j in range(3)])
             observer = Ephemeris(satellite.time, earth_r + satellite.position_au, origin="explicit_reference", time_spec=time_spec)
         if reference is None:
-            reference = earth
-        return earth, observer, reference
+            reference = earth_input
+        return earth_input, observer, reference
 
     if effect == "fspl":
-        # The detector/exact-probe may profile only the peak, but the fallback
-        # must refit the full light curve so the local profile window cannot
-        # freeze the optimizer into a false convergence.
-        if backend in {"cpp", "vbm_cpp"}:
-            # Production runs are C++-only. Missing native support must fail
-            # loudly instead of silently switching numerical backends.
-            fitter = CPPVBMFSPLFitter()
-            resolved_backend = "native_vbm_cpp_lm"
-        else:
-            fitter = FSPLFitter(profile_peak_only=False)
-            resolved_backend = "jax"
-        return EffectFitterSpec(effect, fitter, 4, ("t0", "tE", "u0", "rho"), ("t0", "tE", "u0", "logrho"), resolved_backend, convention)
+        fitter = FSPLFitter(
+            maxiter=int(getattr(config, "fitter_maxiter", 1000)),
+            tol=float(getattr(config, "fitter_tol", 1.0e-6)),
+            magnification_tol=float(getattr(config, "magnification_tol", 1.0e-4)),
+            magnification_reltol=float(getattr(config, "magnification_reltol", 1.0e-4)),
+        )
+        return EffectFitterSpec(
+            effect,
+            fitter,
+            4,
+            ("t0", "tE", "u0", "rho"),
+            ("t0", "tE", "u0", "logrho"),
+            "scipy_lm_compiled_magnification",
+            convention,
+        )
 
     if effect == "annual_parallax":
         ra, dec, resolved_tref = _require_parallax_config(config, effect, tref)
-        fitter = NativePSPLAnnualParallaxFitter(
-            ra, dec, resolved_tref, time_spec=time_spec, earth_ephemeris=earth,
-            maxiter=int(getattr(config, "vbm_cpp_maxiter", 300)), max_piE=float(config.max_piE),
+        earth_input = native_earth_input()
+        fitter = PSPLParallaxFitter(
+            ra,
+            dec,
+            resolved_tref,
+            geometry="annual",
+            observer_convention=convention,
+            time_spec=time_spec,
+            earth_ephemeris=earth_input,
+            maxiter=int(getattr(config, "fitter_maxiter", 1000)),
+            tol=float(getattr(config, "fitter_tol", 1.0e-6)),
+            max_piE=float(config.max_piE),
         )
-        return EffectFitterSpec(effect, fitter, 5, ("t0", "tE", "u0", "piEN", "piEE"), ("t0", "log_tE", "u0", "piEN", "piEE"), "native_cpp_scipy_trf", convention)
+        return EffectFitterSpec(effect, fitter, 5, ("t0", "tE", "u0", "piEN", "piEE"), ("t0", "log_tE", "u0", "piEN", "piEE"), "scipy_lm_compiled_evaluator", convention)
 
     if effect == "space_parallax":
         ra, dec, resolved_tref = _require_parallax_config(config, effect, tref)
         earth_input, observer_input, reference_input = native_space_inputs()
-        fitter = NativePSPLSpaceParallaxFitter(
-            ra, dec, resolved_tref, observer_input, convention=convention,
-            time_spec=time_spec, earth_ephemeris=earth_input, reference_ephemeris=reference_input,
-            maxiter=int(getattr(config, "vbm_cpp_maxiter", 300)), max_piE=float(config.max_piE),
+        fitter = PSPLParallaxFitter(
+            ra,
+            dec,
+            resolved_tref,
+            geometry="space",
+            observer_convention=convention,
+            time_spec=time_spec,
+            earth_ephemeris=earth_input,
+            satellite_or_observer_ephemeris=observer_input,
+            reference_ephemeris=reference_input,
+            maxiter=int(getattr(config, "fitter_maxiter", 1000)),
+            tol=float(getattr(config, "fitter_tol", 1.0e-6)),
+            max_piE=float(config.max_piE),
         )
-        return EffectFitterSpec(effect, fitter, 5, ("t0", "tE", "u0", "piEN", "piEE"), ("t0", "log_tE", "u0", "piEN", "piEE"), "native_cpp_scipy_trf", convention)
+        return EffectFitterSpec(effect, fitter, 5, ("t0", "tE", "u0", "piEN", "piEE"), ("t0", "log_tE", "u0", "piEN", "piEE"), "scipy_lm_compiled_evaluator", convention)
 
     if effect == "fspl_parallax":
         ra, dec, resolved_tref = _require_parallax_config(config, effect, tref)
-        fitter = NativeFSPLAnnualParallaxFitter(
-            ra, dec, resolved_tref, time_spec=time_spec, earth_ephemeris=earth,
-            maxiter=int(getattr(config, "vbm_cpp_maxiter", 300)), max_piE=float(config.max_piE),
+        earth_input = native_earth_input()
+        fitter = FSPLParallaxFitter(
+            ra,
+            dec,
+            resolved_tref,
+            geometry="annual",
+            observer_convention=convention,
+            time_spec=time_spec,
+            earth_ephemeris=earth_input,
+            maxiter=int(getattr(config, "fitter_maxiter", 1000)),
+            tol=float(getattr(config, "fitter_tol", 1.0e-6)),
+            max_piE=float(config.max_piE),
         )
-        return EffectFitterSpec(effect, fitter, 6, ("t0", "tE", "u0", "rho", "piEN", "piEE"), ("t0", "log_tE", "u0", "log_rho", "piEN", "piEE"), "native_cpp_scipy_trf", convention)
+        return EffectFitterSpec(effect, fitter, 6, ("t0", "tE", "u0", "rho", "piEN", "piEE"), ("t0", "log_tE", "u0", "log_rho", "piEN", "piEE"), "scipy_lm_compiled_evaluator", convention)
 
     if effect == "fspl_space_parallax":
         ra, dec, resolved_tref = _require_parallax_config(config, effect, tref)
         earth_input, observer_input, reference_input = native_space_inputs()
-        fitter = NativeFSPLSpaceParallaxFitter(
-            ra, dec, resolved_tref, observer_input, convention=convention,
-            time_spec=time_spec, earth_ephemeris=earth_input, reference_ephemeris=reference_input,
-            maxiter=int(getattr(config, "vbm_cpp_maxiter", 300)), max_piE=float(config.max_piE),
+        fitter = FSPLParallaxFitter(
+            ra,
+            dec,
+            resolved_tref,
+            geometry="space",
+            observer_convention=convention,
+            time_spec=time_spec,
+            earth_ephemeris=earth_input,
+            satellite_or_observer_ephemeris=observer_input,
+            reference_ephemeris=reference_input,
+            maxiter=int(getattr(config, "fitter_maxiter", 1000)),
+            tol=float(getattr(config, "fitter_tol", 1.0e-6)),
+            max_piE=float(config.max_piE),
         )
-        return EffectFitterSpec(effect, fitter, 6, ("t0", "tE", "u0", "rho", "piEN", "piEE"), ("t0", "log_tE", "u0", "log_rho", "piEN", "piEE"), "native_cpp_scipy_trf", convention)
+        return EffectFitterSpec(effect, fitter, 6, ("t0", "tE", "u0", "rho", "piEN", "piEE"), ("t0", "log_tE", "u0", "log_rho", "piEN", "piEE"), "scipy_lm_compiled_evaluator", convention)
     raise ValueError(f"Unknown fallback effect '{effect}'.")
 
 
@@ -1000,7 +1043,7 @@ def run_robust_fallback(
         and delta_chi2 >= max(1_000.0, 0.5 * baseline_original_chi2)
     )
     # A textbook finite-source topology is independent evidence that the
-    # central support is physical, rather than contamination.  Native VBM
+    # central support is physical, rather than contamination.  Compiled
     # fits can land on the same solution from every seed while the alternating
     # segmenter continues to toggle points inside that support.  Permit that
     # narrow case only after an overwhelming full-data and effect-score gain.
@@ -1257,6 +1300,25 @@ def run_staged_joint_fallback(
 ) -> FallbackResult:
     """Fit single effects first and use their basins in the joint fit."""
     candidate_tuple = tuple(candidates)
+    seed_values = np.asarray(base_seed, dtype=float).reshape(-1)
+    reference_fit_params = (
+        np.asarray(getattr(baseline_fit, "params"), dtype=float).reshape(-1)
+        if baseline_fit is not None and getattr(baseline_fit, "params", None) is not None
+        else np.empty(0, dtype=float)
+    )
+    if getattr(config, "tref", None) is not None:
+        staged_tref = float(config.tref)
+    elif reference_fit_params.size and np.isfinite(reference_fit_params[0]):
+        staged_tref = float(reference_fit_params[0])
+    elif seed_values.size and np.isfinite(seed_values[0]):
+        staged_tref = float(seed_values[0])
+    else:
+        time_values = np.asarray(time, dtype=float).reshape(-1)
+        flux_values = np.asarray(flux, dtype=float).reshape(-1)
+        valid = np.isfinite(time_values) & np.isfinite(flux_values)
+        if not np.any(valid):
+            raise ValueError("Cannot resolve staged-fallback tref without finite data.")
+        staged_tref = float(time_values[valid][np.nanargmax(flux_values[valid])])
     stage_results: list[FallbackResult] = []
     stage_seeds: dict[str, tuple[np.ndarray, ...]] = {}
     stage_errors: list[str] = []
@@ -1265,7 +1327,7 @@ def run_staged_joint_fallback(
         if not any(candidate.effect == stage_effect for candidate in candidate_tuple):
             continue
         try:
-            stage_spec = make_effect_fitter(config, stage_effect, float(np.median(time)))
+            stage_spec = make_effect_fitter(config, stage_effect, staged_tref)
             stage_cfg = replace(fallback_config, parameter_dimension=stage_spec.parameter_dimension)
             stage_result = run_robust_fallback(
                 stage_spec.fitter, time, flux, ferr, base_seed,
@@ -1289,7 +1351,7 @@ def run_staged_joint_fallback(
             continue
 
     try:
-        joint_spec = make_effect_fitter(config, effect, float(np.median(time)))
+        joint_spec = make_effect_fitter(config, effect, staged_tref)
         joint_cfg = replace(fallback_config, parameter_dimension=joint_spec.parameter_dimension)
         parallax_effect = (
             "space_parallax" if "space_parallax" in stage_seeds else "annual_parallax"

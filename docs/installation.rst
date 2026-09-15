@@ -55,46 +55,36 @@ All development dependencies:
 
    pip install -e ".[dev]"
 
-FSPL and ``microjax``
-------------------------
+FSPL magnification
+------------------
 
-The PSPL workflow only needs the standard package dependencies. FSPL
-magnification currently relies on the GitHub source version of ``microjax``
-because the PyPI package may not expose ``microjax.fastlens.fspl_disk``.
-
-Install ``microjax`` from source before using FSPL fitters:
-
-.. code-block:: bash
-
-   git clone https://github.com/ShotaMiyazaki94/microjax.git
-   cd microjax
-   pip install -e .
+FSPL fitting uses the compiled finite-source magnification backend and does
+not require ``microjax``. The package still uses JAX for the optional anomaly
+grid and legacy diagnostic helpers.
 
 C++ backend
 -----------
 
-The package includes a C++ grid backend and C++ PSPL fitting backend. They are
-built through ``setup.py`` using OpenMP:
+The package includes a C++ anomaly-grid backend and compiled magnification /
+parallax evaluators. They are built through ``setup.py`` using OpenMP:
 
 .. code-block:: bash
 
    pip install -e .
 
-The C++ backend is required by the default PSPL survey workflow. If the
-extension cannot be built, installation should fail rather than producing a
-runtime-only failure when ``FinderConfig(grid_backend="cpp")`` is used.
+The compiled backend is required when ``grid_backend="cpp"`` or an FSPL /
+parallax fitter is used. If the extension cannot be built, installation
+should fail rather than producing a runtime-only failure.
 
 If the extension does not build, check that your compiler supports ``C++17``
 and OpenMP. On Linux this usually means installing a recent ``gcc``/``g++``
 toolchain. On macOS this may require installing ``libomp`` and using compiler
 flags that can find it.
 
-If you only need a temporary pure-Python/JAX workaround for debugging, request
-the JAX backend explicitly in your configuration:
+For a temporary JAX anomaly-grid comparison, use:
 
 .. code-block:: python
 
    config = FinderConfig(
        grid_backend="jax",
-       single_fit_backend="jax",
    )

@@ -6,11 +6,11 @@ pytest.importorskip("jacscanomaly._parallax_cpp")
 
 from jacscanomaly import (
     Ephemeris,
-    NativePSPLAnnualParallaxFitter,
+    PSPLParallaxFitter,
     ParallaxEvaluator,
     TimeSpec,
 )
-from jacscanomaly.parallax_backend import native_parallax_effect_score
+from jacscanomaly.parallax_backend import parallax_effect_score
 from jacscanomaly.plot import _adaptive_single_lens_curve
 
 
@@ -105,7 +105,7 @@ def test_native_continuation_seed_does_not_apply_log_twice():
         origin="sun",
         time_spec=time_spec,
     )
-    fitter = NativePSPLAnnualParallaxFitter(
+    fitter = PSPLParallaxFitter(
         0.0, 0.0, 9000.0, time_spec=time_spec, earth_ephemeris=earth
     )
     raw = fitter._raw_seed(np.asarray([9000.0, 80.0, 0.1, 0.2, -0.1]))
@@ -145,7 +145,7 @@ def test_native_annual_fit_recovers_synthetic_and_removes_effect_score():
     magnification = geometry.magnification(truth_raw)
     flux = 1.7 * magnification + 0.3
     ferr = np.full_like(time, 0.01)
-    fitter = NativePSPLAnnualParallaxFitter(
+    fitter = PSPLParallaxFitter(
         0.0,
         0.0,
         10.0,
@@ -162,7 +162,7 @@ def test_native_annual_fit_recovers_synthetic_and_removes_effect_score():
         atol=1.0e-7,
     )
     assert float(fit.chi2) < 1.0e-12
-    assert native_parallax_effect_score(fit) < 1.0e-12
+    assert parallax_effect_score(fit) < 1.0e-12
 
 
 def test_native_fixed_evaluation_preserves_public_seed_coordinates():
@@ -173,7 +173,7 @@ def test_native_fixed_evaluation_preserves_public_seed_coordinates():
         origin="sun",
         time_spec=TimeSpec("hjd"),
     )
-    fitter = NativePSPLAnnualParallaxFitter(
+    fitter = PSPLParallaxFitter(
         0.0, 0.0, 1.0, time_spec=TimeSpec("hjd"), earth_ephemeris=earth
     )
     seed = np.asarray([1.0, 0.4, 0.1, 0.2, -0.3])
@@ -190,7 +190,7 @@ def test_native_fixed_evaluation_preserves_public_seed_coordinates():
 
     np.testing.assert_allclose(np.asarray(fit.params), seed, atol=1.0e-12)
     assert float(fit.chi2) < 1.0e-20
-    assert fit.optimizer_status == "native_cpp_fixed_evaluation"
+    assert fit.optimizer_status == "fixed_parameters"
 
 
 def test_adaptive_parallax_plot_is_clipped_to_ephemeris_support():

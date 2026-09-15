@@ -6,561 +6,369 @@
 #include "VBMicrolensingLibrary.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include <string>
-#include <vector>
+#include <stdexcept>
 
 namespace {
 
-constexpr int kNParam = 6;
-constexpr int kNFSPLParam = 4;
-
-PyArrayObject* as_double_array(PyObject* obj) {
+PyArrayObject* as_double_array(PyObject* object) {
     return reinterpret_cast<PyArrayObject*>(
-        PyArray_FROM_OTF(obj, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY));
-}
-
-struct LinearFit {
-    double fs = 0.0;
-    double fb = 0.0;
-    bool valid = false;
-};
-
-double sumsq(const std::vector<double>& x) {
-    double out = 0.0;
-    for (double v : x) out += v * v;
-    return out;
-}
-
-LinearFit solve_fluxes(const std::vector<double>& A, const double* flux, const double* ferr) {
-    const size_t n = A.size();
-    double sw = 0.0, sx = 0.0, sy = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        const double fe = std::max(ferr[i], 1e-12);
-        const double w = 1.0 / (fe * fe);
-        sw += w;
-        sx += w * A[i];
-        sy += w * flux[i];
-    }
-    if (!(sw > 0.0)) return {};
-    const double xm = sx / sw, ym = sy / sw;
-    double wxx = 0.0, wxy = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        const double fe = std::max(ferr[i], 1e-12);
-        const double w = 1.0 / (fe * fe);
-        wxx += w * (A[i] - xm) * (A[i] - xm);
-        wxy += w * (A[i] - xm) * (flux[i] - ym);
-    }
-    if (!(wxx > 0.0) || !std::isfinite(wxx)) return {};
-    return {wxy / wxx, ym - (wxy / wxx) * xm, true};
-}
-
-bool solve_linear(double a[kNParam][kNParam], double b[kNParam], double x[kNParam]) {
-    double m[kNParam][kNParam + 1];
-    for (int i = 0; i < kNParam; ++i) {
-        for (int j = 0; j < kNParam; ++j) m[i][j] = a[i][j];
-        m[i][kNParam] = b[i];
-    }
-    for (int col = 0; col < kNParam; ++col) {
-        int pivot = col;
-        for (int row = col + 1; row < kNParam; ++row) {
-            if (std::abs(m[row][col]) > std::abs(m[pivot][col])) pivot = row;
-        }
-        if (std::abs(m[pivot][col]) < 1e-30) return false;
-        if (pivot != col) {
-            for (int j = col; j <= kNParam; ++j) std::swap(m[col][j], m[pivot][j]);
-        }
-        const double inv = 1.0 / m[col][col];
-        for (int j = col; j <= kNParam; ++j) m[col][j] *= inv;
-        for (int row = 0; row < kNParam; ++row) {
-            if (row == col) continue;
-            const double f = m[row][col];
-            for (int j = col; j <= kNParam; ++j) m[row][j] -= f * m[col][j];
-        }
-    }
-    for (int i = 0; i < kNParam; ++i) x[i] = m[i][kNParam];
-    return true;
-}
-
-bool solve_linear_fspl(
-    double a[kNFSPLParam][kNFSPLParam],
-    double b[kNFSPLParam],
-    double x[kNFSPLParam]
-) {
-    double m[kNFSPLParam][kNFSPLParam + 1];
-    for (int i = 0; i < kNFSPLParam; ++i) {
-        for (int j = 0; j < kNFSPLParam; ++j) m[i][j] = a[i][j];
-        m[i][kNFSPLParam] = b[i];
-    }
-    for (int col = 0; col < kNFSPLParam; ++col) {
-        int pivot = col;
-        for (int row = col + 1; row < kNFSPLParam; ++row) {
-            if (std::abs(m[row][col]) > std::abs(m[pivot][col])) pivot = row;
-        }
-        if (std::abs(m[pivot][col]) < 1e-30) return false;
-        if (pivot != col) {
-            for (int j = col; j <= kNFSPLParam; ++j) std::swap(m[col][j], m[pivot][j]);
-        }
-        const double inv = 1.0 / m[col][col];
-        for (int j = col; j <= kNFSPLParam; ++j) m[col][j] *= inv;
-        for (int row = 0; row < kNFSPLParam; ++row) {
-            if (row == col) continue;
-            const double factor = m[row][col];
-            for (int j = col; j <= kNFSPLParam; ++j) {
-                m[row][j] -= factor * m[col][j];
-            }
-        }
-    }
-    for (int i = 0; i < kNFSPLParam; ++i) x[i] = m[i][kNFSPLParam];
-    return true;
-}
-
-void clamp_q(double q[kNParam], double max_piE) {
-    q[1] = std::clamp(q[1], std::log(1e-6), std::log(1e8));
-    // Keep trial sources inside the well-behaved part of VBM's ESPL lookup
-    // table.  Larger values are not useful for the point-lens FSPL workflow
-    // and make the library emit a diagnostic for every model evaluation.
-    q[3] = std::clamp(q[3], -50.0, std::log(10.0));
-    if (std::isfinite(max_piE) && max_piE > 0.0) {
-        q[4] = std::clamp(q[4], -max_piE, max_piE);
-        q[5] = std::clamp(q[5], -max_piE, max_piE);
-    }
-}
-
-void clamp_fspl_q(double q[kNFSPLParam]) {
-    q[1] = std::clamp(q[1], std::log(1e-6), std::log(1e8));
-    q[2] = std::clamp(q[2], std::log(1e-8), std::log(1e3));
-    q[3] = std::clamp(q[3], -50.0, std::log(10.0));
-}
-
-bool fspl_residuals(
-    VBMicrolensing& vbm,
-    const double q[kNFSPLParam],
-    const double* time,
-    const double* flux,
-    const double* ferr,
-    npy_intp n,
-    std::vector<double>& residual,
-    std::vector<double>* A_out = nullptr,
-    LinearFit* fit_out = nullptr
-) {
-    std::vector<double> A(static_cast<size_t>(n));
-    std::vector<double> y1(static_cast<size_t>(n));
-    std::vector<double> y2(static_cast<size_t>(n));
-    // Native VBM convention: [log(|u0|), log(tE), t0, log(rho)].
-    double p[kNFSPLParam] = {q[2], q[1], q[0], q[3]};
-    vbm.ESPLLightCurve(
-        p, const_cast<double*>(time), A.data(), y1.data(), y2.data(),
-        static_cast<int>(n)
+        PyArray_FROM_OTF(object, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY)
     );
-    for (double magnification : A) {
-        if (!std::isfinite(magnification) || magnification <= 0.0) {
-            residual.assign(static_cast<size_t>(n), 1e100);
-            return false;
-        }
-    }
-    const LinearFit fit = solve_fluxes(A, flux, ferr);
-    if (!fit.valid) {
-        residual.assign(static_cast<size_t>(n), 1e100);
-        return false;
-    }
-    residual.resize(static_cast<size_t>(n));
-    for (npy_intp i = 0; i < n; ++i) {
-        const double fe = std::max(ferr[i], 1e-12);
-        residual[static_cast<size_t>(i)] =
-            (flux[i] - (fit.fs * A[static_cast<size_t>(i)] + fit.fb)) / fe;
-    }
-    if (A_out) *A_out = std::move(A);
-    if (fit_out) *fit_out = fit;
-    return true;
 }
 
-PyObject* fit_fspl(PyObject*, PyObject* args, PyObject* kwargs) {
-    PyObject *time_obj = nullptr, *flux_obj = nullptr, *ferr_obj = nullptr, *p0_obj = nullptr;
-    const char* espl_table = nullptr;
-    int maxiter = 300;
-    double damping_parameter = 1e-4, tol = 1e-5, vbm_tol = 1e-4, vbm_reltol = 1e-4;
+PyObject* finite_source_magnification(
+    PyObject*, PyObject* args, PyObject* kwargs
+) {
+    PyObject* u_object = nullptr;
+    PyObject* table_object = Py_None;
+    double rho = 0.0;
+    double tol = 1.0e-4;
+    double reltol = 1.0e-4;
     static const char* kwlist[] = {
-        "time", "flux", "ferr", "p0", "espl_table", "maxiter",
-        "damping_parameter", "tol", "vbm_tol", "vbm_reltol", nullptr
+        "u", "rho", "espl_table", "tol", "reltol", nullptr
     };
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "OOOO|sidddd", const_cast<char**>(kwlist),
-            &time_obj, &flux_obj, &ferr_obj, &p0_obj, &espl_table, &maxiter,
-            &damping_parameter, &tol, &vbm_tol, &vbm_reltol)) {
+            args,
+            kwargs,
+            "Od|Odd",
+            const_cast<char**>(kwlist),
+            &u_object,
+            &rho,
+            &table_object,
+            &tol,
+            &reltol
+        )) {
         return nullptr;
     }
 
-    PyArrayObject *time_arr = as_double_array(time_obj), *flux_arr = as_double_array(flux_obj);
-    PyArrayObject *ferr_arr = as_double_array(ferr_obj), *p0_arr = as_double_array(p0_obj);
-    npy_intp n = 0;
-    if (!time_arr || !flux_arr || !ferr_arr || !p0_arr) goto fail;
-    n = PyArray_DIM(time_arr, 0);
-    if (PyArray_NDIM(time_arr) != 1 || PyArray_NDIM(flux_arr) != 1 ||
-        PyArray_NDIM(ferr_arr) != 1 || PyArray_NDIM(p0_arr) != 1 ||
-        PyArray_DIM(flux_arr, 0) != n || PyArray_DIM(ferr_arr, 0) != n ||
-        PyArray_DIM(p0_arr, 0) < kNFSPLParam || n < 5) {
+    PyArrayObject* u_array = as_double_array(u_object);
+    if (u_array == nullptr) return nullptr;
+    if (
+        PyArray_NDIM(u_array) != 1
+        || !std::isfinite(rho)
+        || !(rho > 0.0)
+        || !std::isfinite(tol)
+        || !(tol > 0.0)
+        || !std::isfinite(reltol)
+        || !(reltol > 0.0)
+    ) {
         PyErr_SetString(
             PyExc_ValueError,
-            "fit_fspl requires equal one-dimensional arrays, p0 with 4 values, "
-            "and at least 5 data points."
+            "u must be one-dimensional; rho, tol, and reltol must be finite and positive."
         );
-        goto fail;
-    }
-    {
-        VBMicrolensing vbm;
-        vbm.Tol = vbm_tol;
-        vbm.RelTol = vbm_reltol;
-        if (espl_table && std::strlen(espl_table) > 0) vbm.LoadESPLTable(espl_table);
-
-        const double* p0 = static_cast<const double*>(PyArray_DATA(p0_arr));
-        const double u0_sign = p0[2] < 0.0 ? -1.0 : 1.0;
-        // Public raw convention: [t0, tE, signed u0, logrho].
-        double q[kNFSPLParam] = {
-            p0[0],
-            std::log(std::max(std::abs(p0[1]), 1e-12)),
-            std::log(std::max(std::abs(p0[2]), 1e-8)),
-            p0[3],
-        };
-        clamp_fspl_q(q);
-        const double* time = static_cast<const double*>(PyArray_DATA(time_arr));
-        const double* flux = static_cast<const double*>(PyArray_DATA(flux_arr));
-        const double* ferr = static_cast<const double*>(PyArray_DATA(ferr_arr));
-        std::vector<double> residual;
-        if (!fspl_residuals(vbm, q, time, flux, ferr, n, residual)) {
-            PyErr_SetString(PyExc_RuntimeError, "VBMicrolensing failed to evaluate the starting FSPL model.");
-            goto fail;
-        }
-        double chi2 = sumsq(residual);
-        double lambda = std::max(damping_parameter, 1e-12);
-        const double fd[kNFSPLParam] = {1e-5, 1e-4, 1e-4, 1e-4};
-        bool accepted_any = false;
-        bool converged = false;
-        int iterations = 0;
-        for (; iterations < maxiter; ++iterations) {
-            std::array<std::vector<double>, kNFSPLParam> jac;
-            for (int k = 0; k < kNFSPLParam; ++k) {
-                double qp[kNFSPLParam], qm[kNFSPLParam];
-                std::copy(q, q + kNFSPLParam, qp);
-                std::copy(q, q + kNFSPLParam, qm);
-                qp[k] += fd[k];
-                qm[k] -= fd[k];
-                clamp_fspl_q(qp);
-                clamp_fspl_q(qm);
-                std::vector<double> rp, rm;
-                fspl_residuals(vbm, qp, time, flux, ferr, n, rp);
-                fspl_residuals(vbm, qm, time, flux, ferr, n, rm);
-                jac[k].resize(static_cast<size_t>(n));
-                const double inverse_step = 1.0 / (qp[k] - qm[k]);
-                for (npy_intp i = 0; i < n; ++i) {
-                    jac[k][static_cast<size_t>(i)] =
-                        (rp[static_cast<size_t>(i)] - rm[static_cast<size_t>(i)]) * inverse_step;
-                }
-            }
-            double jtj[kNFSPLParam][kNFSPLParam] = {};
-            double rhs[kNFSPLParam] = {};
-            for (int a = 0; a < kNFSPLParam; ++a) {
-                for (int b = 0; b < kNFSPLParam; ++b) {
-                    for (npy_intp i = 0; i < n; ++i) {
-                        jtj[a][b] +=
-                            jac[a][static_cast<size_t>(i)] * jac[b][static_cast<size_t>(i)];
-                    }
-                }
-                for (npy_intp i = 0; i < n; ++i) {
-                    rhs[a] -= jac[a][static_cast<size_t>(i)] * residual[static_cast<size_t>(i)];
-                }
-            }
-            bool accepted = false;
-            double best_q[kNFSPLParam] = {};
-            double best_chi2 = chi2;
-            for (int attempt = 0; attempt < 12; ++attempt) {
-                double matrix[kNFSPLParam][kNFSPLParam];
-                double step[kNFSPLParam] = {};
-                for (int a = 0; a < kNFSPLParam; ++a) {
-                    for (int b = 0; b < kNFSPLParam; ++b) {
-                        matrix[a][b] = jtj[a][b];
-                        if (a == b) {
-                            matrix[a][b] += lambda * std::max(jtj[a][a], 1.0);
-                        }
-                    }
-                }
-                if (!solve_linear_fspl(matrix, rhs, step)) {
-                    lambda *= 10.0;
-                    continue;
-                }
-                step[3] = std::clamp(step[3], -0.25, 0.25);
-                double trial[kNFSPLParam];
-                for (int k = 0; k < kNFSPLParam; ++k) trial[k] = q[k] + step[k];
-                clamp_fspl_q(trial);
-                std::vector<double> trial_residual;
-                fspl_residuals(vbm, trial, time, flux, ferr, n, trial_residual);
-                const double trial_chi2 = sumsq(trial_residual);
-                if (std::isfinite(trial_chi2) && trial_chi2 < best_chi2) {
-                    std::copy(trial, trial + kNFSPLParam, best_q);
-                    best_chi2 = trial_chi2;
-                    residual.swap(trial_residual);
-                    accepted = true;
-                    break;
-                }
-                lambda *= 10.0;
-            }
-            if (!accepted) {
-                converged = accepted_any;
-                break;
-            }
-            accepted_any = true;
-            const double improvement = chi2 - best_chi2;
-            std::copy(best_q, best_q + kNFSPLParam, q);
-            chi2 = best_chi2;
-            lambda = std::max(lambda * 0.3, 1e-12);
-            if (improvement < tol) {
-                converged = true;
-                ++iterations;
-                break;
-            }
-        }
-
-        std::vector<double> A;
-        LinearFit fit;
-        fspl_residuals(vbm, q, time, flux, ferr, n, residual, &A, &fit);
-        chi2 = sumsq(residual);
-        npy_intp pdims[1] = {kNFSPLParam}, ddims[1] = {n};
-        auto* params = reinterpret_cast<PyArrayObject*>(
-            PyArray_SimpleNew(1, pdims, NPY_DOUBLE)
-        );
-        auto* model = reinterpret_cast<PyArrayObject*>(
-            PyArray_SimpleNew(1, ddims, NPY_DOUBLE)
-        );
-        auto* raw_residual = reinterpret_cast<PyArrayObject*>(
-            PyArray_SimpleNew(1, ddims, NPY_DOUBLE)
-        );
-        if (!params || !model || !raw_residual) {
-            Py_XDECREF(params);
-            Py_XDECREF(model);
-            Py_XDECREF(raw_residual);
-            goto fail;
-        }
-        double* output = static_cast<double*>(PyArray_DATA(params));
-        output[0] = q[0];
-        output[1] = std::exp(q[1]);
-        output[2] = u0_sign * std::exp(q[2]);
-        output[3] = q[3];
-        double* model_output = static_cast<double*>(PyArray_DATA(model));
-        double* residual_output = static_cast<double*>(PyArray_DATA(raw_residual));
-        for (npy_intp i = 0; i < n; ++i) {
-            model_output[i] = fit.fs * A[static_cast<size_t>(i)] + fit.fb;
-            residual_output[i] = flux[i] - model_output[i];
-        }
-        Py_DECREF(time_arr);
-        Py_DECREF(flux_arr);
-        Py_DECREF(ferr_arr);
-        Py_DECREF(p0_arr);
-        return Py_BuildValue(
-            "NdddNNii", params, fit.fs, fit.fb, chi2, model, raw_residual,
-            converged ? 1 : 0, iterations
-        );
-    }
-fail:
-    Py_XDECREF(time_arr);
-    Py_XDECREF(flux_arr);
-    Py_XDECREF(ferr_arr);
-    Py_XDECREF(p0_arr);
-    return nullptr;
-}
-
-bool residuals(
-    VBMicrolensing& vbm,
-    const double q[kNParam],
-    const double* time, const double* flux, const double* ferr, npy_intp n,
-    std::vector<double>& residual, std::vector<double>* A_out = nullptr, LinearFit* fit_out = nullptr
-) {
-    std::vector<double> A(static_cast<size_t>(n));
-    std::vector<double> y1(static_cast<size_t>(n));
-    std::vector<double> y2(static_cast<size_t>(n));
-    // VBM's bundled Sun table stores time as JD-2450000.  Its table loader
-    // applies that offset internally, so its parallax API must receive the
-    // same reduced convention even when jacscanomaly's public API uses JD.
-    constexpr double kVBMTimeOffset = 2450000.0;
-    std::vector<double> vbm_time(static_cast<size_t>(n));
-    for (npy_intp i = 0; i < n; ++i) vbm_time[static_cast<size_t>(i)] = time[i] - kVBMTimeOffset;
-    // VBM convention: [u0, log(tE), t0, log(rho), piE_1, piE_2].
-    double p[kNParam] = {q[2], q[1], q[0] - kVBMTimeOffset, q[3], q[4], q[5]};
-    // ESPLMag2, used internally by this VBM call, already changes method away
-    // from the finite-source regime when appropriate.  Give VBM every datum
-    // and leave that numerical decision to its native implementation.
-    vbm.ESPLLightCurveParallax(p, vbm_time.data(), A.data(), y1.data(), y2.data(), static_cast<int>(n));
-    for (double a : A) {
-        if (!std::isfinite(a) || a <= 0.0) {
-            residual.assign(static_cast<size_t>(n), 1e100);
-            return false;
-        }
-    }
-    const LinearFit fit = solve_fluxes(A, flux, ferr);
-    if (!fit.valid) {
-        residual.assign(static_cast<size_t>(n), 1e100);
-        return false;
-    }
-    residual.resize(static_cast<size_t>(n));
-    for (npy_intp i = 0; i < n; ++i) {
-        const double fe = std::max(ferr[i], 1e-12);
-        residual[static_cast<size_t>(i)] = (flux[i] - (fit.fs * A[static_cast<size_t>(i)] + fit.fb)) / fe;
-    }
-    if (A_out) *A_out = std::move(A);
-    if (fit_out) *fit_out = fit;
-    return true;
-}
-
-PyObject* fit_fspl_parallax(PyObject*, PyObject* args, PyObject* kwargs) {
-    PyObject *time_obj = nullptr, *flux_obj = nullptr, *ferr_obj = nullptr, *p0_obj = nullptr;
-    const char *coordinates = nullptr, *sun_table = nullptr, *espl_table = nullptr;
-    int maxiter = 200;
-    double damping_parameter = 1e-4, tol = 1e-5, vbm_tol = 1e-4, vbm_reltol = 1e-4;
-    double max_piE = 5.0;
-    static const char* kwlist[] = {
-        "time", "flux", "ferr", "p0", "coordinates", "sun_table", "espl_table",
-        "maxiter", "damping_parameter", "tol", "vbm_tol", "vbm_reltol", "max_piE", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOOsss|iddddd", const_cast<char**>(kwlist),
-            &time_obj, &flux_obj, &ferr_obj, &p0_obj, &coordinates, &sun_table, &espl_table,
-            &maxiter, &damping_parameter, &tol, &vbm_tol, &vbm_reltol, &max_piE)) {
+        Py_DECREF(u_array);
         return nullptr;
     }
 
-    PyArrayObject *time_arr = as_double_array(time_obj), *flux_arr = as_double_array(flux_obj);
-    PyArrayObject *ferr_arr = as_double_array(ferr_obj), *p0_arr = as_double_array(p0_obj);
-    npy_intp n = 0;
-    if (!time_arr || !flux_arr || !ferr_arr || !p0_arr) goto fail;
-    n = PyArray_DIM(time_arr, 0);
-    if (PyArray_NDIM(time_arr) != 1 || PyArray_NDIM(flux_arr) != 1 || PyArray_NDIM(ferr_arr) != 1 ||
-        PyArray_NDIM(p0_arr) != 1 || PyArray_DIM(flux_arr, 0) != n || PyArray_DIM(ferr_arr, 0) != n ||
-        PyArray_DIM(p0_arr, 0) < kNParam || n < 7) {
-        PyErr_SetString(PyExc_ValueError, "fit_fspl_parallax requires equal one-dimensional arrays, p0 with 6 values, and at least 7 data points.");
-        goto fail;
-    }
-    {
-        VBMicrolensing vbm;
-        vbm.Tol = vbm_tol;
-        vbm.RelTol = vbm_reltol;
-        vbm.t_in_HJD = true;
-        vbm.parallaxsystem = 1;
-        std::vector<char> coord(coordinates, coordinates + std::strlen(coordinates) + 1);
-        std::vector<char> sun(sun_table, sun_table + std::strlen(sun_table) + 1);
-        vbm.SetObjectCoordinates(coord.data());
-        if (!vbm.AreCoordinatesSet()) {
-            PyErr_SetString(PyExc_ValueError, "coordinates must be 'HH:MM:SS.s +/-DD:MM:SS.s'.");
-            goto fail;
+    const char* table = nullptr;
+    if (table_object != Py_None) {
+        table = PyUnicode_AsUTF8(table_object);
+        if (table == nullptr) {
+            Py_DECREF(u_array);
+            return nullptr;
         }
-        vbm.LoadSunTable(sun.data());
-        vbm.LoadESPLTable(espl_table);
+    }
 
-        const double* p0 = static_cast<const double*>(PyArray_DATA(p0_arr));
-        double q[kNParam] = {p0[0], std::log(std::max(std::abs(p0[1]), 1e-12)), p0[2],
-                              std::log(std::max(std::abs(p0[3]), 1e-12)), p0[4], p0[5]};
-        clamp_q(q, max_piE);
-        const double* time = static_cast<const double*>(PyArray_DATA(time_arr));
-        const double* flux = static_cast<const double*>(PyArray_DATA(flux_arr));
-        const double* ferr = static_cast<const double*>(PyArray_DATA(ferr_arr));
-        std::vector<double> residual;
-        if (!residuals(vbm, q, time, flux, ferr, n, residual)) {
-            PyErr_SetString(PyExc_RuntimeError, "VBMicrolensing failed to evaluate the starting FSPL-parallax model.");
-            goto fail;
-        }
-        double chi2 = sumsq(residual);
-        double lambda = std::max(damping_parameter, 1e-12);
-        const double fd[kNParam] = {1e-4, 1e-4, 1e-5, 1e-4, 1e-5, 1e-5};
-        for (int iter = 0; iter < maxiter; ++iter) {
-            std::array<std::vector<double>, kNParam> jac;
-            for (int k = 0; k < kNParam; ++k) {
-                double qp[kNParam], qm[kNParam];
-                std::copy(q, q + kNParam, qp); std::copy(q, q + kNParam, qm);
-                qp[k] += fd[k]; qm[k] -= fd[k]; clamp_q(qp, max_piE); clamp_q(qm, max_piE);
-                std::vector<double> rp, rm;
-                residuals(vbm, qp, time, flux, ferr, n, rp);
-                residuals(vbm, qm, time, flux, ferr, n, rm);
-                jac[k].resize(static_cast<size_t>(n));
-                const double inv = 1.0 / (qp[k] - qm[k]);
-                for (npy_intp i = 0; i < n; ++i) jac[k][static_cast<size_t>(i)] = (rp[static_cast<size_t>(i)] - rm[static_cast<size_t>(i)]) * inv;
-            }
-            double jtj[kNParam][kNParam] = {}, rhs[kNParam] = {};
-            for (int a = 0; a < kNParam; ++a) for (int b = 0; b < kNParam; ++b) {
-                double dot = 0.0;
-                for (npy_intp i = 0; i < n; ++i) dot += jac[a][static_cast<size_t>(i)] * jac[b][static_cast<size_t>(i)];
-                jtj[a][b] = dot;
-                if (b == 0) for (npy_intp i = 0; i < n; ++i) rhs[a] -= jac[a][static_cast<size_t>(i)] * residual[static_cast<size_t>(i)];
-            }
-            bool accepted = false;
-            double best_q[kNParam];
-            double best_chi2 = chi2;
-            for (int attempt = 0; attempt < 12; ++attempt) {
-                double mat[kNParam][kNParam], step[kNParam] = {};
-                for (int a = 0; a < kNParam; ++a) for (int b = 0; b < kNParam; ++b) {
-                    mat[a][b] = jtj[a][b];
-                    if (a == b) mat[a][b] += lambda * std::max(jtj[a][a], 1.0);
-                }
-                if (!solve_linear(mat, rhs, step)) { lambda *= 10.0; continue; }
-                // In the PSPL-like regime rho is only weakly identified.  A
-                // finite-difference Jacobian can then propose an unphysical
-                // multi-decade logrho jump even though the other parameters
-                // are well constrained.  Keep this coordinate in a local
-                // trust region; accepted LM iterations can still move rho.
-                step[3] = std::clamp(step[3], -0.25, 0.25);
-                double trial[kNParam];
-                for (int k = 0; k < kNParam; ++k) trial[k] = q[k] + step[k];
-                clamp_q(trial, max_piE);
-                std::vector<double> trial_residual;
-                residuals(vbm, trial, time, flux, ferr, n, trial_residual);
-                const double trial_chi2 = sumsq(trial_residual);
-                if (std::isfinite(trial_chi2) && trial_chi2 < best_chi2) {
-                    std::copy(trial, trial + kNParam, best_q); best_chi2 = trial_chi2;
-                    residual.swap(trial_residual); accepted = true; break;
-                }
-                lambda *= 10.0;
-            }
-            if (!accepted) break;
-            const double improvement = chi2 - best_chi2;
-            std::copy(best_q, best_q + kNParam, q); chi2 = best_chi2;
-            lambda = std::max(lambda * 0.3, 1e-12);
-            if (improvement < tol) break;
-        }
-        std::vector<double> A; LinearFit fit;
-        residuals(vbm, q, time, flux, ferr, n, residual, &A, &fit);
-        chi2 = sumsq(residual);
-        npy_intp pdims[1] = {kNParam}, ddims[1] = {n};
-        auto* params = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, pdims, NPY_DOUBLE));
-        auto* model = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, ddims, NPY_DOUBLE));
-        auto* raw_residual = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, ddims, NPY_DOUBLE));
-        if (!params || !model || !raw_residual) { Py_XDECREF(params); Py_XDECREF(model); Py_XDECREF(raw_residual); goto fail; }
-        double* po = static_cast<double*>(PyArray_DATA(params));
-        po[0] = q[0]; po[1] = std::exp(q[1]); po[2] = q[2]; po[3] = std::exp(q[3]); po[4] = q[4]; po[5] = q[5];
-        double* mo = static_cast<double*>(PyArray_DATA(model));
-        double* ro = static_cast<double*>(PyArray_DATA(raw_residual));
-        for (npy_intp i = 0; i < n; ++i) { mo[i] = fit.fs * A[static_cast<size_t>(i)] + fit.fb; ro[i] = flux[i] - mo[i]; }
-        Py_DECREF(time_arr); Py_DECREF(flux_arr); Py_DECREF(ferr_arr); Py_DECREF(p0_arr);
-        return Py_BuildValue("NdddNN", params, fit.fs, fit.fb, chi2, model, raw_residual);
+    const npy_intp n = PyArray_DIM(u_array, 0);
+    npy_intp dimensions[1] = {n};
+    auto* output = reinterpret_cast<PyArrayObject*>(
+        PyArray_SimpleNew(1, dimensions, NPY_DOUBLE)
+    );
+    if (output == nullptr) {
+        Py_DECREF(u_array);
+        return nullptr;
     }
-fail:
-    Py_XDECREF(time_arr); Py_XDECREF(flux_arr); Py_XDECREF(ferr_arr); Py_XDECREF(p0_arr);
-    return nullptr;
+
+    try {
+        VBMicrolensing magnifier;
+        magnifier.Tol = tol;
+        magnifier.RelTol = reltol;
+        if (table != nullptr && std::strlen(table) > 0) {
+            magnifier.LoadESPLTable(table);
+        }
+
+        const double* input = static_cast<const double*>(
+            PyArray_DATA(u_array)
+        );
+        double* values = static_cast<double*>(PyArray_DATA(output));
+        for (npy_intp index = 0; index < n; ++index) {
+            if (!std::isfinite(input[index])) {
+                throw std::invalid_argument(
+                    "u must contain only finite values."
+                );
+            }
+            values[index] = magnifier.ESPLMag2(
+                std::abs(input[index]), rho
+            );
+            if (!std::isfinite(values[index]) || values[index] <= 0.0) {
+                throw std::runtime_error(
+                    "compiled finite-source magnification is invalid."
+                );
+            }
+        }
+    } catch (const std::exception& exception) {
+        Py_DECREF(u_array);
+        Py_DECREF(output);
+        PyErr_SetString(PyExc_ValueError, exception.what());
+        return nullptr;
+    }
+
+    Py_DECREF(u_array);
+    return reinterpret_cast<PyObject*>(output);
+}
+
+PyObject* score_finite_source_seeds(
+    PyObject*, PyObject* args, PyObject* kwargs
+) {
+    PyObject* time_object = nullptr;
+    PyObject* flux_object = nullptr;
+    PyObject* ferr_object = nullptr;
+    PyObject* seeds_object = nullptr;
+    PyObject* table_object = Py_None;
+    double tol = 1.0e-4;
+    double reltol = 1.0e-4;
+    static const char* kwlist[] = {
+        "time", "flux", "ferr", "seeds", "espl_table", "tol", "reltol", nullptr
+    };
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OOOO|Odd",
+            const_cast<char**>(kwlist),
+            &time_object,
+            &flux_object,
+            &ferr_object,
+            &seeds_object,
+            &table_object,
+            &tol,
+            &reltol
+        )) {
+        return nullptr;
+    }
+
+    PyArrayObject* time_array = as_double_array(time_object);
+    PyArrayObject* flux_array = as_double_array(flux_object);
+    PyArrayObject* ferr_array = as_double_array(ferr_object);
+    PyArrayObject* seeds_array = as_double_array(seeds_object);
+    if (
+        time_array == nullptr
+        || flux_array == nullptr
+        || ferr_array == nullptr
+        || seeds_array == nullptr
+    ) {
+        Py_XDECREF(time_array);
+        Py_XDECREF(flux_array);
+        Py_XDECREF(ferr_array);
+        Py_XDECREF(seeds_array);
+        return nullptr;
+    }
+
+    const bool valid_shape = (
+        PyArray_NDIM(time_array) == 1
+        && PyArray_NDIM(flux_array) == 1
+        && PyArray_NDIM(ferr_array) == 1
+        && PyArray_NDIM(seeds_array) == 2
+        && PyArray_DIM(time_array, 0) == PyArray_DIM(flux_array, 0)
+        && PyArray_DIM(time_array, 0) == PyArray_DIM(ferr_array, 0)
+        && PyArray_DIM(seeds_array, 1) == 4
+        && PyArray_DIM(seeds_array, 0) > 0
+        && PyArray_DIM(time_array, 0) > 0
+    );
+    if (!valid_shape || !std::isfinite(tol) || !(tol > 0.0)
+        || !std::isfinite(reltol) || !(reltol > 0.0)) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "time, flux, and ferr must be equal-length 1-D arrays; "
+            "seeds must have shape (n_seeds, 4); tolerances must be positive."
+        );
+        Py_DECREF(time_array);
+        Py_DECREF(flux_array);
+        Py_DECREF(ferr_array);
+        Py_DECREF(seeds_array);
+        return nullptr;
+    }
+
+    const char* table = nullptr;
+    if (table_object != Py_None) {
+        table = PyUnicode_AsUTF8(table_object);
+        if (table == nullptr) {
+            Py_DECREF(time_array);
+            Py_DECREF(flux_array);
+            Py_DECREF(ferr_array);
+            Py_DECREF(seeds_array);
+            return nullptr;
+        }
+    }
+
+    const npy_intp n_points = PyArray_DIM(time_array, 0);
+    const npy_intp n_seeds = PyArray_DIM(seeds_array, 0);
+    npy_intp dimensions[1] = {n_seeds};
+    auto* output = reinterpret_cast<PyArrayObject*>(
+        PyArray_SimpleNew(1, dimensions, NPY_DOUBLE)
+    );
+    if (output == nullptr) {
+        Py_DECREF(time_array);
+        Py_DECREF(flux_array);
+        Py_DECREF(ferr_array);
+        Py_DECREF(seeds_array);
+        return nullptr;
+    }
+
+    const double* time = static_cast<const double*>(PyArray_DATA(time_array));
+    const double* flux = static_cast<const double*>(PyArray_DATA(flux_array));
+    const double* ferr = static_cast<const double*>(PyArray_DATA(ferr_array));
+    const double* seeds = static_cast<const double*>(PyArray_DATA(seeds_array));
+    double* scores = static_cast<double*>(PyArray_DATA(output));
+
+    bool invalid_data = false;
+    for (npy_intp index = 0; index < n_points; ++index) {
+        if (!std::isfinite(time[index]) || !std::isfinite(flux[index])
+            || !std::isfinite(ferr[index]) || !(ferr[index] > 0.0)) {
+            invalid_data = true;
+            break;
+        }
+    }
+    if (invalid_data) {
+        PyErr_SetString(PyExc_ValueError, "time, flux, and ferr must be finite with positive ferr.");
+        Py_DECREF(time_array);
+        Py_DECREF(flux_array);
+        Py_DECREF(ferr_array);
+        Py_DECREF(seeds_array);
+        Py_DECREF(output);
+        return nullptr;
+    }
+
+    try {
+        VBMicrolensing magnifier;
+        magnifier.Tol = tol;
+        magnifier.RelTol = reltol;
+        if (table != nullptr && std::strlen(table) > 0) {
+            magnifier.LoadESPLTable(table);
+        }
+
+        for (npy_intp seed_index = 0; seed_index < n_seeds; ++seed_index) {
+            const double* seed = seeds + seed_index * 4;
+            double& score = scores[seed_index];
+            score = std::numeric_limits<double>::infinity();
+            if (!std::isfinite(seed[0]) || !std::isfinite(seed[1])
+                || !std::isfinite(seed[2]) || !std::isfinite(seed[3])
+                || seed[1] == 0.0) {
+                continue;
+            }
+            const double rho = std::exp(std::max(-50.0, std::min(10.0, seed[3])));
+            const double tE = std::abs(seed[1]);
+            double weight_sum = 0.0;
+            double weighted_magnification = 0.0;
+            double weighted_flux = 0.0;
+            bool invalid_seed = false;
+            for (npy_intp index = 0; index < n_points; ++index) {
+                const double u = std::sqrt(
+                    std::pow((time[index] - seed[0]) / tE, 2.0)
+                    + seed[2] * seed[2]
+                );
+                const double magnification = magnifier.ESPLMag2(std::abs(u), rho);
+                if (!std::isfinite(magnification) || !(magnification > 0.0)) {
+                    invalid_seed = true;
+                    break;
+                }
+                const double error = std::max(ferr[index], 1.0e-12);
+                const double weight = 1.0 / (error * error);
+                weight_sum += weight;
+                weighted_magnification += weight * magnification;
+                weighted_flux += weight * flux[index];
+            }
+            if (invalid_seed || !(weight_sum > 0.0) || !std::isfinite(weight_sum)) {
+                continue;
+            }
+            const double mean_magnification = weighted_magnification / weight_sum;
+            const double mean_flux = weighted_flux / weight_sum;
+            double denominator = 0.0;
+            double numerator = 0.0;
+            for (npy_intp index = 0; index < n_points; ++index) {
+                const double u = std::sqrt(
+                    std::pow((time[index] - seed[0]) / tE, 2.0)
+                    + seed[2] * seed[2]
+                );
+                const double magnification = magnifier.ESPLMag2(std::abs(u), rho);
+                const double error = std::max(ferr[index], 1.0e-12);
+                const double weight = 1.0 / (error * error);
+                const double centered_magnification = magnification - mean_magnification;
+                const double centered_flux = flux[index] - mean_flux;
+                denominator += weight * centered_magnification * centered_magnification;
+                numerator += weight * centered_magnification * centered_flux;
+            }
+            if (!std::isfinite(denominator) || !(denominator > 0.0)) {
+                continue;
+            }
+            const double source_flux = numerator / denominator;
+            const double blend_flux = mean_flux - source_flux * mean_magnification;
+            if (!std::isfinite(source_flux) || !std::isfinite(blend_flux)) {
+                continue;
+            }
+            double chi2 = 0.0;
+            for (npy_intp index = 0; index < n_points; ++index) {
+                const double u = std::sqrt(
+                    std::pow((time[index] - seed[0]) / tE, 2.0)
+                    + seed[2] * seed[2]
+                );
+                const double magnification = magnifier.ESPLMag2(std::abs(u), rho);
+                const double error = std::max(ferr[index], 1.0e-12);
+                const double residual = (
+                    flux[index] - (source_flux * magnification + blend_flux)
+                ) / error;
+                chi2 += residual * residual;
+            }
+            if (std::isfinite(chi2)) {
+                score = chi2;
+            }
+        }
+    } catch (const std::exception& exception) {
+        Py_DECREF(time_array);
+        Py_DECREF(flux_array);
+        Py_DECREF(ferr_array);
+        Py_DECREF(seeds_array);
+        Py_DECREF(output);
+        PyErr_SetString(PyExc_ValueError, exception.what());
+        return nullptr;
+    }
+
+    Py_DECREF(time_array);
+    Py_DECREF(flux_array);
+    Py_DECREF(ferr_array);
+    Py_DECREF(seeds_array);
+    return reinterpret_cast<PyObject*>(output);
 }
 
 PyMethodDef methods[] = {
     {
-        "fit_fspl",
-        reinterpret_cast<PyCFunction>(fit_fspl),
+        "fspl_magnification",
+        reinterpret_cast<PyCFunction>(finite_source_magnification),
         METH_VARARGS | METH_KEYWORDS,
-        "Fit non-parallax FSPL with VBMicrolensing and finite-difference C++ LM."
+        "Evaluate finite-source point-lens magnification in the compiled kernel."
     },
     {
-        "fit_fspl_parallax",
-        reinterpret_cast<PyCFunction>(fit_fspl_parallax),
+        "score_fspl_seeds",
+        reinterpret_cast<PyCFunction>(score_finite_source_seeds),
         METH_VARARGS | METH_KEYWORDS,
-        "Fit annual-parallax FSPL with VBMicrolensing and finite-difference C++ LM."
+        "Score a batch of FSPL seeds with profiled source and blend fluxes."
     },
     {nullptr, nullptr, 0, nullptr}
 };
-PyModuleDef module = {PyModuleDef_HEAD_INIT, "_vbm_cpp", "VBMicrolensing C++ backend.", -1, methods};
+
+PyModuleDef module = {
+    PyModuleDef_HEAD_INIT,
+    "_vbm_cpp",
+    "Compiled finite-source magnification backend for jacscanomaly.",
+    -1,
+    methods,
+};
+
 }  // namespace
 
-PyMODINIT_FUNC PyInit__vbm_cpp(void) { import_array(); return PyModule_Create(&module); }
+PyMODINIT_FUNC PyInit__vbm_cpp(void) {
+    import_array();
+    return PyModule_Create(&module);
+}

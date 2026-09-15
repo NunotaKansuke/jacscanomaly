@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal, Optional, Sequence
 
 import numpy as np
@@ -45,7 +46,7 @@ class TimeSpec:
 
 
 @dataclass(frozen=True)
-class NativeParallaxDiagnostics:
+class ParallaxDiagnostics:
     optimizer_success: bool
     optimizer_status: str
     nfev: int
@@ -57,7 +58,7 @@ class NativeParallaxDiagnostics:
     ephemeris_extrapolated: bool
     nonfinite_evaluations: int
     observer_convention: str
-    backend: str = "native_cpp_vbm_magnification_scipy_trf"
+    backend: str = "scipy_lm_compiled_evaluator"
 
 
 @dataclass(frozen=True)
@@ -248,7 +249,8 @@ class ParallaxEvaluator:
         satellite_or_observer_ephemeris: Optional[Ephemeris] = None,
         reference_ephemeris: Optional[Ephemeris] = None,
         finite_source: bool = False, espl_table_path: Optional[str] = None,
-        vbm_tol: float = 1.0e-4, vbm_reltol: float = 1.0e-4,
+        magnification_tol: float = 1.0e-4,
+        magnification_reltol: float = 1.0e-4,
     ) -> None:
         if time_spec is None:
             raise ValueError("ParallaxEvaluator requires an explicit TimeSpec; time origin is not inferred.")
@@ -279,8 +281,8 @@ class ParallaxEvaluator:
         self.tref = float(tref)
         self.finite_source = bool(finite_source)
         self.espl_table_path = espl_table_path
-        self.vbm_tol = float(vbm_tol)
-        self.vbm_reltol = float(vbm_reltol)
+        self.magnification_tol = float(magnification_tol)
+        self.magnification_reltol = float(magnification_reltol)
         self.earth_ephemeris = earth_ephemeris
         self.satellite_or_observer_ephemeris = satellite_or_observer_ephemeris
         self.reference_ephemeris = reference_ephemeris
@@ -290,7 +292,8 @@ class ParallaxEvaluator:
             earth_ephemeris.cpp_tuple() if earth_ephemeris is not None else None,
             satellite_or_observer_ephemeris.cpp_tuple() if satellite_or_observer_ephemeris is not None else None,
             reference_ephemeris.cpp_tuple() if reference_ephemeris is not None else None,
-            bool(finite_source), espl_table_path, float(vbm_tol), float(vbm_reltol),
+            bool(finite_source), espl_table_path,
+            float(magnification_tol), float(magnification_reltol),
             bool(any(eph is not None and eph.extrapolation == "linear" for eph in (earth_ephemeris, satellite_or_observer_ephemeris, reference_ephemeris))),
         )
 
@@ -317,8 +320,8 @@ class ParallaxEvaluator:
             reference_ephemeris=self.reference_ephemeris,
             finite_source=self.finite_source,
             espl_table_path=self.espl_table_path,
-            vbm_tol=self.vbm_tol,
-            vbm_reltol=self.vbm_reltol,
+            magnification_tol=self.magnification_tol,
+            magnification_reltol=self.magnification_reltol,
         )
         return clone.magnification(raw_params)
 
@@ -336,17 +339,19 @@ class ParallaxEvaluator:
         return np.asarray(residual), np.asarray(jacobian)
 
 
-class NativeParallaxFitter:
-    """Common bounded SciPy TRF fitter for PSPL and FSPL parallax models."""
+class _ParallaxFitter:
+    """Shared C++ evaluator/SciPy LM implementation for parallax models."""
 
-    def __init__(self, *, ra_deg, dec_deg, tref, finite_source=False, time_spec=TimeSpec(), observer_convention="earth_geocentric_offset", earth_ephemeris=None, satellite_or_observer_ephemeris=None, reference_ephemeris=None, maxiter=1000, tol=1e-6, max_piE=1.0, espl_table_path=None, vbm_tol=1e-4, vbm_reltol=1e-4):
+    def __init__(self, *, ra_deg, dec_deg, tref, finite_source=False, time_spec=TimeSpec(), observer_convention="earth_geocentric_offset", earth_ephemeris=None, satellite_or_observer_ephemeris=None, reference_ephemeris=None, maxiter=1000, tol=1e-6, max_piE=1.0, espl_table_path=None, magnification_tol=1e-4, magnification_reltol=1e-4):
         self.ra_deg = float(ra_deg); self.dec_deg = float(dec_deg); self.tref = float(tref)
         self.finite_source = bool(finite_source); self.time_spec = time_spec; self.observer_convention = observer_convention
         self.earth_ephemeris = earth_ephemeris if earth_ephemeris is not None else default_earth_ephemeris(time_spec=time_spec)
         self.satellite_or_observer_ephemeris = satellite_or_observer_ephemeris
         self.reference_ephemeris = reference_ephemeris
         self.maxiter = int(maxiter); self.tol = float(tol); self.max_piE = float(max_piE)
-        self.espl_table_path = espl_table_path; self.vbm_tol = float(vbm_tol); self.vbm_reltol = float(vbm_reltol)
+        self.espl_table_path = espl_table_path
+        self.magnification_tol = float(magnification_tol)
+        self.magnification_reltol = float(magnification_reltol)
         self._last_fit = None
 
     @property
@@ -405,38 +410,146 @@ class NativeParallaxFitter:
         lower[pi_index:pi_index + 2] = -abs(self.max_piE); upper[pi_index:pi_index + 2] = abs(self.max_piE)
         return lower, upper
 
-    def fit(self, time, flux, ferr, q0):
+    def _optimizer_seed(self, raw: np.ndarray) -> np.ndarray:
+        """Translate native raw parameters to the unconstrained LM vector."""
+        value = np.asarray(raw, dtype=float).reshape(-1).copy()
+        value[0] -= float(self.time_spec.offset)
+        return value
+
+    def _raw_from_optimizer(self, value: np.ndarray) -> np.ndarray:
+        """Translate an unconstrained LM vector to the evaluator contract."""
+        raw = np.asarray(value, dtype=float).reshape(-1).copy()
+        raw[0] += float(self.time_spec.offset)
+        raw[1] = np.clip(raw[1], np.log(1.0e-6), np.log(1.0e8))
+        if self.finite_source:
+            raw[3] = np.clip(raw[3], -50.0, np.log(1.0e3))
+        return raw
+
+    def _automatic_fspl_initial_guesses(
+        self,
+        time: np.ndarray,
+        flux: np.ndarray,
+        ferr: np.ndarray,
+        *,
+        pspl_params=None,
+    ) -> tuple[np.ndarray, ...]:
+        """Build FSPL duration-grid seeds and append zero parallax."""
+        if not self.finite_source:
+            raise ValueError("PSPL parallax fitting still requires an explicit q0.")
+        from .fspl_initialization import fspl_template_initial_guesses
+
+        proxy = SimpleNamespace(
+            time=time,
+            flux=flux,
+            ferr=ferr,
+            params=pspl_params,
+        )
+        base_seeds = fspl_template_initial_guesses(
+            proxy,
+            top_k=4,
+            pspl_params=pspl_params,
+            magnification_tol=self.magnification_tol,
+            magnification_reltol=self.magnification_reltol,
+            espl_table_path=self.espl_table_path,
+        )
+        return tuple(
+            np.concatenate([np.asarray(seed, dtype=float), [0.0, 0.0]])
+            for seed in base_seeds
+        )
+
+    def fit(self, time, flux, ferr, q0=None, *, pspl_params=None):
+        """Fit parallax, auto-seeding FSPL from the duration grid when needed."""
         time = np.asarray(time, dtype=float); flux = np.asarray(flux, dtype=float); ferr = np.asarray(ferr, dtype=float)
         if time.ndim != 1 or not (time.shape == flux.shape == ferr.shape) or np.any(ferr <= 0) or not np.all(np.isfinite(time)):
             raise ValueError("time, flux, and ferr must be finite one-dimensional arrays with positive ferr.")
+        if q0 is None:
+            seeds = self._automatic_fspl_initial_guesses(
+                time,
+                flux,
+                ferr,
+                pspl_params=pspl_params,
+            )
+            best_fit = None
+            best_chi2 = np.inf
+            errors = []
+            for seed in seeds:
+                try:
+                    candidate = self.fit(time, flux, ferr, seed)
+                    chi2 = float(np.asarray(candidate.chi2))
+                except Exception as exc:
+                    errors.append(exc)
+                    continue
+                if np.isfinite(chi2) and chi2 < best_chi2:
+                    best_fit = candidate
+                    best_chi2 = chi2
+            if best_fit is None:
+                message = "All automatic FSPL parallax initial guesses failed."
+                if errors:
+                    message += f" First error: {errors[0]}"
+                raise RuntimeError(message)
+            self._last_fit = best_fit
+            return best_fit
         evaluator = ParallaxEvaluator(
             time, flux, ferr, ra_deg=self.ra_deg, dec_deg=self.dec_deg, tref=self.tref,
             time_spec=self.time_spec, observer_convention=self.observer_convention,
             earth_ephemeris=self.earth_ephemeris, satellite_or_observer_ephemeris=self.satellite_or_observer_ephemeris,
             reference_ephemeris=self.reference_ephemeris, finite_source=self.finite_source,
-            espl_table_path=self.espl_table_path, vbm_tol=self.vbm_tol, vbm_reltol=self.vbm_reltol,
+            espl_table_path=self.espl_table_path,
+            magnification_tol=self.magnification_tol,
+            magnification_reltol=self.magnification_reltol,
         )
         raw0 = self._raw_seed(np.asarray(q0, dtype=float))
-        lower, upper = self._bounds(time)
-        raw0 = np.minimum(np.maximum(raw0, lower + 1e-10), upper - 1e-10)
         if least_squares is None:
             raise ImportError(
                 "Native parallax fitting requires scipy.optimize.least_squares."
             )
+        optimizer0 = self._optimizer_seed(raw0)
+
+        def residual_fun(value):
+            return evaluator.residual(self._raw_from_optimizer(value))
+
+        def jacobian_fun(value):
+            optimizer_value = np.asarray(value, dtype=float)
+            raw_value = self._raw_from_optimizer(optimizer_value)
+            return np.asarray(evaluator.jacobian(raw_value), dtype=float)
+
         result = least_squares(
-            evaluator.residual,
-            raw0,
-            jac=evaluator.jacobian,
-            method="trf",
-            bounds=(lower, upper),
-            x_scale="jac",
-            loss="linear",
+            residual_fun,
+            optimizer0,
+            jac=jacobian_fun,
+            method="lm",
             max_nfev=self.maxiter,
             xtol=self.tol,
             ftol=self.tol,
             gtol=self.tol,
         )
-        raw = np.asarray(result.x, dtype=float)
+        raw = self._raw_from_optimizer(np.asarray(result.x, dtype=float))
+        pi_index = 4 if self.finite_source else 3
+        bounded = bool(
+            np.isfinite(self.max_piE)
+            and self.max_piE > 0.0
+            and np.any(np.abs(raw[pi_index:pi_index + 2]) > abs(float(self.max_piE)))
+        )
+        if bounded or not bool(result.success):
+            # LM is the common optimizer, but it has no bound support.  Keep
+            # the explicit max_piE contract by using the same SciPy solver in
+            # bounded trust-region mode only when the unconstrained pass
+            # leaves the permitted physical domain.
+            lower, upper = self._bounds(time)
+            raw_start = np.minimum(np.maximum(raw, lower + 1.0e-10), upper - 1.0e-10)
+            result = least_squares(
+                evaluator.residual,
+                raw_start,
+                jac=evaluator.jacobian,
+                method="trf",
+                bounds=(lower, upper),
+                x_scale="jac",
+                max_nfev=self.maxiter,
+                xtol=self.tol,
+                ftol=self.tol,
+                gtol=self.tol,
+            )
+            raw = np.asarray(result.x, dtype=float)
         mags = evaluator.magnification(raw)
         model = evaluator.evaluate(raw)
         residual = flux - model
@@ -457,16 +570,33 @@ class NativeParallaxFitter:
             condition = float(singular[0] / singular[-1]) if singular.size and singular[-1] > 0 else float("inf")
         except Exception:
             rank, condition = 0, float("inf")
-        at_bound = bool(np.any(np.isclose(raw, lower, rtol=0.0, atol=1e-7)) or np.any(np.isclose(raw, upper, rtol=0.0, atol=1e-7)))
-        diagnostics = NativeParallaxDiagnostics(
+        pi_index = 4 if self.finite_source else 3
+        at_bound = bool(
+            np.isfinite(self.max_piE)
+            and self.max_piE > 0.0
+            and np.any(
+                np.isclose(
+                    np.abs(raw[pi_index:pi_index + 2]),
+                    abs(float(self.max_piE)),
+                    rtol=0.0,
+                    atol=1.0e-7,
+                )
+            )
+        )
+        diagnostics = ParallaxDiagnostics(
             optimizer_success=bool(result.success),
             optimizer_status=str(result.message),
-            nfev=int(getattr(result, "nfev", 0)),
-            njev=int(getattr(result, "njev", 0)),
+            nfev=int(getattr(result, "nfev", 0) or 0),
+            njev=int(getattr(result, "njev", 0) or 0),
             chi2=chi2,
             rank=rank, jacobian_condition=condition, parameter_at_bound=at_bound,
             ephemeris_extrapolated=any(eph is not None and not eph.contains(time + self.time_spec.offset) for eph in (self.earth_ephemeris, self.satellite_or_observer_ephemeris, self.reference_ephemeris)),
             nonfinite_evaluations=0, observer_convention=self.observer_convention,
+            backend=(
+                "scipy_trf_bounded_fallback"
+                if bounded or not bool(result.success)
+                else "scipy_lm_compiled_evaluator"
+            ),
         )
         fit = SingleLensFitResult(
             time=time,
@@ -482,8 +612,14 @@ class NativeParallaxFitter:
             residual=residual,
             raw_params=raw,
             parallax_projector=evaluator,
+            model_evaluator=None,
+            model_kind="fspl_parallax" if self.finite_source else "pspl_parallax",
             optimizer_success=bool(result.success),
-            optimizer_status=f"native_cpp_scipy_trf:{result.message}",
+            optimizer_status=(
+                "scipy_trf_bounded_fallback"
+                if bounded or not bool(result.success)
+                else "scipy_lm_compiled_evaluator"
+            ) + f":{result.message}",
             diagnostics=diagnostics,
         )
         self._last_fit = fit
@@ -506,7 +642,9 @@ class NativeParallaxFitter:
             earth_ephemeris=self.earth_ephemeris,
             satellite_or_observer_ephemeris=self.satellite_or_observer_ephemeris,
             reference_ephemeris=self.reference_ephemeris, finite_source=self.finite_source,
-            espl_table_path=self.espl_table_path, vbm_tol=self.vbm_tol, vbm_reltol=self.vbm_reltol,
+            espl_table_path=self.espl_table_path,
+            magnification_tol=self.magnification_tol,
+            magnification_reltol=self.magnification_reltol,
         )
         raw = self._raw_seed(np.asarray(q0, dtype=float))
         magnification = evaluator.magnification(raw)
@@ -530,12 +668,24 @@ class NativeParallaxFitter:
             time=time, flux=flux, ferr=ferr, params=params, param_names=tuple(names),
             chi2=chi2, chi2_dof=chi2 / max(time.size - self.parameter_dimension, 1),
             fs=fs, fb=fb, model_flux=model, residual=residual, raw_params=raw,
-            parallax_projector=evaluator, optimizer_success=True,
-            optimizer_status="native_cpp_fixed_evaluation",
+            parallax_projector=evaluator,
+            model_evaluator=None,
+            model_kind="fspl_parallax" if self.finite_source else "pspl_parallax",
+            optimizer_success=True,
+            optimizer_status="fixed_parameters",
         )
 
+    def fit_fixed_model(self, time, flux, ferr, q0, *, model_kind=None):
+        """Evaluate fixed nonlinear parameters through the common fitter API."""
+        expected = "fspl_parallax" if self.finite_source else "pspl_parallax"
+        if model_kind not in {None, expected}:
+            raise ValueError(
+                f"{expected} fitter cannot evaluate model_kind={model_kind!r}."
+            )
+        return self.evaluate_fixed(time, flux, ferr, q0)
 
-def native_parallax_effect_score(
+
+def parallax_effect_score(
     fit,
     *,
     exclude_mask: Optional[np.ndarray] = None,
@@ -551,7 +701,7 @@ def native_parallax_effect_score(
     evaluator = getattr(fit, "parallax_projector", None)
     raw = getattr(fit, "raw_params", None)
     if not isinstance(evaluator, ParallaxEvaluator) or raw is None:
-        raise ValueError("native parallax effect scoring requires a native fit")
+        raise ValueError("parallax effect scoring requires a parallax fit")
     raw = np.asarray(raw, dtype=float).reshape(-1)
     residual = np.asarray(evaluator.residual(raw), dtype=float).reshape(-1)
     jacobian = np.asarray(evaluator.jacobian(raw), dtype=float)
@@ -579,28 +729,117 @@ def native_parallax_effect_score(
     return max(score, 0.0) if np.isfinite(score) else 0.0
 
 
-class NativePSPLAnnualParallaxFitter(NativeParallaxFitter):
-    def __init__(self, ra_deg, dec_deg, tref, **kwargs):
-        super().__init__(ra_deg=ra_deg, dec_deg=dec_deg, tref=tref, finite_source=False, **kwargs)
+def _resolve_geometry(geometry: str, satellite_or_observer_ephemeris) -> str:
+    value = str(geometry).lower()
+    if value == "auto":
+        value = "space" if satellite_or_observer_ephemeris is not None else "annual"
+    if value not in {"annual", "space"}:
+        raise ValueError("parallax geometry must be 'annual' or 'space'.")
+    if value == "space" and satellite_or_observer_ephemeris is None:
+        raise ValueError("space parallax requires a satellite/observer ephemeris.")
+    return value
 
 
-class NativeFSPLAnnualParallaxFitter(NativeParallaxFitter):
-    def __init__(self, ra_deg, dec_deg, tref, **kwargs):
-        super().__init__(ra_deg=ra_deg, dec_deg=dec_deg, tref=tref, finite_source=True, **kwargs)
+class PSPLParallaxFitter(_ParallaxFitter):
+    """PSPL parallax fitter with annual/space geometry as an option."""
+
+    def __init__(
+        self,
+        ra_deg,
+        dec_deg,
+        tref,
+        *,
+        geometry: str = "annual",
+        observer_convention: str = "earth_geocentric_offset",
+        earth_ephemeris: Optional[Ephemeris] = None,
+        satellite_or_observer_ephemeris: Optional[Ephemeris] = None,
+        reference_ephemeris: Optional[Ephemeris] = None,
+        time_spec: TimeSpec = TimeSpec(),
+        maxiter: int = 1000,
+        tol: float = 1.0e-6,
+        max_piE: float = 1.0,
+        espl_table_path: Optional[str] = None,
+        magnification_tol: float = 1.0e-4,
+        magnification_reltol: float = 1.0e-4,
+    ) -> None:
+        resolved_geometry = _resolve_geometry(geometry, satellite_or_observer_ephemeris)
+        if resolved_geometry == "annual":
+            if observer_convention not in {"earth_geocentric_offset", "vbm"}:
+                raise ValueError(
+                    "annual parallax uses observer_convention='earth_geocentric_offset'."
+                )
+            observer_convention = "earth_geocentric_offset"
+            satellite_or_observer_ephemeris = None
+            reference_ephemeris = None
+        self.geometry = resolved_geometry
+        super().__init__(
+            ra_deg=ra_deg,
+            dec_deg=dec_deg,
+            tref=tref,
+            finite_source=False,
+            time_spec=time_spec,
+            observer_convention=observer_convention,
+            earth_ephemeris=earth_ephemeris,
+            satellite_or_observer_ephemeris=satellite_or_observer_ephemeris,
+            reference_ephemeris=reference_ephemeris,
+            maxiter=maxiter,
+            tol=tol,
+            max_piE=max_piE,
+            espl_table_path=espl_table_path,
+            magnification_tol=magnification_tol,
+            magnification_reltol=magnification_reltol,
+        )
 
 
-class NativePSPLSpaceParallaxFitter(NativeParallaxFitter):
-    def __init__(self, ra_deg, dec_deg, tref, satellite_or_observer_ephemeris, *, convention="earth_geocentric_offset", **kwargs):
-        if convention == "earth_geocentric_offset":
-            kwargs.setdefault("earth_ephemeris", default_earth_ephemeris(time_spec=kwargs.get("time_spec", TimeSpec())))
-        super().__init__(ra_deg=ra_deg, dec_deg=dec_deg, tref=tref, finite_source=False, satellite_or_observer_ephemeris=satellite_or_observer_ephemeris, observer_convention=convention, **kwargs)
+class FSPLParallaxFitter(_ParallaxFitter):
+    """FSPL parallax fitter with annual/space geometry as an option."""
 
-
-class NativeFSPLSpaceParallaxFitter(NativeParallaxFitter):
-    def __init__(self, ra_deg, dec_deg, tref, satellite_or_observer_ephemeris, *, convention="earth_geocentric_offset", **kwargs):
-        if convention == "earth_geocentric_offset":
-            kwargs.setdefault("earth_ephemeris", default_earth_ephemeris(time_spec=kwargs.get("time_spec", TimeSpec())))
-        super().__init__(ra_deg=ra_deg, dec_deg=dec_deg, tref=tref, finite_source=True, satellite_or_observer_ephemeris=satellite_or_observer_ephemeris, observer_convention=convention, **kwargs)
+    def __init__(
+        self,
+        ra_deg,
+        dec_deg,
+        tref,
+        *,
+        geometry: str = "annual",
+        observer_convention: str = "earth_geocentric_offset",
+        earth_ephemeris: Optional[Ephemeris] = None,
+        satellite_or_observer_ephemeris: Optional[Ephemeris] = None,
+        reference_ephemeris: Optional[Ephemeris] = None,
+        time_spec: TimeSpec = TimeSpec(),
+        maxiter: int = 1000,
+        tol: float = 1.0e-6,
+        max_piE: float = 1.0,
+        espl_table_path: Optional[str] = None,
+        magnification_tol: float = 1.0e-4,
+        magnification_reltol: float = 1.0e-4,
+    ) -> None:
+        resolved_geometry = _resolve_geometry(geometry, satellite_or_observer_ephemeris)
+        if resolved_geometry == "annual":
+            if observer_convention not in {"earth_geocentric_offset", "vbm"}:
+                raise ValueError(
+                    "annual parallax uses observer_convention='earth_geocentric_offset'."
+                )
+            observer_convention = "earth_geocentric_offset"
+            satellite_or_observer_ephemeris = None
+            reference_ephemeris = None
+        self.geometry = resolved_geometry
+        super().__init__(
+            ra_deg=ra_deg,
+            dec_deg=dec_deg,
+            tref=tref,
+            finite_source=True,
+            time_spec=time_spec,
+            observer_convention=observer_convention,
+            earth_ephemeris=earth_ephemeris,
+            satellite_or_observer_ephemeris=satellite_or_observer_ephemeris,
+            reference_ephemeris=reference_ephemeris,
+            maxiter=maxiter,
+            tol=tol,
+            max_piE=max_piE,
+            espl_table_path=espl_table_path,
+            magnification_tol=magnification_tol,
+            magnification_reltol=magnification_reltol,
+        )
 
 
 def _profile_fluxes(magnification: np.ndarray, flux: np.ndarray, ferr: np.ndarray) -> tuple[float, float]:
@@ -631,8 +870,8 @@ def default_espl_table_path() -> Optional[str]:
 
 
 __all__ = [
-    "TimeSpec", "Ephemeris", "NativeParallaxDiagnostics", "ParallaxEvaluator", "NativePSPLAnnualParallaxFitter",
-    "NativeFSPLAnnualParallaxFitter", "NativePSPLSpaceParallaxFitter", "NativeFSPLSpaceParallaxFitter",
+    "TimeSpec", "Ephemeris", "ParallaxDiagnostics", "ParallaxEvaluator",
+    "PSPLParallaxFitter", "FSPLParallaxFitter",
     "parse_vbm_satellite_table", "load_vbm_satellite_ephemeris", "load_cartesian_ephemeris", "default_earth_ephemeris", "default_espl_table_path",
-    "native_parallax_effect_score",
+    "parallax_effect_score",
 ]

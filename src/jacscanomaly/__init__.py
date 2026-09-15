@@ -15,15 +15,12 @@ from .models import (
     SeasonSummary,
 )
 from .plot import AnomalyPlotter
-from .singlelens_fit import (
-    SingleLensFitResult,
+from .singlelens_fit import SingleLensFitResult
+from .fitters import (
     PSPLFitter,
-    CPPPSPLFitter,
     FSPLFitter,
-    CPPVBMFSPLFitter,
-    VBMFiniteDiffFSPLFitter,
-    BICSingleLensFitter,
-    CVFitter,
+    PSPLParallaxFitter,
+    FSPLParallaxFitter,
 )
 from .template_free import (
     TemplateFreeCandidate,
@@ -82,6 +79,7 @@ from .effect_detection import (
     parallax_score_test,
     project_out_nuisance,
 )
+from .fspl_initialization import fspl_template_initial_guesses
 from .effect_routing import (
     RoutingThresholds,
     route_candidate,
@@ -113,12 +111,9 @@ from .singlelens_fallback import (
 from .parallax_backend import (
     TimeSpec,
     Ephemeris,
-    NativeParallaxDiagnostics,
+    ParallaxDiagnostics,
     ParallaxEvaluator,
-    NativePSPLAnnualParallaxFitter,
-    NativeFSPLAnnualParallaxFitter,
-    NativePSPLSpaceParallaxFitter,
-    NativeFSPLSpaceParallaxFitter,
+    parallax_effect_score,
 )
 from .effect_aware import EffectAwareFinderResult, PlanetCandidateMatch, match_planet_candidates
 from .exact_probe import (
@@ -140,12 +135,9 @@ __all__ = [
     "SeasonSummary",
     "AnomalyPlotter",
     "PSPLFitter",
-    "CPPPSPLFitter",
     "FSPLFitter",
-    "CPPVBMFSPLFitter",
-    "VBMFiniteDiffFSPLFitter",
-    "BICSingleLensFitter",
-    "CVFitter",
+    "PSPLParallaxFitter",
+    "FSPLParallaxFitter",
     "SingleLensFitResult",
     "TemplateFreeCandidate",
     "TemplateFreeScanner",
@@ -192,6 +184,7 @@ __all__ = [
     "find_compact_blocks",
     "parallax_score_test",
     "project_out_nuisance",
+    "fspl_template_initial_guesses",
     "RoutingThresholds",
     "route_candidate",
     "route_candidates",
@@ -216,12 +209,9 @@ __all__ = [
     "run_staged_joint_fallback",
     "TimeSpec",
     "Ephemeris",
-    "NativeParallaxDiagnostics",
+    "ParallaxDiagnostics",
     "ParallaxEvaluator",
-    "NativePSPLAnnualParallaxFitter",
-    "NativeFSPLAnnualParallaxFitter",
-    "NativePSPLSpaceParallaxFitter",
-    "NativeFSPLSpaceParallaxFitter",
+    "parallax_effect_score",
     "EffectAwareFinderResult",
     "PlanetCandidateMatch",
     "match_planet_candidates",

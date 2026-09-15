@@ -28,9 +28,8 @@ test = [
   "pytest>=7",
   "coverage[toml]>=7",
 ]
-vbm = []
 dev = [
-  "jacscanomaly[docs,test,vbm]",
+  "jacscanomaly[docs,test]",
 ]
 
 [project.urls]

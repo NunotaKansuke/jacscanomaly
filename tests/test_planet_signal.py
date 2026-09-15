@@ -101,7 +101,6 @@ def test_planet_signal_extractor_masks_local_unexplained_signal():
     finder = Finder(
         FinderConfig(
             grid_backend="jax",
-            single_fit_backend="jax",
             teff_init=0.08,
             common_ratio=1.5,
             teff_grid_n=6,
@@ -133,7 +132,7 @@ def test_rejected_mask_proposal_is_not_reported_as_fit_exclusion(monkeypatch):
     params = np.array([10.0, 4.0, 0.2])
     ferr = np.full_like(time, 0.02)
     flux = 1.5 * np.asarray(A_pspl_func(params, time)) + 0.1
-    finder = Finder(FinderConfig(grid_backend="jax", single_fit_backend="jax"))
+    finder = Finder(FinderConfig(grid_backend="jax"))
     initial_fit = finder.fit_single_lens(time, flux, ferr, x0=params)
     extractor = PlanetSignalExtractor(
         finder,
@@ -187,7 +186,6 @@ def test_planet_signal_extractor_frozen_baseline_never_refits(monkeypatch):
     finder = Finder(
         FinderConfig(
             grid_backend="jax",
-            single_fit_backend="jax",
             teff_init=0.08,
             common_ratio=1.5,
             teff_grid_n=6,
@@ -242,7 +240,7 @@ def test_frozen_final_scan_uses_full_residual_and_separate_finder_support(
         residual,
         seed_mask,
     ).refined_fit
-    finder = Finder(FinderConfig(grid_backend="jax", single_fit_backend="jax"))
+    finder = Finder(FinderConfig(grid_backend="jax"))
     extractor = PlanetSignalExtractor(
         finder,
         PlanetSignalConfig.residual_measurement(
@@ -333,7 +331,6 @@ def test_planet_signal_extractor_robust_mode_downweights_connected_structure():
     finder = Finder(
         FinderConfig(
             grid_backend="jax",
-            single_fit_backend="jax",
             teff_init=0.08,
             common_ratio=1.5,
             teff_grid_n=6,
@@ -380,7 +377,6 @@ def test_planet_signal_extractor_keeps_beam_intervals_compact_relative_to_tE():
     finder = Finder(
         FinderConfig(
             grid_backend="jax",
-            single_fit_backend="jax",
             teff_init=0.08,
             common_ratio=1.5,
             teff_grid_n=6,
@@ -966,7 +962,7 @@ def test_planet_signal_refit_preserves_selected_model_family():
         model_flux=model,
         residual=np.zeros_like(time),
     )
-    object.__setattr__(fit, "model_kind", "fspl_vbm_fd")
+    object.__setattr__(fit, "model_kind", "fspl")
 
     class FixedModelFitter:
         def __init__(self):
@@ -987,10 +983,10 @@ def test_planet_signal_refit_preserves_selected_model_family():
         ferr_j=ferr,
         keep_mask_np=np.ones(time.shape, dtype=bool),
         x0_j=params,
-        model_kind="fspl_vbm_fd",
+        model_kind="fspl",
     )
 
-    assert fitter.called == "fspl_vbm_fd"
+    assert fitter.called == "fspl"
 
 
 def test_planet_signal_measurement_identifies_single_peak():

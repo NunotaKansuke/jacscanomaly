@@ -7,16 +7,17 @@ in time-series light curves.
 
 The package is designed to detect **microlensing planetary anomalies** by
 scanning residuals after fitting a single lens model (e.g., PSPL),
-with low-memory C++ backends for large survey light curves and JAX-based
-fitters for flexible model development.
+with low-memory C++ backends for large survey light curves and a unified
+single-lens fitting API.
 
 ---
 
 ## Features
 
 * **Scan-based anomaly detection** on residuals after single-lens fitting
-* **C++ survey backends** for the PSPL fit and anomaly grid scan
-* **JAX model components** for flexible single-lens and higher-order models
+* **Unified fitters** for PSPL, FSPL, and their annual/space-parallax forms
+* **Compiled model evaluation** for FSPL magnification and parallax trajectories
+* **JAX model components** for anomaly grids and higher-order diagnostics
 * **Candidate quality diagnostics**: effective contributing points,
   peak-contribution fraction, and time-correlation metrics
 * **Built-in visualization**: PSPL fit, residuals, and anomaly scan summary
@@ -244,7 +245,6 @@ from jacscanomaly import CandidateCriteria, FinderConfig
 
 config = FinderConfig(
     grid_backend="cpp",  # default for PSPL survey scans
-    single_fit_backend="cpp",
     teff_init=0.03,      # initial anomaly timescale
     teff_grid_n=20,      # number of teff grid points
     sigma=3.0,           # per-point improvement threshold for n_contrib
@@ -256,23 +256,23 @@ config = FinderConfig(
 
 See `FinderConfig` for the full list of options.
 
-For finite-source single-lens baselines without JAX autodiff, use the
-VBMicrolensing finite-difference fitters:
+For a finite-source baseline, use the same canonical fitter API:
 
 ```python
 config = FinderConfig(
-    fitter_kind="fspl_vbm_fd",
+    fitter_kind="fspl",
     grid_backend="cpp",
 )
 ```
 
-For GULLS-convention spacecraft parallax, use the standard native model and
+For GULLS-convention spacecraft parallax, use the standard parallax model and
 select the coordinate convention explicitly:
 
 ```python
 config = FinderConfig(
-    fitter_kind="fspl_space_parallax",
+    fitter_kind="fspl_parallax",
     grid_backend="cpp",
+    parallax_geometry="space",
     ra_deg=267.3,
     dec_deg=-29.9,
     tref=2461504.0,
@@ -282,9 +282,10 @@ config = FinderConfig(
 )
 ```
 
-Parallax fitters evaluate the trajectory and finite-source magnification in
-the compiled C++/VBMicrolensing backend and optimize nonlinear parameters with
-SciPy trust-region least squares.
+All four fitters use SciPy LM for continuous optimization. FSPL magnification
+and parallax trajectories are evaluated by the compiled backend. Space versus
+annual parallax and the GULLS observer convention are options, not separate
+fitter classes.
 
 ---
 
@@ -323,49 +324,12 @@ to the grid-scan and Δχ² evaluation in `jacscanomaly`.
 
 ### Finite-source magnification (FSPL)
 
-`jacscanomaly` provides a standard FSPL fitter and a CPU/VBMicrolensing
-variant. All annual and space-parallax FSPL models use the compiled native
-trajectory/VBMicrolensing backend.
+`jacscanomaly` uses the compiled finite-source magnification backend for the
+canonical `FSPLFitter` and `FSPLParallaxFitter`. The same classes cover annual
+and space geometry through `parallax_geometry`.
 
-VBMicrolensing is installed as a required dependency because the native FSPL
-and parallax extensions are part of the standard build. The historical extra
-remains an accepted no-op:
-
-```bash
-pip install -e ".[vbm]"
-```
-
-The VBM fitters keep the anomaly grid scan in the compiled C++ backend when
-`grid_backend="cpp"` is selected.
-
-For the JAX/microjax FSPL fitters, finite-source magnifications are computed
-using an external JAX-based implementation.
-
-The original FFT-based extended-source algorithm is from:
-https://github.com/git-sunao/fft-extended-source
-
-This algorithm is provided in JAX form by:
-https://github.com/ShotaMiyazaki94/microjax
-
-Specifically, `jacscanomaly` uses the FFT disk-integration implementation
-available through:
-
-    from microjax.fastlens import fspl_disk
-
-Note:
-`jacscanomaly` currently requires the GitHub source version of `microjax`.
-The PyPI package `microjaxx==0.1.1` may not expose
-`microjax.fastlens.fspl_disk`.
-
-Install `microjax` from source before using FSPL functionality:
-
-    git clone https://github.com/ShotaMiyazaki94/microjax.git
-    cd microjax
-    python -m pip install -e .
-
-You can verify the installation with:
-
-    from microjax.fastlens import fspl_disk
+JAX remains available for the anomaly-grid and diagnostic modules; it is not a
+second FSPL fitting route.
 
 ## Citation
 
@@ -385,7 +349,7 @@ which can be used directly by GitHub and reference managers.
 * scipy
 * matplotlib
 
-VBMicrolensing ≥ 5.5 is also required to build the native C++ extensions.
+VBMicrolensing ≥ 5.5 is also required to build the compiled extensions.
 
 ---
 

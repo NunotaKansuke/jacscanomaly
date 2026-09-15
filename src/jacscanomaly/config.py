@@ -56,12 +56,8 @@ class FinderConfig:
     fitter_kind: Literal[
         "pspl",
         "fspl",
-        "fspl_vbm_fd",
         "pspl_parallax",
         "fspl_parallax",
-        "pspl_space_parallax",
-        "fspl_space_parallax",
-        "bic_single_lens",
     ] = "pspl"
     """
     Choice of single-lens model used for the initial fit.
@@ -72,20 +68,11 @@ class FinderConfig:
         Point-Source Point-Lens (standard Paczyński curve).
     - ``"fspl"`` :
         Finite-Source Point-Lens (log-rho parameterization).
-    - ``"fspl_vbm_fd"`` :
-        Finite-Source Point-Lens using VBMicrolensing ESPL magnification and
-        finite-difference SciPy least squares.
     - ``"pspl_parallax"`` :
-        PSPL with annual parallax.
+        PSPL with annual or space parallax, selected by ``parallax_geometry``.
     - ``"fspl_parallax"`` :
-        FSPL with annual parallax.
-    - ``"pspl_space_parallax"`` :
-        PSPL with annual parallax plus a spacecraft ephemeris.
-    - ``"fspl_space_parallax"`` :
-        FSPL with annual parallax plus a spacecraft ephemeris.
-    - ``"bic_single_lens"`` :
-        Select the lowest-BIC fit among PSPL and finite-difference FSPL, with
-        an optional GULLS FSPL space-parallax trial.
+        FSPL with annual or space parallax, selected by
+        ``parallax_geometry``.
     """
 
     ra_deg: Optional[float] = None
@@ -98,7 +85,8 @@ class FinderConfig:
     """
     Reference time for annual parallax.
 
-    If ``None``, the median observation time is used.
+    If ``None``, the fitter resolves an event-centred reference time near the
+    observed brightening peak (or the supplied nonlinear seed's ``t0``).
     """
 
     satellite_ephemeris_path: Optional[str] = None
@@ -106,35 +94,33 @@ class FinderConfig:
     Path to the spacecraft/observer ephemeris table used by space-parallax
     models.
 
-    Required for ``"pspl_space_parallax"``, ``"fspl_space_parallax"``, and
-    ``"bic_single_lens"`` when
-    ``bic_include_space_parallax`` is enabled. Expected columns are
+    Required when ``parallax_geometry="space"`` is selected for a parallax
+    fitter. Expected columns are
     ``JD RA_deg Dec_deg distance_AU``. It is Earth-relative in the default
     ``earth_geocentric_offset`` convention.
     """
 
     parallax_geometry: Literal["auto", "none", "annual", "space", "both"] = "auto"
     """
-    Observer geometry used by the physical-effect detector.
+    Observer geometry used by parallax fitters and the physical-effect
+    detector.
 
     ``"auto"`` chooses ``"space"`` when a satellite ephemeris is available,
     otherwise ``"annual"`` when sky coordinates are available.  This is a
     geometry decision, not a model-selection score: annual and space
-    parallax are not compared against each other.  ``"both"`` is retained for
-    explicit mixed/legacy analyses.
+    parallax are not compared against each other.  ``"both"`` is only for an
+    explicit mixed diagnostic; a parallax baseline must resolve to exactly one
+    of ``"annual"`` or ``"space"``.
     """
 
     max_piE: float = 1.0
     """Symmetric bound applied to fitted ``piEN`` and ``piEE`` when supported."""
 
     piE_prior_weight: float = 0.0
-    """Weight for the optional linear ``|piE|`` penalty in finite-difference fits."""
+    """Weight for an optional parallax prior used by downstream diagnostics."""
 
     piE_prior_eps: float = 1.0e-3
     """Small numerical floor used by the finite-difference ``|piE|`` penalty."""
-
-    bic_include_space_parallax: bool = False
-    """If True, ``bic_single_lens`` also tries the GULLS FSPL space-parallax model."""
 
     # ==================================================
     # 0b) Automatic single-lens initialization
@@ -196,7 +182,7 @@ class FinderConfig:
     Require one observation within this many ``tE`` of an automatic ``t0``.
 
     This is a local-support guard in addition to the broader
-    ``pspl_fit_t0_support_tE_coeff`` window.  It keeps a one-sided event near a
+    ``auto_init_t0_support_tE_coeff`` window.  It keeps a one-sided event near a
     season boundary usable while rejecting a model supported only by a distant
     wing across a large gap.
     """
@@ -219,23 +205,14 @@ class FinderConfig:
     auto_init_logrho: float = -7.0
     """Initial logrho used for FSPL models when x0 is omitted."""
 
-    pspl_fit_u0_min: float = 1e-4
-    """Smallest allowed absolute u0 for the C++ PSPL fitter."""
+    auto_init_fspl_template_top_k: int = 4
+    """Number of ranked FSPL template seeds passed to the fitter."""
 
-    pspl_fit_min_t0_support_points: int = 3
-    """Minimum number of data points required near the fitted t0."""
+    auto_init_min_t0_support_points: int = 3
+    """Minimum number of observations near an automatic PSPL seed."""
 
-    pspl_fit_t0_support_tE_coeff: float = 3.0
-    """Require t0 support points within +/- coeff * tE for C++ PSPL fits."""
-
-    pspl_fit_nonnegative_fluxes: bool = False
-    """Constrain C++ PSPL source and blend fluxes to be nonnegative."""
-
-    pspl_fit_nonnegative_on_cancellation: bool = False
-    """Use nonnegative fluxes only when the free solution strongly cancels."""
-
-    pspl_fit_max_flux_cancellation_ratio: float = 50.0
-    """Maximum source/blend cancellation before the nonnegative safeguard."""
+    auto_init_t0_support_tE_coeff: float = 3.0
+    """Support half-width for automatic PSPL seeds, in units of tE."""
 
     # ==================================================
     # 1) Season splitting
@@ -383,46 +360,20 @@ class FinderConfig:
     fft_singular_rtol: float = 1.0e-12
     """Relative threshold used to reject nearly constant FFT templates."""
 
-    single_fit_backend: Literal["jax", "cpp", "vbm_cpp"] = "cpp"
-    """
-    Single-lens fit backend.
-
-    ``"cpp"`` is implemented for ``fitter_kind="pspl"``. ``"vbm_cpp"`` is
-    implemented for ``fitter_kind="fspl_parallax"`` and uses the native
-    VBMicrolensing finite-source magnification with the C++ LM solver.
-    Other combinations use the JAX fitters.
-    """
-
-    vbm_cpp_piE_seed_values: tuple[float, ...] = (0.0,)
-    """Per-component piE values used for automatic VBM-C++ multistart fits.
-
-    When ``fitter_kind="fspl_parallax"`` and
-    ``single_fit_backend="vbm_cpp"``, jacscanomaly combines each automatic
-    ``(t0, tE, u0)`` seed with this Cartesian piE grid before C++ LM fitting.
-    The default is a single safe zero-parallax start. Supply, for example,
-    ``(-0.5, 0.0, 0.5)`` to opt into a Cartesian parallax multistart.
-    """
-
-    vbm_cpp_logrho_seed_values: tuple[float, ...] = (-3.0,)
-    """log-rho values combined with automatic VBM-C++ parallax seeds."""
-
-    vbm_cpp_maxiter: int = 200
-    """Maximum C++ LM iterations per VBM automatic-start trial."""
-
-    vbm_cpp_damping_parameter: float = 1.0e-4
-    """Initial LM damping parameter for the native VBM C++ backend."""
-
-    vbm_cpp_tol: float = 1.0e-5
-    """C++ LM convergence tolerance for the native VBM backend."""
-
     # ==================================================
-    # 0c) Native parallax backend
+    # 0c) Unified continuous fitter
     # ==================================================
-    parallax_fit_backend: Literal["native_cpp"] = "native_cpp"
-    """Backend used by the effect-aware parallax fallback."""
+    fitter_maxiter: int = 1000
+    """Maximum number of SciPy LM function evaluations per fit."""
 
-    parallax_optimizer: Literal["scipy_trf", "native_lm_polish"] = "scipy_trf"
-    """Primary optimizer for native parallax fitting."""
+    fitter_tol: float = 1.0e-6
+    """Common SciPy LM convergence tolerance."""
+
+    magnification_tol: float = 1.0e-4
+    """Tolerance passed to the compiled finite-source magnification kernel."""
+
+    magnification_reltol: float = 1.0e-4
+    """Relative tolerance passed to the compiled finite-source kernel."""
 
     parallax_observer_convention: Literal[
         "earth_geocentric_offset", "heliocentric_observer", "gulls"

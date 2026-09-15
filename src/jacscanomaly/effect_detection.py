@@ -1481,6 +1481,34 @@ def _native_fspl_magnification(u: np.ndarray, rho: float) -> np.ndarray:
     return values
 
 
+def _compiled_fspl_magnification(
+    u: np.ndarray,
+    rho: float,
+    *,
+    magnification_tol: float = 1.0e-4,
+    magnification_reltol: float = 1.0e-4,
+) -> np.ndarray:
+    """Evaluate FSPL templates through the same compiled ``ESPLMag2`` path as fitting."""
+    from . import _vbm_cpp
+    from .parallax_backend import default_espl_table_path
+
+    if _vbm_cpp is None or not hasattr(_vbm_cpp, "fspl_magnification"):
+        raise ImportError(
+            "The compiled FSPL magnification backend is unavailable."
+        )
+    values = _vbm_cpp.fspl_magnification(
+        np.asarray(u, dtype=float),
+        max(float(rho), 1.0e-12),
+        espl_table=default_espl_table_path(),
+        tol=float(magnification_tol),
+        reltol=float(magnification_reltol),
+    )
+    values = np.asarray(values, dtype=float)
+    if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+        raise RuntimeError("Compiled FSPL magnification is invalid.")
+    return values
+
+
 def _pspl_magnification_and_jacobian(
     time: np.ndarray,
     params: Sequence[float],
@@ -1523,6 +1551,8 @@ def build_fspl_template_bank(
     backend: str = "native",
     native_support_rho: Optional[float] = 10.0,
     native_support_floor: float = 3.0,
+    magnification_tol: float = 1.0e-4,
+    magnification_reltol: float = 1.0e-4,
 ) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
     """Create a joint ``tE`` / ``rho / |u0|`` FSPL template bank.
 
@@ -1532,7 +1562,9 @@ def build_fspl_template_bank(
 
     ``backend="native"`` (the default) evaluates the physical model through
     VBMicrolensing's C++ implementation and does not invoke JAX.  The
-    ``"microjax"`` backend is retained for cross-validation.  Opposite
+    ``backend="compiled"`` uses jacscanomaly's vectorized C++ binding and the
+    same ``ESPLMag2`` path as the final FSPL fitter.  The ``"microjax"``
+    backend is retained for cross-validation.  Opposite
     ``u0`` signs have identical rectilinear FSPL magnification, so each
     ``(tE, rho/|u0|)`` curve is evaluated and profiled once and then reused
     for the requested seed signs.  Native evaluation is restricted by
@@ -1549,8 +1581,8 @@ def build_fspl_template_bank(
     if tE0 <= 0.0:
         raise ValueError("PSPL tE must be positive.")
     backend_name = str(backend).lower()
-    if backend_name not in {"native", "microjax"}:
-        raise ValueError("backend must be 'native' or 'microjax'.")
+    if backend_name not in {"compiled", "native", "microjax"}:
+        raise ValueError("backend must be 'compiled', 'native', or 'microjax'.")
     u0_abs = max(abs(float(u00)), 1.0e-3)
     templates: list[np.ndarray] = []
     metadata: list[np.ndarray] = []
@@ -1565,7 +1597,7 @@ def build_fspl_template_bank(
             # diagnostic per evaluated point and carries no useful routing
             # information.
             rho = min(max(float(ratio) * u0_abs, 1.0e-6), 10.0)
-            if backend_name == "native":
+            if backend_name in {"compiled", "native"}:
                 if native_support_rho is None:
                     support = np.ones_like(u, dtype=bool)
                 else:
@@ -1576,9 +1608,17 @@ def build_fspl_template_bank(
                     support = u <= support_limit
                 A_fspl = A_pspl.copy()
                 if np.any(support):
-                    A_fspl[support] = _native_fspl_magnification(
-                        u[support], rho
-                    )
+                    if backend_name == "compiled":
+                        A_fspl[support] = _compiled_fspl_magnification(
+                            u[support],
+                            rho,
+                            magnification_tol=magnification_tol,
+                            magnification_reltol=magnification_reltol,
+                        )
+                    else:
+                        A_fspl[support] = _native_fspl_magnification(
+                            u[support], rho
+                        )
             else:
                 import jax.numpy as jnp
                 from .magnification import A_fspl_from_u

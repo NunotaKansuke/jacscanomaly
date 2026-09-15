@@ -251,7 +251,7 @@ int evaluator_init(EvaluatorObject* self, PyObject* args, PyObject* kwargs) {
     static const char* kwlist[] = {
         "time", "flux", "ferr", "dataset_id", "ra_deg", "dec_deg", "tref", "time_kind", "observer_convention",
         "earth_ephemeris", "satellite_or_observer_ephemeris", "reference_ephemeris", "finite_source", "espl_table_path",
-        "vbm_tol", "vbm_reltol", "allow_extrapolation", nullptr
+        "magnification_tol", "magnification_reltol", "allow_extrapolation", nullptr
     };
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOOdddss|OOOpOddp", const_cast<char**>(kwlist),
             &time_obj, &flux_obj, &ferr_obj, &dataset_obj, &ra, &dec, &tref, &time_kind, &convention,
@@ -398,7 +398,7 @@ PyObject* evaluator_residual_and_jacobian(EvaluatorObject* self, PyObject* args,
 
 PyMethodDef evaluator_methods[] = {
     {"trajectory", reinterpret_cast<PyCFunction>(evaluator_trajectory), METH_VARARGS|METH_KEYWORDS, "Evaluate tau/beta/u and optional trajectory components."},
-    {"magnification", reinterpret_cast<PyCFunction>(evaluator_magnification), METH_VARARGS|METH_KEYWORDS, "Evaluate VBM magnification."},
+    {"magnification", reinterpret_cast<PyCFunction>(evaluator_magnification), METH_VARARGS|METH_KEYWORDS, "Evaluate compiled finite-source magnification."},
     {"evaluate", reinterpret_cast<PyCFunction>(evaluator_evaluate), METH_VARARGS|METH_KEYWORDS, "Evaluate profiled model flux."},
     {"residual", reinterpret_cast<PyCFunction>(evaluator_residual), METH_VARARGS|METH_KEYWORDS, "Evaluate profiled weighted residual."},
     {"jacobian", reinterpret_cast<PyCFunction>(evaluator_jacobian), METH_VARARGS|METH_KEYWORDS, "Evaluate adaptive central finite-difference Jacobian."},
@@ -418,7 +418,7 @@ PyMODINIT_FUNC PyInit__parallax_cpp(void) {
     EvaluatorType.tp_basicsize = sizeof(EvaluatorObject);
     EvaluatorType.tp_dealloc = reinterpret_cast<destructor>(evaluator_dealloc);
     EvaluatorType.tp_flags = Py_TPFLAGS_DEFAULT;
-    EvaluatorType.tp_doc = "Native C++ trajectory/VBM evaluator";
+    EvaluatorType.tp_doc = "Compiled parallax trajectory and magnification evaluator";
     EvaluatorType.tp_methods = evaluator_methods;
     EvaluatorType.tp_new = evaluator_new;
     EvaluatorType.tp_init = reinterpret_cast<initproc>(evaluator_init);

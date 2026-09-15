@@ -12,7 +12,7 @@ from jacscanomaly import (
 from jacscanomaly.parallax_backend import default_earth_ephemeris
 
 
-def test_native_fallback_preserves_planet_candidate_through_after_scan(
+def test_fallback_preserves_planet_candidate_through_after_scan(
     monkeypatch,
 ):
     ra_deg = 267.6
@@ -40,7 +40,6 @@ def test_native_fallback_preserves_planet_candidate_through_after_scan(
     finder = Finder(
         FinderConfig(
             fitter_kind="pspl",
-            single_fit_backend="cpp",
             ra_deg=ra_deg,
             dec_deg=dec_deg,
             tref=tref,
@@ -78,7 +77,7 @@ def test_native_fallback_preserves_planet_candidate_through_after_scan(
 
     assert result.fallback_result is not None
     assert result.fallback_result.success
-    assert result.fallback_result.model_spec["backend"] == "native_cpp_scipy_trf"
+    assert result.fallback_result.model_spec["backend"] == "scipy_lm_compiled_evaluator"
     hard = fallback_masks["known_anomaly_mask"]
     soft = fallback_masks["soft_anomaly_mask"]
     selection = fallback_masks["selection_exclusion_mask"]
@@ -126,4 +125,9 @@ def test_native_fallback_preserves_planet_candidate_through_after_scan(
         atol=1.0e-8,
     )
     assert "planet_after_fixed_family_warm_start" in result.reason_codes
-    assert any(match.category == "survived" for match in result.candidate_matches)
+    assert any(
+        match.before is not None
+        and match.after is not None
+        and match.category in {"survived", "changed"}
+        for match in result.candidate_matches
+    )

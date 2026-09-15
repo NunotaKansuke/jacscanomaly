@@ -4,9 +4,16 @@ import numpy as np
 import pytest
 import jax.numpy as jnp
 
-from jacscanomaly import Finder, FinderConfig, ParallaxEvaluator
+from jacscanomaly import (
+    FSPLFitter,
+    Finder,
+    FinderConfig,
+    ParallaxEvaluator,
+    PSPLParallaxFitter,
+    FSPLParallaxFitter,
+)
 import jacscanomaly.magnification as magnification
-from jacscanomaly.singlelens_model import A_fspl_logrho_func, A_pspl_space_parallax_func
+from jacscanomaly.singlelens_model import A_pspl_space_parallax_func
 from jacscanomaly import parallax
 from jacscanomaly.trajectory import (
     make_space_parallax_projector,
@@ -69,6 +76,79 @@ def test_space_parallax_projector_adds_satellite_offsets():
     assert np.all(np.isfinite(np.asarray(tau)))
     assert np.all(np.isfinite(np.asarray(beta)))
     assert not np.allclose(np.asarray(tau), np.asarray((t - tref) / 100.0))
+
+
+def test_annual_projector_honors_explicit_reduced_time_offset():
+    from jacscanomaly.trajectory import make_parallax_projector
+
+    offset = 2_460_000.0
+    full_tref = 2_459_000.0
+    full_time = np.asarray([2_458_990.0, 2_459_000.0, 2_459_010.0])
+    reduced_time = full_time - offset
+    full_projector = make_parallax_projector(
+        267.6, -29.1, full_tref, use_HJD=False
+    )
+    reduced_projector = make_parallax_projector(
+        267.6,
+        -29.1,
+        full_tref - offset,
+        use_HJD=False,
+        time_offset=offset,
+    )
+
+    full_offsets = parallax.earth_orbital_parallax_offsets(
+        jnp.asarray(full_time), 0.12, -0.08, full_projector
+    )
+    reduced_offsets = parallax.earth_orbital_parallax_offsets(
+        jnp.asarray(reduced_time), 0.12, -0.08, reduced_projector
+    )
+    np.testing.assert_allclose(
+        np.asarray(reduced_offsets), np.asarray(full_offsets), rtol=1e-12, atol=1e-12
+    )
+    assert float(reduced_projector.time_add) == offset
+
+
+def test_gulls_projector_honors_explicit_reduced_time_offset():
+    if not ROMAN_SATELLITE1.exists():
+        pytest.skip("Roman satellite sample file is not available.")
+
+    offset = 2_460_000.0
+    full_tref = 2_459_000.0
+    reduced_tref = full_tref - offset
+    full_time = np.asarray([2_458_990.0, 2_459_000.0, 2_459_010.0])
+    reduced_time = full_time - offset
+    full_projector = make_space_parallax_projector(
+        267.6,
+        -29.1,
+        full_tref,
+        str(ROMAN_SATELLITE1),
+        convention="gulls",
+    )
+    reduced_projector = make_space_parallax_projector(
+        267.6,
+        -29.1,
+        reduced_tref,
+        str(ROMAN_SATELLITE1),
+        convention="gulls",
+        time_offset=offset,
+    )
+
+    full_tau_beta = u_space_parallax_tau_beta(
+        jnp.asarray(full_time), full_tref, 100.0, 0.1, 0.02, -0.03, full_projector
+    )
+    reduced_tau_beta = u_space_parallax_tau_beta(
+        jnp.asarray(reduced_time),
+        reduced_tref,
+        100.0,
+        0.1,
+        0.02,
+        -0.03,
+        reduced_projector,
+    )
+    np.testing.assert_allclose(
+        np.asarray(reduced_tau_beta), np.asarray(full_tau_beta), rtol=1e-12, atol=1e-12
+    )
+    assert float(reduced_projector.time_add) == offset
 
 
 def test_gulls_space_parallax_uses_reference_frame_subtraction():
@@ -221,13 +301,14 @@ def test_space_parallax_is_consistent_with_vbmicrolensing_runtime():
     assert np.max(traj_err / np.maximum(u_vbm, np.finfo(float).eps)) < 2.0e-4
 
 
-def test_finder_builds_pspl_space_parallax_fitter():
+def test_finder_builds_pspl_space_geometry_as_an_option():
     if not ROMAN_SATELLITE1.exists():
         pytest.skip("Roman satellite sample file is not available.")
 
     finder = Finder(
         FinderConfig(
-            fitter_kind="pspl_space_parallax",
+            fitter_kind="pspl_parallax",
+            parallax_geometry="space",
             ra_deg=267.623337808,
             dec_deg=-29.1164180355,
             tref=2459000.0,
@@ -237,72 +318,62 @@ def test_finder_builds_pspl_space_parallax_fitter():
 
     finder._ensure_fitter(2459000.0)
 
-    assert finder.fitter.__class__.__name__ == "NativePSPLSpaceParallaxFitter"
+    assert isinstance(finder.fitter, PSPLParallaxFitter)
+    assert finder.fitter.geometry == "space"
 
 
-def test_finder_builds_bic_single_lens_without_parallax_inputs():
-    finder = Finder(FinderConfig(fitter_kind="bic_single_lens"))
-
-    finder._ensure_fitter(2459000.0)
-
-    assert finder.fitter.__class__.__name__ == "BICSingleLensFitter"
-    assert not finder.fitter.include_space_parallax
-
-
-def test_bic_single_lens_space_parallax_requires_inputs():
-    finder = Finder(
-        FinderConfig(
-            fitter_kind="bic_single_lens",
-            bic_include_space_parallax=True,
-        )
-    )
-
-    with pytest.raises(ValueError, match="ra_deg and dec_deg"):
-        finder._ensure_fitter(2459000.0)
-
-
-def test_finder_supports_vbm_finite_difference_fspl():
-    pytest.importorskip("VBMicrolensing")
-    pytest.importorskip("microjax.fastlens")
-
-    finder = Finder(FinderConfig(fitter_kind="fspl_vbm_fd", grid_backend="cpp"))
-    time = jnp.asarray(np.linspace(-5.0, 5.0, 21))
-    q = jnp.asarray([0.0, 30.0, 0.2, np.log(0.01)])
-    amp = A_fspl_logrho_func(q, time)
+def test_finder_uses_canonical_fspl_fitter_without_a_second_fit_route():
+    finder = Finder(FinderConfig(fitter_kind="fspl", grid_backend="cpp"))
+    fitter = FSPLFitter()
+    time = np.linspace(-5.0, 5.0, 101)
+    q = np.asarray([0.0, 30.0, 0.2, np.log(0.01)])
+    amp = fitter._magnification(time, q)
     flux = 1.7 * amp + 0.2
-    ferr = jnp.full_like(time, 0.01)
+    ferr = np.full_like(time, 0.01)
 
     fit = finder.fit_single_lens(time, flux, ferr, x0=q)
 
+    assert isinstance(finder.fitter, FSPLFitter)
     assert fit.param_names == ("t0", "tE", "u0", "rho")
     assert np.isfinite(np.asarray(fit.params)).all()
     assert float(fit.chi2_dof) < 1.0e-2
 
 
-def test_fspl_fitter_initializes_magnifier_before_jax_trace():
-    pytest.importorskip("microjax.fastlens")
+def test_finder_fspl_auto_initialization_uses_duration_seed_path():
+    finder = Finder(
+        FinderConfig(
+            fitter_kind="fspl",
+            grid_backend="cpp",
+            fitter_maxiter=200,
+            auto_init_fft_tE_grid_n=5,
+            auto_init_u0_grid_n=4,
+            auto_init_fft_top_k=3,
+            auto_init_tE_min=3.0,
+            auto_init_tE_max=30.0,
+        )
+    )
+    time = np.linspace(-20.0, 20.0, 161)
+    q = np.asarray([0.0, 10.0, 0.1, np.log(0.08)])
+    fitter = FSPLFitter()
+    amp = fitter._magnification(time, q)
+    flux = 1.5 * amp + 0.2
+    ferr = np.full_like(time, 0.01)
 
-    finder = Finder(FinderConfig(fitter_kind="fspl", grid_backend="jax"))
-    time = jnp.asarray(np.linspace(-5.0, 5.0, 21))
-    q = jnp.asarray([0.0, 30.0, 0.2, np.log(0.01)])
-    amp = A_fspl_logrho_func(q, time)
-    flux = 1.7 * amp + 0.2
-    ferr = jnp.full_like(time, 0.01)
+    fit = finder.fit_single_lens(time, flux, ferr)
 
-    magnification._mag_fspl = None
-    fit = finder.fit_single_lens(time, flux, ferr, x0=q)
-
-    assert magnification._mag_fspl is not None
-    assert fit.param_names == ("t0", "tE", "u0", "rho")
-    assert np.isfinite(np.asarray(fit.params)).all()
+    assert fit.model_kind == "fspl"
+    assert np.all(np.isfinite(np.asarray(fit.params)))
+    assert abs(float(np.asarray(fit.params)[0])) < 0.5
+    assert float(fit.chi2_dof) < 20.0
 
 
-def test_finder_supports_strict_native_gulls_fspl_space_parallax():
+def test_finder_supports_gulls_as_a_space_geometry_option():
     if not ROMAN_SATELLITE1.exists():
         pytest.skip("Roman satellite sample file is not available.")
     finder = Finder(
         FinderConfig(
-            fitter_kind="fspl_space_parallax",
+            fitter_kind="fspl_parallax",
+            parallax_geometry="space",
             grid_backend="cpp",
             ra_deg=267.623337808,
             dec_deg=-29.1164180355,
@@ -312,18 +383,20 @@ def test_finder_supports_strict_native_gulls_fspl_space_parallax():
         )
     )
     finder._ensure_fitter(2459000.0)
-    assert finder.fitter.__class__.__name__ == "NativeFSPLSpaceParallaxFitter"
+    assert isinstance(finder.fitter, FSPLParallaxFitter)
+    assert finder.fitter.geometry == "space"
     assert finder.fitter.observer_convention == "gulls"
 
 
-def test_finder_fit_single_lens_supports_pspl_space_parallax():
+def test_finder_fit_single_lens_supports_pspl_space_geometry_option():
     if not ROMAN_SATELLITE1.exists():
         pytest.skip("Roman satellite sample file is not available.")
 
     tref = 9000.0
     finder = Finder(
         FinderConfig(
-            fitter_kind="pspl_space_parallax",
+            fitter_kind="pspl_parallax",
+            parallax_geometry="space",
             ra_deg=267.623337808,
             dec_deg=-29.1164180355,
             tref=tref,
@@ -361,10 +434,11 @@ def test_finder_fit_single_lens_supports_pspl_space_parallax():
     assert float(fit.chi2) < 1.0e-8
 
 
-def test_space_parallax_requires_satellite_path():
+def test_space_geometry_requires_satellite_path():
     finder = Finder(
         FinderConfig(
-            fitter_kind="pspl_space_parallax",
+            fitter_kind="pspl_parallax",
+            parallax_geometry="space",
             ra_deg=267.623337808,
             dec_deg=-29.1164180355,
         )
@@ -374,15 +448,16 @@ def test_space_parallax_requires_satellite_path():
         finder._ensure_fitter(2459000.0)
 
 
-def test_native_fspl_space_parallax_requires_sky_and_satellite_path():
-    finder = Finder(FinderConfig(fitter_kind="fspl_space_parallax"))
+def test_fspl_space_geometry_requires_sky_and_satellite_path():
+    finder = Finder(FinderConfig(fitter_kind="fspl_parallax", parallax_geometry="space"))
 
     with pytest.raises(ValueError, match="ra_deg and dec_deg"):
         finder._ensure_fitter(2459000.0)
 
     finder = Finder(
         FinderConfig(
-            fitter_kind="fspl_space_parallax",
+            fitter_kind="fspl_parallax",
+            parallax_geometry="space",
             ra_deg=267.623337808,
             dec_deg=-29.1164180355,
         )

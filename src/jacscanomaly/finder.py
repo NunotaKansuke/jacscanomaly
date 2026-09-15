@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, Optional, Sequence
 import logging
 
@@ -9,20 +10,11 @@ import jax
 import jax.numpy as jnp
 
 from .config import FinderConfig
-from .singlelens_fit import (
-    SingleLensFitResult,
+from .singlelens_fit import SingleLensFitResult
+from .fitters import (
     PSPLFitter,
-    CPPPSPLFitter,
     FSPLFitter,
-    VBMFiniteDiffFSPLFitter,
-    BICSingleLensFitter,
-    evaluate_single_lens_fixed,
 )
-from .singlelens_model import (
-    A_pspl_func,
-    A_fspl_logrho_func,
-)
-from .parallax_backend import NativeParallaxFitter
 from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
@@ -41,6 +33,7 @@ from .effect_detection import (
     detect_parallax_from_pspl_fit,
     detect_physical_effects as _detect_physical_effects,
 )
+from .fspl_initialization import fspl_template_initial_guesses
 from .effect_routing import RoutingThresholds, route_candidates
 from .singlelens_fallback import (
     FallbackConfig,
@@ -51,9 +44,12 @@ from .singlelens_fallback import (
 )
 from .exact_probe import run_exact_probe
 from .effect_aware import EffectAwareFinderResult, match_planet_candidates
-from .parallax_backend import native_parallax_effect_score
+from .parallax_backend import parallax_effect_score
 from .contamination import protected_support_mask
-from .signal_scale import measure_observed_signal_scale
+from .signal_scale import (
+    measure_observed_magnification_scale,
+    measure_observed_signal_scale,
+)
 
 if TYPE_CHECKING:
     from .anomaly_pipeline import AnomalyPipelineConfig, AnomalyPipelineResult
@@ -128,8 +124,8 @@ class Finder:
       ============================  ============================================
 
     * For parallax models, ``ra_deg`` and ``dec_deg`` must be provided
-      in :class:`FinderConfig`. If ``tref`` is not specified, the median
-      observation time is used.
+      in :class:`FinderConfig`. If ``tref`` is not specified, an
+      event-centred time near the observed brightening peak is used.
     """
 
     config: FinderConfig = field(default_factory=FinderConfig)
@@ -161,7 +157,8 @@ class Finder:
         Notes
         -----
         - If `config.fitter_kind` selects a parallax model, `ra_deg` and `dec_deg`
-          must be provided. If `tref` is not set, it defaults to `median(time)`.
+          must be provided. If `tref` is not set, the caller supplies an
+          event-centred reference time near the observed brightening peak.
         """
         if self.fitter is not None:
             return
@@ -171,16 +168,7 @@ class Finder:
         # -----------------------------
         # 1) Validate model selection
         # -----------------------------
-        valid = {
-            "pspl",
-            "fspl",
-            "fspl_vbm_fd",
-            "pspl_parallax",
-            "fspl_parallax",
-            "pspl_space_parallax",
-            "fspl_space_parallax",
-            "bic_single_lens",
-        }
+        valid = {"pspl", "fspl", "pspl_parallax", "fspl_parallax"}
         if k not in valid:
             raise ValueError(
                 f"Unknown fitter_kind '{k}'. "
@@ -190,56 +178,40 @@ class Finder:
         # -----------------------------
         # 2) Validate model requirements
         # -----------------------------
-        needs_sky = k in {
-            "pspl_parallax",
-            "fspl_parallax",
-            "pspl_space_parallax",
-            "fspl_space_parallax",
-        } or (k == "bic_single_lens" and self.config.bic_include_space_parallax)
+        needs_sky = k in {"pspl_parallax", "fspl_parallax"}
         if needs_sky:
             if self.config.ra_deg is None or self.config.dec_deg is None:
                 raise ValueError(
                     f"{k} requires ra_deg and dec_deg in FinderConfig "
                     "(sky coordinates are required for parallax)."
                 )
-        needs_satellite = k in {
-            "pspl_space_parallax",
-            "fspl_space_parallax",
-        } or (k == "bic_single_lens" and self.config.bic_include_space_parallax)
+        geometry = None
+        if needs_sky:
+            geometry = self._resolve_model_parallax_geometry()
+        needs_satellite = geometry == "space"
         if needs_satellite and self.config.satellite_ephemeris_path is None:
             raise ValueError(
-                f"{k} requires satellite_ephemeris_path in FinderConfig."
+                f"{k} with parallax_geometry='space' requires "
+                "satellite_ephemeris_path in FinderConfig."
             )
     
         # -----------------------------
         # 3) Build fitter
         # -----------------------------
         if k == "pspl":
-            if self.config.single_fit_backend == "cpp":
-                self.fitter = CPPPSPLFitter(
-                    u0_min=float(self.config.pspl_fit_u0_min),
-                    min_t0_support_points=int(self.config.pspl_fit_min_t0_support_points),
-                    t0_support_tE_coeff=float(self.config.pspl_fit_t0_support_tE_coeff),
-                    nonnegative_fluxes=bool(
-                        self.config.pspl_fit_nonnegative_fluxes
-                    ),
-                    nonnegative_on_cancellation=bool(
-                        self.config.pspl_fit_nonnegative_on_cancellation
-                    ),
-                    max_flux_cancellation_ratio=float(
-                        self.config.pspl_fit_max_flux_cancellation_ratio
-                    ),
-                )
-            else:
-                self.fitter = PSPLFitter()
-            return
-    
-        if k == "fspl":
-            self.fitter = FSPLFitter()
+            self.fitter = PSPLFitter(
+                maxiter=int(self.config.fitter_maxiter),
+                tol=float(self.config.fitter_tol),
+            )
             return
 
-        if k == "fspl_vbm_fd":
-            self.fitter = VBMFiniteDiffFSPLFitter()
+        if k == "fspl":
+            self.fitter = FSPLFitter(
+                maxiter=int(self.config.fitter_maxiter),
+                tol=float(self.config.fitter_tol),
+                magnification_tol=float(self.config.magnification_tol),
+                magnification_reltol=float(self.config.magnification_reltol),
+            )
             return
     
         # Parallax variants
@@ -247,45 +219,97 @@ class Finder:
         if tref is None:
             tref = t_ref
     
+        effect = "space_parallax" if geometry == "space" else "annual_parallax"
         if k == "pspl_parallax":
             self.fitter = make_effect_fitter(
-                self.config, "annual_parallax", float(tref)
+                self.config, effect, float(tref)
             ).fitter
             return
 
-        if k == "pspl_space_parallax":
-            self.fitter = make_effect_fitter(
-                self.config, "space_parallax", float(tref)
-            ).fitter
-            return
-
-        if k == "fspl_space_parallax":
-            self.fitter = make_effect_fitter(
-                self.config, "fspl_space_parallax", float(tref)
-            ).fitter
-            return
-
-        if k == "bic_single_lens":
-            self.fitter = BICSingleLensFitter(
-                RA=self.config.ra_deg,
-                Dec=self.config.dec_deg,
-                tref=tref,
-                satellite_ephemeris_path=self.config.satellite_ephemeris_path,
-                max_piE=float(self.config.max_piE),
-                piE_prior_weight=float(self.config.piE_prior_weight),
-                piE_prior_eps=float(self.config.piE_prior_eps),
-                include_space_parallax=bool(self.config.bic_include_space_parallax),
-                observer_convention=str(self.config.parallax_observer_convention),
-                time_scale=str(self.config.parallax_time_scale),
-                time_offset=float(self.config.parallax_time_offset),
-                ephemeris_extrapolation=str(self.config.parallax_extrapolation),
-            )
-            return
-    
-        # k == "fspl_parallax"
         self.fitter = make_effect_fitter(
-            self.config, "fspl_parallax", float(tref)
+            self.config, "fspl_space_parallax" if geometry == "space" else "fspl_parallax", float(tref)
         ).fitter
+
+    def _resolve_model_parallax_geometry(self) -> str:
+        """Resolve the one geometry used by a parallax baseline fitter."""
+        geometry = str(getattr(self.config, "parallax_geometry", "auto")).lower()
+        if geometry == "auto":
+            geometry = (
+                "space"
+                if self.config.satellite_ephemeris_path is not None
+                else "annual"
+            )
+        if geometry not in {"annual", "space"}:
+            raise ValueError(
+                "parallax baseline requires parallax_geometry='annual' or 'space'."
+            )
+        return geometry
+
+    def _resolve_parallax_tref(
+        self,
+        time_np: np.ndarray,
+        flux_np: np.ndarray,
+        *,
+        x0=None,
+        fit: Optional[SingleLensFitResult] = None,
+        for_parallax: bool = False,
+    ) -> float:
+        """Resolve the fixed parallax reference epoch for one light curve.
+
+        ``tref`` is a coordinate/reference choice for the observer
+        displacement, not another nonlinear fit parameter.  A reference near
+        the event centre keeps the parallax components from being needlessly
+        correlated with ``t0`` and ``tE``.  Explicit configuration wins;
+        otherwise use a supplied nonlinear seed or completed fit, then locate
+        the broad brightening centre in the original flux.  The latter is only
+        a locator for ``tref``; the parallax fit still scores the original
+        flux directly.
+        """
+        configured = getattr(self.config, "tref", None)
+        if configured is not None:
+            return float(configured)
+
+        kind = str(getattr(self.config, "fitter_kind", "pspl"))
+        if not for_parallax and kind not in {"pspl_parallax", "fspl_parallax"}:
+            return float(np.median(np.asarray(time_np, dtype=float)))
+
+        for source in (
+            getattr(fit, "params", None) if fit is not None else None,
+            x0,
+        ):
+            if source is None:
+                continue
+            values = np.asarray(source, dtype=float).reshape(-1)
+            if values.size >= 1 and np.isfinite(values[0]):
+                return float(values[0])
+
+        time_values = np.asarray(time_np, dtype=float).reshape(-1)
+        flux_values = np.asarray(flux_np, dtype=float).reshape(-1)
+        valid = np.isfinite(time_values) & np.isfinite(flux_values)
+        if not np.any(valid):
+            raise ValueError("Cannot resolve parallax tref without finite data.")
+        finite_time = time_values[valid]
+        finite_flux = flux_values[valid]
+        peak_index = int(np.nanargmax(finite_flux))
+        peak_time = float(finite_time[peak_index])
+
+        # Use the broad flux envelope to avoid making tref follow one noisy
+        # point or a compact anomaly.  If the envelope is not measurable, the
+        # observed peak is still a valid conservative locator.
+        span = float(np.ptp(finite_time)) if finite_time.size > 1 else 0.0
+        measured = measure_observed_magnification_scale(
+            finite_time,
+            finite_flux,
+            center=peak_time,
+            search_half_width=max(1.0, min(300.0, 0.25 * span))
+            if span > 0.0
+            else 1.0,
+            n_bins=256,
+            source="parallax_tref_peak",
+        )
+        if measured.valid and np.isfinite(measured.t_center):
+            return float(measured.t_center)
+        return peak_time
 
 
     # ------------------------------------------------------------------
@@ -321,10 +345,12 @@ class Finder:
         SingleLensFitResult
             Result of the single-lens fit.
         """
-        time_j, flux_j, ferr_j, x0_j, time_np, _, _ = self._to_arrays(
+        time_j, flux_j, ferr_j, x0_j, time_np, flux_np, _ = self._to_arrays(
             time, flux, ferr, x0, data_kind=data_kind
         )
-        self._ensure_fitter(float(np.median(time_np)))
+        self._ensure_fitter(
+            self._resolve_parallax_tref(time_np, flux_np, x0=x0_j)
+        )
         if x0_j is None:
             return self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
         return self.fitter.fit(time_j, flux_j, ferr_j, x0_j)
@@ -362,9 +388,7 @@ class Finder:
         if geometry == "auto":
             fitter_kind = str(self.config.fitter_kind)
             if fitter_kind in {"pspl_parallax", "fspl_parallax"}:
-                geometry = "annual"
-            elif fitter_kind in {"pspl_space_parallax", "fspl_space_parallax"}:
-                geometry = "space"
+                geometry = self._resolve_model_parallax_geometry()
             elif space_parallax_projector is not None:
                 geometry = "space"
             elif parallax_projector is not None:
@@ -379,6 +403,12 @@ class Finder:
                 geometry = "annual"
             else:
                 geometry = "none"
+        configured_time_offset = float(
+            getattr(self.config, "parallax_time_offset", 0.0)
+        )
+        projector_time_offset = (
+            configured_time_offset if configured_time_offset != 0.0 else None
+        )
 
         # Resolve the requested observer geometry before touching any native
         # fitter or ephemeris.  An unavailable, unselected geometry must not
@@ -392,8 +422,7 @@ class Finder:
         if (
             geometry in {"space", "both"}
             and space_parallax_projector is None
-            and self.config.fitter_kind
-            in {"pspl_space_parallax", "fspl_space_parallax"}
+            and self.config.fitter_kind in {"pspl_parallax", "fspl_parallax"}
         ):
             space_parallax_projector = getattr(self.fitter, "_P", None)
         if (
@@ -408,8 +437,21 @@ class Finder:
                 parallax_projector = make_parallax_projector(
                     self.config.ra_deg,
                     self.config.dec_deg,
-                    float(self.config.tref if self.config.tref is not None else np.median(fit.time)),
+                    self._resolve_parallax_tref(
+                        np.asarray(fit.time, dtype=float),
+                        np.asarray(
+                            getattr(
+                                fit,
+                                "flux",
+                                np.zeros_like(np.asarray(fit.time, dtype=float)),
+                            ),
+                            dtype=float,
+                        ),
+                        fit=fit,
+                        for_parallax=True,
+                    ),
                     use_HJD=self.config.parallax_time_scale == "hjd",
+                    time_offset=projector_time_offset,
                 )
             except Exception as exc:
                 raise ValueError(
@@ -428,10 +470,23 @@ class Finder:
                 space_parallax_projector = make_space_parallax_projector(
                     self.config.ra_deg,
                     self.config.dec_deg,
-                    float(self.config.tref if self.config.tref is not None else np.median(fit.time)),
+                    self._resolve_parallax_tref(
+                        np.asarray(fit.time, dtype=float),
+                        np.asarray(
+                            getattr(
+                                fit,
+                                "flux",
+                                np.zeros_like(np.asarray(fit.time, dtype=float)),
+                            ),
+                            dtype=float,
+                        ),
+                        fit=fit,
+                        for_parallax=True,
+                    ),
                     self.config.satellite_ephemeris_path,
                     use_HJD=self.config.parallax_time_scale == "hjd",
                     convention="gulls" if self.config.parallax_observer_convention == "gulls" else "vbm",
+                    time_offset=projector_time_offset,
                 )
             except Exception as exc:
                 raise ValueError(
@@ -507,6 +562,7 @@ class Finder:
         ferr_np = np.asarray(ferr, dtype=float)
         if fit is None and self._last_result is not None:
             fit = self._last_result.fit
+        candidate_tuple = tuple(candidates)
         if base_seed is None:
             if fit is None:
                 raise ValueError("robust_fallback requires fit or base_seed.")
@@ -517,8 +573,21 @@ class Finder:
                 base_seed[rho_index] = np.log(
                     max(abs(float(base_seed[rho_index])), 1.0e-12)
                 )
-        self._ensure_fitter(float(np.median(time_np)))
-        candidate_tuple = tuple(candidates)
+        self._ensure_fitter(
+            self._resolve_parallax_tref(
+                time_np,
+                flux_np,
+                fit=fit,
+                x0=base_seed,
+                for_parallax=(
+                    "parallax" in str(effect)
+                    or any(
+                        "parallax" in str(candidate.effect)
+                        for candidate in candidate_tuple
+                    )
+                ),
+            )
+        )
         resolved_effect = self._resolve_fallback_effect(effect, candidate_tuple)
         if resolved_effect is None:
             raise ValueError(
@@ -528,7 +597,15 @@ class Finder:
         spec = None
         try:
             spec = make_effect_fitter(
-                self.config, resolved_effect, float(np.median(time_np))
+                self.config,
+                resolved_effect,
+                self._resolve_parallax_tref(
+                    time_np,
+                    flux_np,
+                    fit=fit,
+                    x0=base_seed,
+                    for_parallax="parallax" in str(resolved_effect),
+                ),
             )
         except ValueError:
             # A joint space-parallax backend can be unavailable when the
@@ -627,7 +704,7 @@ class Finder:
                     ):
                         if not native_parallax_scored:
                             scores.append(
-                                native_parallax_effect_score(
+                                parallax_effect_score(
                                     value,
                                     exclude_mask=candidate.compact_block_mask,
                                 )
@@ -771,7 +848,9 @@ class Finder:
             time, flux, ferr, x0, data_kind=data_kind
         )
 
-        self._ensure_fitter(float(np.median(time_np)))
+        self._ensure_fitter(
+            self._resolve_parallax_tref(time_np, flux_np, x0=x0_j)
+        )
 
         if not refit:
             fit = self._fixed_single_lens_from_x0(time_j, flux_j, ferr_j, x0_j)
@@ -860,7 +939,9 @@ class Finder:
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self._to_arrays(
             time, flux, ferr, x0, data_kind=data_kind
         )
-        self._ensure_fitter(float(np.median(time_np)))
+        self._ensure_fitter(
+            self._resolve_parallax_tref(time_np, flux_np, x0=x0_j)
+        )
         if x0_j is None:
             initial_fit = self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
         else:
@@ -1475,9 +1556,9 @@ class Finder:
         return {
             "fspl": "fspl",
             "annual_parallax": "pspl_parallax",
-            "space_parallax": "pspl_space_parallax",
+            "space_parallax": "pspl_parallax",
             "fspl_parallax": "fspl_parallax",
-            "fspl_space_parallax": "fspl_space_parallax",
+            "fspl_space_parallax": "fspl_parallax",
         }.get(str(effect), str(effect))
 
     def refine_planet_after_physical(
@@ -1518,7 +1599,13 @@ class Finder:
         spec = make_effect_fitter(
             self.config,
             str(effect),
-            float(np.median(time_np)),
+            self._resolve_parallax_tref(
+                time_np,
+                np.asarray(flux, dtype=float),
+                fit=selected_fit,
+                x0=getattr(selected_fit, "params", None),
+                for_parallax="parallax" in str(effect),
+            ),
         )
         if not hasattr(selected_fit, "model_kind"):
             object.__setattr__(
@@ -1561,7 +1648,12 @@ class Finder:
         spec = make_effect_fitter(
             self.config,
             str(effect),
-            float(np.median(time_np)),
+            self._resolve_parallax_tref(
+                time_np,
+                np.asarray(flux, dtype=float),
+                x0=params,
+                for_parallax="parallax" in str(effect),
+            ),
         )
         if not hasattr(spec.fitter, "evaluate_fixed"):
             raise TypeError(
@@ -1667,12 +1759,14 @@ class Finder:
         To scan residuals without constructing a ``Finder`` or a
         ``SingleLensFitResult``, call :class:`TemplateFreeScanner` directly.
         """
-        time_j, flux_j, ferr_j, x0_j, time_np, _, ferr_np = self._to_arrays(
+        time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self._to_arrays(
             time, flux, ferr, x0, data_kind=data_kind
         )
 
         if fit is None:
-            self._ensure_fitter(float(np.median(time_np)))
+            self._ensure_fitter(
+                self._resolve_parallax_tref(time_np, flux_np, x0=x0_j)
+            )
             if x0_j is None:
                 fit = self._fit_from_auto_initial_guesses(time_j, flux_j, ferr_j, time_np)
             else:
@@ -1780,91 +1874,10 @@ class Finder:
             raise ValueError("Finder.run(refit=False) requires x0.")
 
         k = self.config.fitter_kind
-        if isinstance(self.fitter, NativeParallaxFitter):
+        if hasattr(self.fitter, "evaluate_fixed"):
             return self.fitter.evaluate_fixed(time_j, flux_j, ferr_j, x0_j)
 
-        if k == "pspl":
-            return evaluate_single_lens_fixed(
-                time=time_j,
-                flux=flux_j,
-                ferr=ferr_j,
-                x0=x0_j,
-                build_A=A_pspl_func,
-                dof=3,
-                param_names=("t0", "tE", "u0"),
-                min_points=4,
-            )
-
-        if k == "fspl":
-            def q_to_params(q):
-                t0, tE, u0, logrho = q
-                return jnp.array([t0, tE, u0, jnp.exp(logrho)])
-
-            return evaluate_single_lens_fixed(
-                time=time_j,
-                flux=flux_j,
-                ferr=ferr_j,
-                x0=x0_j,
-                build_A=A_fspl_logrho_func,
-                dof=4,
-                param_names=("t0", "tE", "u0", "rho"),
-                x_to_params=q_to_params,
-                min_points=4,
-                store_raw_params=True,
-            )
-
-        if k == "fspl_vbm_fd":
-            return self._fixed_single_lens_from_numpy_model(
-                time_j=time_j,
-                flux_j=flux_j,
-                ferr_j=ferr_j,
-                x0_j=x0_j,
-                dof=4,
-                param_names=("t0", "tE", "u0", "rho"),
-                parallax_projector=None,
-            )
-
         raise ValueError(f"Unknown fitter_kind '{k}'.")
-
-    def _fixed_single_lens_from_numpy_model(
-        self,
-        *,
-        time_j: jnp.ndarray,
-        flux_j: jnp.ndarray,
-        ferr_j: jnp.ndarray,
-        x0_j: jnp.ndarray,
-        dof: int,
-        param_names: tuple[str, ...],
-        parallax_projector,
-    ) -> SingleLensFitResult:
-        if not hasattr(self.fitter, "_model_and_residual"):
-            raise TypeError(
-                f"{type(self.fitter).__name__} does not support fixed-parameter evaluation."
-            )
-
-        time_np = np.asarray(jax.device_get(time_j), dtype=float)
-        flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
-        ferr_np = np.maximum(np.asarray(jax.device_get(ferr_j), dtype=float), 1e-12)
-        q = np.asarray(jax.device_get(x0_j), dtype=float)
-        model, residual, chi2, fs, fb = self.fitter._model_and_residual(q, time_np, flux_np, ferr_np)
-        rho = float(np.exp(np.clip(q[3], -50.0, 10.0)))
-        params = np.asarray([q[0], q[1], q[2], rho, *q[4:]], dtype=float)
-
-        return SingleLensFitResult(
-            time=time_np,
-            flux=flux_np,
-            ferr=ferr_np,
-            params=jnp.asarray(params),
-            param_names=param_names,
-            chi2=jnp.asarray(chi2),
-            chi2_dof=jnp.asarray(chi2 / max(int(time_np.size) - dof, 1)),
-            fs=jnp.asarray(fs),
-            fb=jnp.asarray(fb),
-            model_flux=jnp.asarray(model),
-            residual=jnp.asarray(residual),
-            raw_params=jnp.asarray(q),
-            parallax_projector=parallax_projector,
-        )
 
     def _estimate_single_lens_initial_guesses(
         self,
@@ -1877,6 +1890,14 @@ class Finder:
         cfg = self.config
         if cfg.fitter_kind == "pspl":
             return self._estimate_pspl_fft_initial_guesses(
+                time_j=time_j,
+                flux_j=flux_j,
+                ferr_j=ferr_j,
+                time_np=time_np,
+            )
+
+        if cfg.fitter_kind in {"fspl", "fspl_parallax"}:
+            return self._estimate_fspl_template_initial_guesses(
                 time_j=time_j,
                 flux_j=flux_j,
                 ferr_j=ferr_j,
@@ -1984,6 +2005,48 @@ class Finder:
 
         return np.asarray(guesses, dtype=float)
 
+    def _estimate_fspl_template_initial_guesses(
+        self,
+        *,
+        time_j: jnp.ndarray,
+        flux_j: jnp.ndarray,
+        ferr_j: jnp.ndarray,
+        time_np: np.ndarray,
+    ) -> np.ndarray:
+        """Build FSPL starts from the observed-duration seed grid.
+
+        This is the same direct original-flux route used by the validated
+        3008 run: the initializer measures the observed brightening width,
+        constructs the crossing-time/rho/impact/t0 grid, and returns the
+        lowest-chi-square seeds.  It does not run a PSPL FFT bank or use a
+        PSPL residual as a template.
+        """
+        cfg = self.config
+        flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
+        ferr_np = np.asarray(jax.device_get(ferr_j), dtype=float)
+        requested = max(1, int(cfg.auto_init_fspl_template_top_k))
+        proxy = SimpleNamespace(
+            time=time_np,
+            flux=flux_np,
+            ferr=ferr_np,
+            params=None,
+        )
+        seeds = fspl_template_initial_guesses(
+            proxy,
+            top_k=requested,
+            magnification_tol=float(cfg.magnification_tol),
+            magnification_reltol=float(cfg.magnification_reltol),
+            espl_table_path=getattr(self.fitter, "espl_table_path", None),
+        )
+        result = np.asarray(seeds, dtype=float)
+        if result.ndim != 2 or result.shape[0] == 0:
+            raise RuntimeError("FSPL duration initializer returned no seeds.")
+        if cfg.fitter_kind == "fspl_parallax":
+            result = np.column_stack(
+                [result, np.zeros((result.shape[0], 2), dtype=float)]
+            )
+        return result
+
     def _estimate_pspl_fft_initial_guesses(
         self,
         *,
@@ -2082,8 +2145,8 @@ class Finder:
         corresponding cancellation pathology at the initializer boundary.
         """
         cfg = self.config
-        minimum_support = int(cfg.pspl_fit_min_t0_support_points)
-        support_coeff = float(cfg.pspl_fit_t0_support_tE_coeff)
+        minimum_support = int(cfg.auto_init_min_t0_support_points)
+        support_coeff = float(cfg.auto_init_t0_support_tE_coeff)
         nearest_coeff = float(cfg.auto_init_nearest_support_tE_coeff)
         cancellation_limit = float(cfg.auto_init_max_flux_cancellation_ratio)
         if minimum_support < 1 or support_coeff <= 0.0:
@@ -2109,7 +2172,7 @@ class Finder:
             fb = float(candidate.fb)
             if not all(np.isfinite(value) for value in (t0, t_e, u0, fs, fb)):
                 continue
-            if t_e <= 0.0 or u0 < float(cfg.pspl_fit_u0_min):
+            if t_e <= 0.0 or u0 < float(cfg.auto_init_u0_min):
                 continue
 
             distances = np.abs(time_values - t0)
@@ -2141,11 +2204,11 @@ class Finder:
         k = self.config.fitter_kind
         if k == "pspl":
             return np.asarray([t0, tE, u0], dtype=float)
-        if k in {"fspl", "fspl_vbm_fd"}:
+        if k == "fspl":
             return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho)], dtype=float)
-        if k in {"pspl_parallax", "pspl_space_parallax"}:
+        if k == "pspl_parallax":
             return np.asarray([t0, tE, u0, 0.0, 0.0], dtype=float)
-        if k in {"fspl_parallax", "fspl_space_parallax"}:
+        if k == "fspl_parallax":
             return np.asarray([t0, tE, u0, float(self.config.auto_init_logrho), 0.0, 0.0], dtype=float)
         raise ValueError(f"Unknown fitter_kind '{k}'.")
 

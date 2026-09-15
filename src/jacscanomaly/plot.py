@@ -32,6 +32,10 @@ def _single_lens_model_flux(fit, time) -> np.ndarray:
     names = tuple(getattr(fit, "param_names", ()))
     projector = getattr(fit, "parallax_projector", None)
     raw_params = getattr(fit, "raw_params", None)
+    model_evaluator = getattr(fit, "model_evaluator", None)
+    if callable(model_evaluator):
+        magnification = np.asarray(model_evaluator(np.asarray(time, dtype=float)), dtype=float)
+        return float(np.asarray(fit.fs)) * magnification + float(np.asarray(fit.fb))
     if (
         projector is not None
         and hasattr(projector, "magnification_at")

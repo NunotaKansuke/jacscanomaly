@@ -3,12 +3,13 @@ import inspect
 from jacscanomaly import CandidateCriteria, FinderConfig
 
 
-def test_default_config_uses_cpp_backends_for_pspl_workflow():
+def test_default_config_uses_canonical_fitter_contract():
     config = FinderConfig()
 
     assert config.fitter_kind == "pspl"
     assert config.grid_backend == "cpp"
-    assert config.single_fit_backend == "cpp"
+    assert config.fitter_maxiter == 1000
+    assert config.fitter_tol == 1.0e-6
     assert config.common_ratio == 4.0 / 3.0
 
 
@@ -27,14 +28,16 @@ def test_config_accepts_candidate_criteria():
     assert config.candidate_criteria is criteria
 
 
-def test_config_accepts_vbm_cpp_multistart_options():
+def test_config_exposes_geometry_and_magnification_options():
     config = FinderConfig(
         fitter_kind="fspl_parallax",
-        single_fit_backend="vbm_cpp",
-        vbm_cpp_piE_seed_values=(-0.25, 0.0, 0.25),
-        vbm_cpp_logrho_seed_values=(-2.0, -0.5),
+        parallax_geometry="space",
+        parallax_observer_convention="gulls",
+        magnification_tol=1.0e-5,
+        magnification_reltol=2.0e-5,
     )
 
-    assert config.single_fit_backend == "vbm_cpp"
-    assert config.vbm_cpp_piE_seed_values == (-0.25, 0.0, 0.25)
-    assert config.vbm_cpp_logrho_seed_values == (-2.0, -0.5)
+    assert config.parallax_geometry == "space"
+    assert config.parallax_observer_convention == "gulls"
+    assert config.magnification_tol == 1.0e-5
+    assert config.magnification_reltol == 2.0e-5

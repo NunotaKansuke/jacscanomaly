@@ -734,12 +734,12 @@ def test_scaled_parameter_distance_uses_dimensionless_raw_contract():
 
 
 def test_effect_factory_exposes_effect_specific_dimensions():
-    config = FinderConfig(fitter_kind="pspl", single_fit_backend="jax")
+    config = FinderConfig(fitter_kind="pspl")
     fspl = make_effect_fitter(config, "fspl", 100.0)
 
     assert fspl.parameter_dimension == 4
     assert fspl.raw_parameter_names == ("t0", "tE", "u0", "logrho")
-    assert fspl.fitter.profile_peak_only is False
+    assert fspl.backend == "scipy_lm_compiled_magnification"
 
 
 def test_parallax_seed_atlas_covers_multiple_directions():

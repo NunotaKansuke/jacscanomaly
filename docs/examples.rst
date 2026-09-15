@@ -37,15 +37,14 @@ deviation and runs the default PSPL workflow.
    result = finder.run(time, flux, ferr)
    result.print_summary()
 
-The default PSPL workflow uses the C++ backends. You can still make that
-explicit when writing survey scripts:
+The default PSPL workflow uses SciPy LM for the continuous fit and the
+compiled grid backend for the scan. You can make the grid choice explicit:
 
 .. code-block:: python
 
    config = FinderConfig(
        fitter_kind="pspl",
        grid_backend="cpp",
-       single_fit_backend="cpp",
        candidate_criteria=CandidateCriteria(min_n_eff=2.0),
    )
 
@@ -82,6 +81,12 @@ residuals without refitting them, pass ``refit=False`` to
 
 The nonlinear parameters are fixed, while ``fs`` and ``fb`` are still solved
 analytically for the input light curve.
+
+For a physical FSPL-parallax fit, the repository also includes the command-line
+example ``example/fit_fspl_parallax.py``. Use
+``parallax_geometry="annual"`` or ``"space"`` in ``FinderConfig``; the
+GULLS observer convention is selected with
+``parallax_observer_convention="gulls"``.
 
 Using candidate criteria
 ------------------------

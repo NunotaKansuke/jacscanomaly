@@ -755,8 +755,8 @@ class PlanetSignalResult:
         model_label = {
             "pspl": "refined PSPL",
             "fspl": "refined FSPL",
-            "fspl_vbm_fd": "refined FSPL",
-            "fspl_space_parallax": "refined FSPL+parallax",
+            "pspl_parallax": "refined PSPL+parallax",
+            "fspl_parallax": "refined FSPL+parallax",
         }.get(model_kind, "refined single-lens")
         ax_peak.plot(t_peak_model, f_peak_model, c="k", lw=2.0, label=model_label, zorder=1)
         ax_peak.set_xlim(peak_xlim)
@@ -1895,7 +1895,13 @@ class PlanetSignalExtractor:
         time_j, flux_j, ferr_j, x0_j, time_np, flux_np, ferr_np = self.finder._to_arrays(
             time, flux, ferr, x0
         )
-        self.finder._ensure_fitter(float(np.median(time_np)))
+        self.finder._ensure_fitter(
+            self.finder._resolve_parallax_tref(
+                time_np,
+                flux_np,
+                x0=x0_j,
+            )
+        )
         self._baseline_refit_fitter = baseline_refit_fitter
         positive_dt = np.diff(np.sort(time_np))
         positive_dt = positive_dt[positive_dt > 0.0]
@@ -3126,7 +3132,7 @@ class PlanetSignalExtractor:
         if reference.size < 3 or candidate.size < 3:
             return False
         lower = max(
-            float(getattr(self.finder.config, "pspl_fit_u0_min", 1.0e-4)),
+            float(getattr(self.finder.config, "auto_init_u0_min", 1.0e-4)),
             1.0e-12,
         )
         return bool(
@@ -3867,6 +3873,8 @@ class PlanetSignalExtractor:
             residual=residual,
             raw_params=jnp.asarray(fit.raw_params, dtype=time_j.dtype) if fit.raw_params is not None else None,
             parallax_projector=getattr(fit, "parallax_projector", None),
+            model_evaluator=getattr(fit, "model_evaluator", None),
+            model_kind=getattr(fit, "model_kind", None),
             optimizer_success=getattr(fit, "optimizer_success", None),
             optimizer_status=getattr(fit, "optimizer_status", None),
             diagnostics=getattr(fit, "diagnostics", None),
@@ -3938,6 +3946,8 @@ class PlanetSignalExtractor:
             residual=residual,
             raw_params=jnp.asarray(fit.raw_params, dtype=time_j.dtype) if fit.raw_params is not None else None,
             parallax_projector=getattr(fit, "parallax_projector", None),
+            model_evaluator=getattr(fit, "model_evaluator", None),
+            model_kind=getattr(fit, "model_kind", None),
         )
         # Keep the selected model family attached to the full-data evaluation.
         # This is used by subsequent masked/weighted refits to avoid silently

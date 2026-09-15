@@ -1030,12 +1030,6 @@ PyMethodDef methods[] = {
         "Classify template-grid candidates with the native one-lobe test.",
     },
     {
-        "fit_pspl",
-        reinterpret_cast<PyCFunction>(fit_pspl),
-        METH_VARARGS | METH_KEYWORDS,
-        "Fit a PSPL single-lens model with a small C++ Levenberg-Marquardt solver.",
-    },
-    {
         "extract_clusters",
         reinterpret_cast<PyCFunction>(extract_clusters),
         METH_VARARGS | METH_KEYWORDS,

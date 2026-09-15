@@ -64,15 +64,11 @@ Single-lens fitting
    :toctree: generated
 
    jacscanomaly.PSPLFitter
-   jacscanomaly.CPPPSPLFitter
    jacscanomaly.FSPLFitter
-   jacscanomaly.NativePSPLAnnualParallaxFitter
-   jacscanomaly.NativeFSPLAnnualParallaxFitter
-   jacscanomaly.NativePSPLSpaceParallaxFitter
-   jacscanomaly.NativeFSPLSpaceParallaxFitter
-   jacscanomaly.BICSingleLensFitter
-   jacscanomaly.CVFitter
+   jacscanomaly.PSPLParallaxFitter
+   jacscanomaly.FSPLParallaxFitter
    jacscanomaly.SingleLensFitResult
+   jacscanomaly.fspl_template_initial_guesses
 
 Module reference
 ----------------
