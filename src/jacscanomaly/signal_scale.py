@@ -344,6 +344,34 @@ def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> flo
     return float(np.interp(float(q) * total, cumulative, x))
 
 
+def _contiguous_runs(
+    mask: np.ndarray,
+    time: np.ndarray,
+    *,
+    max_gap: float,
+) -> tuple[np.ndarray, ...]:
+    """Return above-threshold runs without joining separated observations."""
+    active = np.flatnonzero(np.asarray(mask, dtype=bool))
+    if active.size == 0:
+        return ()
+    gaps = np.diff(np.asarray(time, dtype=float)[active])
+    breaks = np.flatnonzero(
+        ~np.isfinite(gaps) | (gaps > max(float(max_gap), 0.0))
+    ) + 1
+    return tuple(np.split(active, breaks))
+
+
+def _run_containing(
+    runs: tuple[np.ndarray, ...],
+    index: int,
+) -> Optional[np.ndarray]:
+    """Return the run containing one array index, if it exists."""
+    for run in runs:
+        if run.size and int(run[0]) <= int(index) <= int(run[-1]):
+            return run
+    return None
+
+
 def measure_observed_signal_scale(
     time: np.ndarray,
     signal: np.ndarray,
@@ -452,6 +480,7 @@ def measure_observed_magnification_scale(
     n_bins: int = 256,
     baseline_quantile: float = 0.20,
     threshold_fraction: float = 0.05,
+    allow_point_fallback: bool = False,
     source: str = "observed_magnification",
 ) -> ObservedSignalScale:
     """Measure the observed duration of the broad magnification envelope.
@@ -460,8 +489,11 @@ def measure_observed_magnification_scale(
     which measures the compact planet residual.  The light curve is binned by
     time and represented by per-bin medians, so a short planetary excursion
     cannot set the width of the broad event.  The returned interval is the
-    contiguous above-baseline envelope around ``center`` and does not use
-    ``tE`` or ``tE*u0``.
+    above-baseline component containing the requested event.  If
+    ``allow_point_fallback`` is true, a component unresolved by the broad
+    profile falls back to a point-level run around the nearby observed peak;
+    isolated excursions elsewhere in the search window cannot define the
+    width.  This does not use ``tE`` or ``tE*u0``.
     """
     t = np.asarray(time, dtype=float).reshape(-1)
     y = np.asarray(flux, dtype=float).reshape(-1)
@@ -518,26 +550,122 @@ def measure_observed_magnification_scale(
     if not np.any(above):
         return ObservedSignalScale.invalid(source=source)
 
-    # Use the broad above-baseline envelope.  The plot is centred on the
-    # requested physical t0 later; this interval only supplies the observed
-    # duration and its asymmetry.
-    above_indices = np.flatnonzero(above)
-    left_index = int(above_indices[0])
-    right_index = int(above_indices[-1])
-    t_left = float(profile_t[left_index])
-    t_right = float(profile_t[right_index])
-    if t_right <= t_left:
-        return ObservedSignalScale.invalid(source=source)
-
-    weights = np.maximum(excess - threshold, 0.0) ** 2
-    if np.sum(weights) > 0.0:
-        t_center = _weighted_quantile(profile_t, weights, 0.50)
-    else:
-        t_center = 0.5 * (t_left + t_right)
     cadence_values = np.diff(profile_t)
     positive_cadence = cadence_values[cadence_values > 0.0]
-    cadence = float(np.median(positive_cadence)) if positive_cadence.size else float("nan")
-    edge = cadence if np.isfinite(cadence) else 0.0
+    cadence = (
+        float(np.median(positive_cadence))
+        if positive_cadence.size
+        else float("nan")
+    )
+    nominal_bin_width = max(
+        (data_right - data_left) / max(float(bins), 1.0),
+        np.finfo(float).eps,
+    )
+    runs = _contiguous_runs(
+        above,
+        profile_t,
+        max_gap=3.0 * nominal_bin_width,
+    )
+
+    # Anchor the profile on the event centre.  If the profile has washed out
+    # a sharp peak, try the highest observed point as the secondary anchor;
+    # never use the first and last above-threshold bins from unrelated times.
+    center_index = int(np.argmin(np.abs(profile_t - float(center))))
+    selected_run = _run_containing(runs, center_index)
+    if selected_run is None or selected_run.size < 2:
+        peak_index = int(np.nanargmax(yv))
+        peak_time = float(tv[peak_index])
+        peak_anchor_tolerance = max(
+            4.0 * nominal_bin_width,
+            0.25 * half_search,
+        )
+        if abs(peak_time - float(center)) <= peak_anchor_tolerance:
+            peak_profile_index = int(np.argmin(np.abs(profile_t - peak_time)))
+            candidate_run = _run_containing(runs, peak_profile_index)
+            if candidate_run is not None and candidate_run.size >= 2:
+                selected_run = candidate_run
+
+    if selected_run is not None and selected_run.size >= 2:
+        selected = np.zeros(profile_t.size, dtype=bool)
+        selected[selected_run] = True
+        weights = np.maximum(excess - threshold, 0.0) ** 2
+        weights[~selected] = 0.0
+        t_left = float(profile_t[selected_run[0]])
+        t_right = float(profile_t[selected_run[-1]])
+        if t_right > t_left:
+            t_center = (
+                _weighted_quantile(profile_t, weights, 0.50)
+                if np.sum(weights) > 0.0
+                else 0.5 * (t_left + t_right)
+            )
+            edge = nominal_bin_width
+            touches_left = t_left <= data_left + edge
+            touches_right = t_right >= data_right - edge
+            left_span = max(t_center - t_left, 0.0)
+            right_span = max(t_right - t_center, 0.0)
+            return ObservedSignalScale(
+                t_center=float(t_center),
+                t_left=t_left,
+                t_right=t_right,
+                half_width=0.5 * (t_right - t_left),
+                cadence=cadence,
+                n_points=int(tv.size),
+                n_weighted_points=int(np.count_nonzero(weights > 0.0)),
+                left_coverage=0.0 if touches_left else 1.0,
+                right_coverage=0.0 if touches_right else 1.0,
+                asymmetry=(
+                    float(right_span / left_span)
+                    if left_span > 0.0
+                    else float("inf")
+                ),
+                valid=True,
+                censored=bool(touches_left or touches_right),
+                source=str(source),
+            )
+
+    if not allow_point_fallback:
+        return ObservedSignalScale.invalid(source=source)
+
+    # The broad median profile intentionally suppresses a very short event.
+    # Recover such an event from the consecutive raw observations around its
+    # peak, while using the local median/MAD as a noise floor.  The run
+    # requirement prevents one noisy point from becoming an event width.
+    raw_cadence_values = np.diff(tv)
+    raw_positive_cadence = raw_cadence_values[raw_cadence_values > 0.0]
+    raw_cadence = (
+        float(np.median(raw_positive_cadence))
+        if raw_positive_cadence.size
+        else float("nan")
+    )
+    raw_baseline = float(np.nanmedian(yv))
+    raw_noise = 1.4826 * float(np.nanmedian(np.abs(yv - raw_baseline)))
+    raw_excess = np.maximum(yv - raw_baseline, 0.0)
+    raw_peak_excess = float(np.max(raw_excess)) if raw_excess.size else 0.0
+    raw_threshold = max(
+        float(threshold_fraction) * raw_peak_excess,
+        3.0 * raw_noise,
+    )
+    raw_above = yv - raw_baseline >= raw_threshold
+    raw_runs = _contiguous_runs(
+        raw_above,
+        tv,
+        max_gap=(3.0 * raw_cadence if np.isfinite(raw_cadence) else 0.0),
+    )
+    raw_peak_index = int(np.nanargmax(yv))
+    if abs(float(tv[raw_peak_index]) - float(center)) > peak_anchor_tolerance:
+        return ObservedSignalScale.invalid(source=source)
+    raw_run = _run_containing(raw_runs, raw_peak_index)
+    if raw_run is None or raw_run.size < 3:
+        return ObservedSignalScale.invalid(source=source)
+
+    raw_weights = np.maximum(yv - raw_baseline - raw_threshold, 0.0) ** 2
+    raw_weights[~np.isin(np.arange(tv.size), raw_run)] = 0.0
+    t_left = float(tv[raw_run[0]])
+    t_right = float(tv[raw_run[-1]])
+    if t_right <= t_left:
+        return ObservedSignalScale.invalid(source=source)
+    t_center = _weighted_quantile(tv, raw_weights, 0.50)
+    edge = raw_cadence if np.isfinite(raw_cadence) else 0.0
     touches_left = t_left <= data_left + edge
     touches_right = t_right >= data_right - edge
     left_span = max(t_center - t_left, 0.0)
@@ -547,12 +675,16 @@ def measure_observed_magnification_scale(
         t_left=t_left,
         t_right=t_right,
         half_width=0.5 * (t_right - t_left),
-        cadence=cadence,
+        cadence=raw_cadence,
         n_points=int(tv.size),
-        n_weighted_points=int(np.count_nonzero(weights > 0.0)),
+        n_weighted_points=int(np.count_nonzero(raw_weights > 0.0)),
         left_coverage=0.0 if touches_left else 1.0,
         right_coverage=0.0 if touches_right else 1.0,
-        asymmetry=float(right_span / left_span) if left_span > 0.0 else float("inf"),
+        asymmetry=(
+            float(right_span / left_span)
+            if left_span > 0.0
+            else float("inf")
+        ),
         valid=True,
         censored=bool(touches_left or touches_right),
         source=str(source),

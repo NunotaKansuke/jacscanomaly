@@ -414,6 +414,7 @@ def _observed_duration_scale(
         center=center,
         search_half_width=search_half_width,
         n_bins=256,
+        allow_point_fallback=True,
         source="observed_magnification",
     )
     if measured.valid and np.isfinite(measured.width) and measured.width > 0.0:
