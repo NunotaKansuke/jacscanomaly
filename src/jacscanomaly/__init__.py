@@ -58,6 +58,7 @@ from .signal_scale import (
     ObservedSignalScale,
     ResolvedSignalScale,
     interval_mask,
+    measure_observed_magnification_fwhm,
     measure_observed_signal_scale,
     resolve_event_signal_scale,
 )

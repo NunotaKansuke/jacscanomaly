@@ -1,7 +1,50 @@
 import numpy as np
 import pytest
 
-from jacscanomaly.signal_scale import measure_observed_magnification_scale
+from jacscanomaly.signal_scale import (
+    measure_observed_magnification_fwhm,
+    measure_observed_magnification_scale,
+)
+
+
+def test_direct_magnification_fwhm_uses_raw_points_and_local_component():
+    time = np.arange(-5.0, 5.001, 0.01)
+    sigma = 0.4
+    flux = 1.0 + 4.0 * np.exp(-0.5 * (time / sigma) ** 2)
+    # The remote excursions are deliberately stronger than the central peak;
+    # they must not set the central event's FWHM.
+    flux += 8.0 * np.exp(-0.5 * ((time - 3.0) / 0.08) ** 2)
+    flux += 8.0 * np.exp(-0.5 * ((time + 3.0) / 0.08) ** 2)
+
+    scale = measure_observed_magnification_fwhm(
+        time,
+        flux,
+        center=0.0,
+        search_half_width=5.0,
+    )
+
+    expected = 2.0 * np.sqrt(2.0 * np.log(2.0)) * sigma
+    assert scale.valid
+    assert scale.source == "observed_magnification_fwhm"
+    assert scale.width == pytest.approx(expected, rel=0.02)
+    assert abs(scale.t_center) < 0.01
+    assert scale.n_weighted_points >= 3
+
+
+def test_direct_magnification_fwhm_marks_single_point_peak_unresolved():
+    time = np.arange(-5.0, 5.001, 0.01)
+    flux = np.ones_like(time)
+    flux[time == 0.0] = 10.0
+
+    scale = measure_observed_magnification_fwhm(
+        time,
+        flux,
+        center=0.0,
+        search_half_width=5.0,
+    )
+
+    assert not scale.valid
+    assert scale.censored
 
 
 def test_magnification_scale_uses_local_raw_run_for_unresolved_peak():

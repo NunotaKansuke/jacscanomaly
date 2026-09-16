@@ -691,6 +691,175 @@ def measure_observed_magnification_scale(
     )
 
 
+def measure_observed_magnification_fwhm(
+    time: np.ndarray,
+    flux: np.ndarray,
+    *,
+    center: float,
+    valid_mask: Optional[np.ndarray] = None,
+    search_half_width: float = 300.0,
+    baseline_quantile: float = 0.20,
+    peak_points: int = 5,
+    min_points: int = 3,
+    max_gap_cadences: float = 3.0,
+    min_peak_snr: float = 3.0,
+    source: str = "observed_magnification_fwhm",
+) -> ObservedSignalScale:
+    """Measure a direct, observed FWHM without time binning.
+
+    The baseline is a lower flux quantile in the local search window.  The
+    peak is the median of the brightest few points, which avoids letting one
+    outlier set the half-maximum level.  The width is measured at half of the
+    *excess* above baseline, not at half of the absolute flux.  Only a
+    contiguous run around the requested centre is accepted; an isolated
+    excursion elsewhere in the window cannot define the event width.
+
+    A run must contain at least ``min_points`` observations.  If the direct
+    FWHM cannot be resolved, an invalid scale is returned so the caller can
+    make an explicit fallback decision rather than silently treating a model
+    width as an observed measurement.
+    """
+    t = np.asarray(time, dtype=float).reshape(-1)
+    y = np.asarray(flux, dtype=float).reshape(-1)
+    if t.size != y.size or t.size == 0 or not np.isfinite(center):
+        return ObservedSignalScale.invalid(source=source)
+    if valid_mask is None:
+        valid = np.ones(t.size, dtype=bool)
+    else:
+        valid = np.asarray(valid_mask, dtype=bool).reshape(-1)
+        if valid.size != t.size:
+            raise ValueError("valid_mask must have the same length as time.")
+    valid &= np.isfinite(t) & np.isfinite(y)
+    half_search = max(float(search_half_width), 1.0)
+    valid &= np.abs(t - float(center)) <= half_search
+    if np.count_nonzero(valid) < max(int(min_points) + 2, 8):
+        return ObservedSignalScale.invalid(source=source)
+
+    tv = t[valid]
+    yv = y[valid]
+    order = np.argsort(tv, kind="stable")
+    tv = tv[order]
+    yv = yv[order]
+    data_left, data_right = float(tv[0]), float(tv[-1])
+    if data_right <= data_left:
+        return ObservedSignalScale.invalid(source=source)
+
+    cadence_values = np.diff(tv)
+    positive_cadence = cadence_values[
+        np.isfinite(cadence_values) & (cadence_values > 0.0)
+    ]
+    cadence = (
+        float(np.median(positive_cadence))
+        if positive_cadence.size
+        else float("nan")
+    )
+    if not np.isfinite(cadence) or cadence <= 0.0:
+        return ObservedSignalScale.invalid(source=source)
+
+    baseline = float(
+        np.nanpercentile(yv, float(baseline_quantile) * 100.0)
+    )
+    noise = 1.4826 * float(np.nanmedian(np.abs(yv - np.nanmedian(yv))))
+    # Estimate the peak locally around the PSPL centre.  Using the brightest
+    # points in the whole search window would let a stronger, unrelated
+    # excursion determine the central event's half-maximum level.
+    peak_anchor_half_width = min(
+        half_search,
+        max(4.0 * cadence, 0.10 * half_search),
+    )
+    peak_region = np.abs(tv - float(center)) <= peak_anchor_half_width
+    peak_values = yv[peak_region]
+    if peak_values.size < 1:
+        return ObservedSignalScale.invalid(source=source)
+    n_peak = max(1, min(int(peak_points), peak_values.size))
+    brightest = np.partition(peak_values, peak_values.size - n_peak)[-n_peak:]
+    peak = float(np.nanmedian(brightest))
+    peak_excess = peak - baseline
+    if not np.isfinite(peak_excess) or peak_excess <= 0.0:
+        return ObservedSignalScale.invalid(source=source)
+    if np.isfinite(noise) and noise > 0.0:
+        if peak_excess < max(float(min_peak_snr), 0.0) * noise:
+            return ObservedSignalScale.invalid(source=source)
+
+    half_level = baseline + 0.5 * peak_excess
+    above = yv >= half_level
+    runs = _contiguous_runs(
+        above,
+        tv,
+        max_gap=max(float(max_gap_cadences), 0.0) * cadence,
+    )
+    min_run_points = max(int(min_points), 2)
+    runs = tuple(run for run in runs if run.size >= min_run_points)
+    if not runs:
+        return ObservedSignalScale.invalid(source=source)
+
+    center_index = int(np.argmin(np.abs(tv - float(center))))
+    selected_run = _run_containing(runs, center_index)
+    if selected_run is None:
+        anchor_tolerance = max(4.0 * cadence, 0.25 * half_search)
+        eligible = [
+            run
+            for run in runs
+            if abs(
+                float(tv[int(run[np.argmax(yv[run])])]) - float(center)
+            )
+            <= anchor_tolerance
+        ]
+        if not eligible:
+            return ObservedSignalScale.invalid(source=source)
+        selected_run = max(
+            eligible,
+            key=lambda run: float(np.max(yv[run])),
+        )
+
+    def crossing(left_index: int, right_index: int) -> float:
+        left_time = float(tv[left_index])
+        right_time = float(tv[right_index])
+        left_flux = float(yv[left_index])
+        right_flux = float(yv[right_index])
+        denominator = right_flux - left_flux
+        if not np.isfinite(denominator) or denominator == 0.0:
+            return 0.5 * (left_time + right_time)
+        fraction = (half_level - left_flux) / denominator
+        fraction = float(np.clip(fraction, 0.0, 1.0))
+        return left_time + fraction * (right_time - left_time)
+
+    first = int(selected_run[0])
+    last = int(selected_run[-1])
+    touches_left = first == 0
+    touches_right = last == tv.size - 1
+    t_left = float(tv[first]) if touches_left else crossing(first - 1, first)
+    t_right = float(tv[last]) if touches_right else crossing(last, last + 1)
+    if not np.isfinite(t_left + t_right) or t_right <= t_left:
+        return ObservedSignalScale.invalid(source=source)
+
+    t_center = 0.5 * (t_left + t_right)
+    left_span = max(t_center - t_left, 0.0)
+    right_span = max(t_right - t_center, 0.0)
+    edge = cadence
+    return ObservedSignalScale(
+        t_center=float(t_center),
+        t_left=float(t_left),
+        t_right=float(t_right),
+        half_width=0.5 * (t_right - t_left),
+        cadence=float(cadence),
+        n_points=int(tv.size),
+        n_weighted_points=int(selected_run.size),
+        left_coverage=0.0 if touches_left else 1.0,
+        right_coverage=0.0 if touches_right else 1.0,
+        asymmetry=(
+            float(right_span / left_span) if left_span > 0.0 else float("inf")
+        ),
+        valid=True,
+        censored=bool(
+            touches_left or touches_right
+            or t_left <= data_left + edge
+            or t_right >= data_right - edge
+        ),
+        source=str(source),
+    )
+
+
 def interval_mask(
     time: np.ndarray,
     scale: ObservedSignalScale,
@@ -709,6 +878,7 @@ __all__ = [
     "ObservedSignalScale",
     "ResolvedSignalScale",
     "interval_mask",
+    "measure_observed_magnification_fwhm",
     "measure_observed_magnification_scale",
     "measure_observed_signal_scale",
     "resolve_event_signal_scale",

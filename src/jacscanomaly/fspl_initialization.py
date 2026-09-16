@@ -1,9 +1,9 @@
 """Observed-duration finite-source grid initialization.
 
 The default initializer is the data-centered route used by the 3008
-benchmark: measure the observed brightening width, convert it to a set of
-effective source-crossing times, build transit-shape seeds, and rank every
-seed by the original-flux profiled chi-square.  A PSPL seed may be supplied
+benchmark: measure a direct observed FWHM, convert it to a set of effective
+source-crossing times, build transit-shape seeds, and rank every seed by the
+original-flux profiled chi-square.  A PSPL seed may be supplied
 to locate the observed event, but no PSPL residual is used as the fitting
 template.
 
@@ -20,7 +20,10 @@ from typing import Any, Optional, Sequence
 import numpy as np
 
 from .fitters import FSPLFitter, _solve_fs_fb_numpy, _vbm_cpp
-from .signal_scale import ObservedSignalScale, measure_observed_magnification_scale
+from .signal_scale import (
+    ObservedSignalScale,
+    measure_observed_magnification_fwhm,
+)
 
 
 _DEFAULT_CROSSING_TIME_FACTORS = (0.0625, 0.125, 0.25, 0.5, 1.0)
@@ -408,14 +411,14 @@ def _observed_duration_scale(
         # long-tE events on the same source-crossing scale as the benchmark.
         search_half_width = max(1.0, min(5.0, 200.0 * cadence))
 
-    measured = measure_observed_magnification_scale(
+    measured = measure_observed_magnification_fwhm(
         time,
         flux,
         center=center,
         search_half_width=search_half_width,
-        n_bins=256,
-        allow_point_fallback=True,
-        source="observed_magnification",
+        min_points=3,
+        peak_points=5,
+        source="observed_magnification_fwhm",
     )
     if measured.valid and np.isfinite(measured.width) and measured.width > 0.0:
         return float(measured.t_center), float(measured.width)
@@ -491,14 +494,16 @@ def fspl_template_initial_guesses(
 ) -> tuple[np.ndarray, ...]:
     """Return FSPL seeds ranked by direct chi-square on the original flux.
 
-    The default route uses the observed brightening duration.  For each
+    The default route uses the direct observed FWHM brightening duration.  For each
     crossing-time factor it builds the transit grid
     ``rho x (u0/rho) x t0-width-offset`` and evaluates every candidate with
     profiled ``Fs`` and ``Fb``.  With the benchmark defaults this is
     ``5 * 4 * 3 * 3 = 180`` seeds.  A supplied ``pspl_params`` is used only
     to locate the observed interval; the PSPL residual is never used as a
-    template.  ``fit`` may expose ``observed_signal_scale`` to reuse a scale
-    already measured by the detector.
+    template.  If the direct FWHM is unresolved, the legacy PSPL-width
+    fallback is retained only as a final initialization safety net.  ``fit``
+    may expose ``observed_signal_scale`` to reuse a scale already measured by
+    the detector.
 
     The legacy PSPL-centered keyword grid remains available when one of its
     legacy grid arguments is explicitly changed.  This preserves callers of

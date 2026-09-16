@@ -610,6 +610,62 @@ def test_fspl_template_initial_guesses_default_to_duration_grid(monkeypatch):
     np.testing.assert_allclose(guesses[0][0], 9.95)
 
 
+def test_fspl_template_initial_guesses_uses_direct_observed_fwhm(monkeypatch):
+    native = pytest.importorskip("jacscanomaly._vbm_cpp")
+    if not hasattr(native, "score_fspl_seeds"):
+        pytest.skip("The batch FSPL scorer is not available.")
+    captured = {}
+
+    def fake_fwhm(time, flux, **kwargs):
+        captured["time"] = np.asarray(time, dtype=float).copy()
+        captured["kwargs"] = kwargs
+        return ObservedSignalScale(
+            t_center=10.0,
+            t_left=9.9,
+            t_right=10.1,
+            half_width=0.1,
+            cadence=0.1,
+            n_points=len(time),
+            n_weighted_points=5,
+            left_coverage=1.0,
+            right_coverage=1.0,
+            asymmetry=1.0,
+        )
+
+    def fake_score(time, flux, ferr, seeds, **kwargs):
+        captured["seeds"] = np.asarray(seeds, dtype=float).copy()
+        return np.arange(captured["seeds"].shape[0], dtype=float)
+
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization.measure_observed_magnification_fwhm",
+        fake_fwhm,
+    )
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization._vbm_cpp.score_fspl_seeds",
+        fake_score,
+    )
+    time = np.linspace(9.0, 11.0, 21)
+    fit = SimpleNamespace(
+        time=time,
+        flux=np.ones_like(time),
+        ferr=np.full_like(time, 0.01),
+        params=np.asarray([10.0, 2.0, 0.2]),
+    )
+
+    guesses = fspl_template_initial_guesses(fit, top_k=1)
+
+    assert len(guesses) == 1
+    assert captured["kwargs"]["source"] == "observed_magnification_fwhm"
+    assert captured["seeds"].shape == (180, 4)
+    np.testing.assert_allclose(guesses[0], captured["seeds"][0])
+    np.testing.assert_allclose(
+        np.unique(captured["seeds"][:, 0]),
+        [9.95, 10.0, 10.05],
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
 def test_fspl_fitter_calls_duration_initializer_when_p0_is_missing(monkeypatch):
     time = np.linspace(-5.0, 5.0, 81)
     seed = np.asarray([0.0, 2.0, 0.2, np.log(0.3)])
