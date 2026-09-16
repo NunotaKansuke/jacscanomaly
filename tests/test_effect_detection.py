@@ -52,15 +52,17 @@ def _morphology_fit(time, params, standardized_residual):
     )
 
 
-def test_fast_morphology_scores_short_fspl_from_rmdc_like_shape():
+def test_fast_morphology_scores_short_fspl_from_five_lobe_shape():
     time = np.linspace(-5.0, 5.0, 6001)
     params = np.asarray([0.0, 0.06, 0.38])
     rng = np.random.default_rng(3008)
     z = 0.08 * rng.normal(size=time.size)
     z += (
-        8.0 * np.exp(-0.5 * ((time + 0.045) / 0.015) ** 2)
+        -8.0 * np.exp(-0.5 * ((time + 0.08) / 0.01) ** 2)
+        + 8.0 * np.exp(-0.5 * ((time + 0.045) / 0.015) ** 2)
         - 10.0 * np.exp(-0.5 * (time / 0.012) ** 2)
         + 8.0 * np.exp(-0.5 * ((time - 0.045) / 0.015) ** 2)
+        - 8.0 * np.exp(-0.5 * ((time - 0.08) / 0.01) ** 2)
     )
 
     scores = compute_effect_morphology_scores(_morphology_fit(time, params, z))

@@ -110,7 +110,7 @@ class EffectMorphologyScores:
     """Cheap morphology scores computed directly from a PSPL fit.
 
     ``fspl_score`` is the maximum of a compactness score and the signed
-    ``+ - +`` residual-shape score.  ``parallax_score`` requires residual
+    ``- + - + -`` residual-shape score.  ``parallax_score`` requires residual
     support spread over time, then boosts that score when the PSPL brightening
     is long.  In particular, a large residual amplitude is not penalized: a
     very long event with a strong but broad residual is intentionally kept.
@@ -915,6 +915,205 @@ def _coherent_support_mask(
     return coherent
 
 
+def _fspl_signed_support_topology(
+    time: np.ndarray,
+    standardized_residual: np.ndarray,
+    support: np.ndarray,
+    *,
+    t0: float,
+    residual_center: float,
+    residual_width: float,
+    cadence: float,
+    shape_sigma: float,
+) -> float:
+    """Score ordered signed support with the FSPL ``- + - + -`` topology."""
+    t = np.asarray(time, dtype=float).reshape(-1)
+    z = np.asarray(standardized_residual, dtype=float).reshape(-1)
+    support_mask = np.asarray(support, dtype=bool).reshape(-1)
+    if t.size != z.size or t.size != support_mask.size:
+        raise ValueError("time, residual, and support must have equal lengths.")
+    use = support_mask & np.isfinite(t) & np.isfinite(z)
+    indices = np.flatnonzero(use)
+    if indices.size < 6:
+        return 0.0
+
+    cadence_value = float(cadence)
+    cadence_scale = (
+        max(cadence_value, 1.0e-12)
+        if np.isfinite(cadence_value) and cadence_value > 0.0
+        else 1.0e-12
+    )
+    gap_limit = (
+        max(3.0 * cadence_value, 1.0e-6)
+        if np.isfinite(cadence_value) and cadence_value > 0.0
+        else np.inf
+    )
+    support_times = t[indices]
+    support_signs = np.sign(z[indices])
+    breaks = np.flatnonzero(
+        (np.diff(support_times) > gap_limit)
+        | (support_signs[1:] != support_signs[:-1])
+    )
+    starts = np.r_[0, breaks + 1]
+    ends = np.r_[breaks + 1, indices.size]
+    runs: list[dict[str, float | int]] = []
+    for start, end in zip(starts, ends):
+        if end - start < 2:
+            continue
+        run_indices = indices[start:end]
+        run_values = z[run_indices]
+        run_median = float(np.median(run_values))
+        runs.append(
+            {
+                "sign": float(np.sign(run_median)),
+                "center": float(np.median(t[run_indices])),
+                "lo": float(t[run_indices[0]]),
+                "hi": float(t[run_indices[-1]]),
+                "value": run_median,
+                "count": int(run_indices.size),
+            }
+        )
+    if len(runs) < 3:
+        return 0.0
+
+    def distance_to_t0(run: dict[str, float | int]) -> float:
+        lo = float(run["lo"])
+        hi = float(run["hi"])
+        if lo <= float(t0) <= hi:
+            return 0.0
+        return min(abs(float(t0) - lo), abs(float(t0) - hi))
+
+    negative_runs = [run for run in runs if float(run["sign"]) < 0.0]
+    if not negative_runs:
+        return 0.0
+    central = min(negative_runs, key=distance_to_t0)
+    central_limit = max(
+        float(residual_width) if np.isfinite(residual_width) else 0.0,
+        5.0 * cadence_scale,
+    )
+    if distance_to_t0(central) > central_limit:
+        return 0.0
+
+    central_lo = float(central["lo"])
+    central_hi = float(central["hi"])
+    left_positive_candidates = [
+        run
+        for run in runs
+        if float(run["sign"]) > 0.0 and float(run["hi"]) < central_lo
+    ]
+    right_positive_candidates = [
+        run
+        for run in runs
+        if float(run["sign"]) > 0.0 and float(run["lo"]) > central_hi
+    ]
+    left_positive = (
+        max(left_positive_candidates, key=lambda run: float(run["center"]))
+        if left_positive_candidates
+        else None
+    )
+    right_positive = (
+        min(right_positive_candidates, key=lambda run: float(run["center"]))
+        if right_positive_candidates
+        else None
+    )
+    if left_positive is None or right_positive is None:
+        return 0.0
+
+    left_outer_candidates = [
+        run
+        for run in negative_runs
+        if float(run["hi"]) < float(left_positive["lo"])
+    ]
+    right_outer_candidates = [
+        run
+        for run in negative_runs
+        if float(run["lo"]) > float(right_positive["hi"])
+    ]
+    left_outer = (
+        max(left_outer_candidates, key=lambda run: float(run["center"]))
+        if left_outer_candidates
+        else None
+    )
+    right_outer = (
+        min(right_outer_candidates, key=lambda run: float(run["center"]))
+        if right_outer_candidates
+        else None
+    )
+
+    def run_score(run: dict[str, float | int], expected_sign: float) -> float:
+        strength = _ramp(
+            expected_sign * float(run["value"]),
+            1.0,
+            float(shape_sigma),
+        )
+        count_score = min(1.0, float(run["count"]) / 3.0)
+        return strength * count_score
+
+    def pair_symmetry(
+        left_run: dict[str, float | int],
+        right_run: dict[str, float | int],
+        *,
+        center: float,
+        value: bool,
+    ) -> float:
+        if value:
+            left_value = abs(float(left_run["value"]))
+            right_value = abs(float(right_run["value"]))
+            denominator = max(left_value + right_value, 1.0e-12)
+            difference = abs(left_value - right_value)
+        else:
+            left_distance = center - float(left_run["center"])
+            right_distance = float(right_run["center"]) - center
+            denominator = max(left_distance + right_distance, 1.0e-12)
+            difference = abs(left_distance - right_distance)
+        return float(np.clip(1.0 - difference / denominator, 0.0, 1.0))
+
+    inner_scores = np.asarray(
+        [
+            run_score(left_positive, 1.0),
+            run_score(central, -1.0),
+            run_score(right_positive, 1.0),
+        ],
+        dtype=float,
+    )
+    inner_count_score = min(
+        1.0,
+        min(
+            float(left_positive["count"]),
+            float(central["count"]),
+            float(right_positive["count"]),
+        )
+        / 3.0,
+    )
+    inner_score = float(
+        np.prod(inner_scores)
+        * pair_symmetry(left_positive, right_positive, center=float(t0), value=True)
+        * pair_symmetry(left_positive, right_positive, center=float(t0), value=False)
+        * inner_count_score
+        * np.exp(
+            -0.5
+            * (
+                abs(float(residual_center) - float(t0))
+                / max(central_limit, cadence_scale)
+            )
+            ** 2
+        )
+    )
+
+    outer_score = 0.0
+    if left_outer is not None and right_outer is not None:
+        outer_score = float(
+            run_score(left_outer, -1.0)
+            * run_score(right_outer, -1.0)
+            * pair_symmetry(left_outer, right_outer, center=float(t0), value=True)
+            * pair_symmetry(left_outer, right_outer, center=float(t0), value=False)
+        )
+    # Keep a partial central pattern useful when the observing window cuts off
+    # one or both outer wings, but give the complete five-lobe pattern the full
+    # weight.
+    return float(np.clip(inner_score * (0.5 + 0.5 * outer_score), 0.0, 1.0))
+
+
 def compute_effect_morphology_scores(
     fit,
     *,
@@ -927,7 +1126,8 @@ def compute_effect_morphology_scores(
     optimizer.  It is intended for the first-stage ``detect_effects`` gate:
 
     * FSPL gets an ``OR`` score from a very short PSPL brightening or a
-      signed positive/negative/positive residual around the PSPL peak.
+      signed negative/positive/negative/positive/negative residual around the
+      PSPL peak.
     * parallax requires temporally broad residual support.  Long PSPL events
       boost that score, but neither short events nor large residual amplitude
       are hard vetoes.
@@ -1101,48 +1301,19 @@ def compute_effect_morphology_scores(
         cfg.fspl_short_days_soft,
     ) * residual_evidence
 
-    # Signed FSPL topology: positive shoulders, negative centre.  The window
-    # is learned from the observed residual width, not from rho or a template
-    # bank, so this remains cheap and works when only a few cadence points land
-    # on the crossing.
-    fspl_shape_score = 0.0
-    if residual_width > 0.0 and np.isfinite(residual_center):
-        shape_half_width = max(0.5 * residual_width, 2.0 * cadence_floor)
-        dt = t - model_center
-        core = np.abs(dt) <= 0.5 * shape_half_width
-        left = (dt < -0.5 * shape_half_width) & (dt >= -1.5 * shape_half_width)
-        right = (dt > 0.5 * shape_half_width) & (dt <= 1.5 * shape_half_width)
-        core_mean = _median_for_mask(z, core)
-        left_mean = _median_for_mask(z, left)
-        right_mean = _median_for_mask(z, right)
-        if np.all(np.isfinite([core_mean, left_mean, right_mean])):
-            positive = min(left_mean, right_mean)
-            positive_score = _ramp(positive, 1.0, cfg.fspl_shape_sigma)
-            negative_score = _ramp(-core_mean, 1.0, cfg.fspl_shape_sigma)
-            symmetry = float(
-                np.clip(
-                    1.0 - abs(left_mean - right_mean)
-                    / max(abs(left_mean) + abs(right_mean), 1.0e-12),
-                    0.0,
-                    1.0,
-                )
-            )
-            count_score = min(
-                1.0,
-                min(np.count_nonzero(core), np.count_nonzero(left), np.count_nonzero(right))
-                / 3.0,
-            )
-            centre_offset = abs(float(residual_center) - model_center)
-            centre_score = float(
-                np.exp(-0.5 * (centre_offset / max(shape_half_width, cadence_floor)) ** 2)
-            )
-            fspl_shape_score = (
-                positive_score
-                * negative_score
-                * symmetry
-                * count_score
-                * centre_score
-            )
+    # Signed FSPL topology: negative outer wings, positive shoulders, and a
+    # negative centre.  The support mask excludes weak/isolated points, while
+    # the run-based score allows the five lobes to have unequal spacing.
+    fspl_shape_score = _fspl_signed_support_topology(
+        t,
+        z,
+        support,
+        t0=model_center,
+        residual_center=residual_center,
+        residual_width=residual_width,
+        cadence=cadence,
+        shape_sigma=cfg.fspl_shape_sigma,
+    )
     fspl_score = float(np.clip(max(short_score, fspl_shape_score), 0.0, 1.0))
 
     # Longness uses both the measured PSPL envelope and tE.  The latter keeps
