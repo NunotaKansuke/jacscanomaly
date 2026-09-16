@@ -11,6 +11,7 @@ from jacscanomaly import Finder, FinderConfig, FSPLFitter, ObservedSignalScale
 from jacscanomaly.effect_detection import (
     EffectCandidate,
     EffectMorphologyConfig,
+    ParallaxSupport,
     _fspl_sparse_high_snr_topology,
     _fspl_signed_topology,
     _pspl_nuisance_and_parallax_jacobians,
@@ -21,6 +22,7 @@ from jacscanomaly.effect_detection import (
     compute_effect_morphology_scores,
     detect_fspl_from_pspl_fit,
     find_compact_blocks,
+    measure_parallax_support,
     parallax_score_test,
     project_out_nuisance,
 )
@@ -39,17 +41,21 @@ from jacscanomaly import parallax
 from jacscanomaly.trajectory import make_parallax_projector
 
 
-def _morphology_fit(time, params, standardized_residual):
+def _morphology_fit(time, params, standardized_residual, *, flux=None, ferr=None):
     time = np.asarray(time, dtype=float)
     z = np.asarray(standardized_residual, dtype=float)
-    return SimpleNamespace(
+    ferr_array = np.ones_like(time) if ferr is None else np.asarray(ferr, dtype=float)
+    values = dict(
         time=time,
         residual=z,
-        ferr=np.ones_like(time),
+        ferr=ferr_array,
         params=np.asarray(params, dtype=float),
         fs=1.0,
         fb=0.0,
     )
+    if flux is not None:
+        values["flux"] = np.asarray(flux, dtype=float)
+    return SimpleNamespace(**values)
 
 
 def test_fast_morphology_scores_short_fspl_from_five_lobe_shape():
@@ -90,8 +96,79 @@ def test_fast_morphology_scores_broad_strong_parallax_without_amplitude_veto():
     assert broad_scores.parallax_long_score > 0.9
     assert broad_scores.parallax_strong_broad_score > 0.8
     assert broad_scores.parallax_score > 0.8
-    assert compact_scores.parallax_score < 0.2
+    # A genuinely long event is deliberately sent to a bounded parallax
+    # comparison even when this particular residual is compact.  The residual
+    # branch itself must remain quiet.
+    assert compact_scores.parallax_long_score > 0.9
+    assert compact_scores.parallax_residual_score < 0.2
+    assert compact_scores.parallax_score > 0.8
     assert broad_scores.fspl_short_score == pytest.approx(0.0)
+
+
+def test_duration_policy_uses_observed_fwhm_for_short_fspl_probe():
+    time = np.linspace(-30.0, 30.0, 2401)
+    flux = 1.0 + 10.0 * np.exp(-0.5 * (time / 1.0) ** 2)
+    scores = compute_effect_morphology_scores(
+        _morphology_fit(
+            time,
+            np.asarray([0.0, 40.0, 0.2]),
+            np.zeros_like(time),
+            flux=flux,
+            ferr=np.full_like(time, 0.02),
+        )
+    )
+
+    assert scores.event_width_source == "observed_fwhm"
+    assert scores.event_width < 3.0
+    assert scores.fspl_short_score > 0.99
+    assert scores.fspl_score > 0.99
+    assert scores.parallax_score == pytest.approx(0.0)
+
+
+def test_duration_policy_sends_long_event_to_parallax_without_residual_shape():
+    time = np.linspace(-200.0, 200.0, 4001)
+    scores = compute_effect_morphology_scores(
+        _morphology_fit(
+            time,
+            np.asarray([0.0, 120.0, 0.2]),
+            np.zeros_like(time),
+        )
+    )
+
+    assert scores.event_width_source == "pspl_tE_half_fallback"
+    assert scores.event_width == pytest.approx(60.0)
+    assert scores.parallax_long_score > 0.99
+    assert scores.parallax_residual_score == pytest.approx(0.0)
+    assert scores.parallax_score > 0.99
+
+
+def test_intermediate_duration_uses_residual_shape_for_effect_choice():
+    time = np.linspace(-80.0, 80.0, 16001)
+    params = np.asarray([0.0, 30.0, 0.35])
+    fspl_like = (
+        -8.0 * np.exp(-0.5 * ((time + 0.08) / 0.01) ** 2)
+        + 8.0 * np.exp(-0.5 * ((time + 0.045) / 0.015) ** 2)
+        - 10.0 * np.exp(-0.5 * (time / 0.012) ** 2)
+        + 8.0 * np.exp(-0.5 * ((time - 0.045) / 0.015) ** 2)
+        - 8.0 * np.exp(-0.5 * ((time - 0.08) / 0.01) ** 2)
+    )
+    parallax_like = 8.0 * np.exp(-0.5 * (time / 14.0) ** 2)
+
+    fspl_scores = compute_effect_morphology_scores(
+        _morphology_fit(time, params, fspl_like)
+    )
+    parallax_scores = compute_effect_morphology_scores(
+        _morphology_fit(time, params, parallax_like)
+    )
+
+    assert fspl_scores.event_width == pytest.approx(15.0)
+    assert fspl_scores.intermediate_duration_score > 0.99
+    assert fspl_scores.fspl_residual_score > 0.8
+    assert fspl_scores.parallax_score < 0.2
+    assert parallax_scores.intermediate_duration_score > 0.99
+    assert parallax_scores.parallax_long_score == pytest.approx(0.0)
+    assert parallax_scores.parallax_residual_score > 0.8
+    assert parallax_scores.parallax_score > 0.8
 
 
 def test_fast_morphology_scores_accumulate_weak_broad_residuals():
@@ -440,6 +517,74 @@ def test_parallax_direction_reversal_is_unstable():
     assert "subset_unstable" in candidate.reason_codes
 
 
+def test_parallax_support_span_survives_a_gap_at_t0():
+    """A long, broad residual does not require an observation at t0."""
+    time = np.r_[
+        np.arange(-60.0, -5.0, 0.25),
+        np.arange(5.0, 60.01, 0.25),
+    ]
+    residual = 3.0 * np.exp(-0.5 * (time / 22.0) ** 2)
+
+    support = measure_parallax_support(
+        time,
+        residual,
+        center=0.0,
+        n_bins=48,
+        clip_sigma=5.0,
+    )
+
+    assert support.valid
+    assert support.center_gap
+    assert support.center_gap_days >= 10.0
+    assert not support.censored
+    assert support.span > 20.0
+    assert support.n_active_blocks >= 2
+    assert support.effective_blocks >= 2.0
+
+
+def test_parallax_support_rejects_one_compact_block():
+    time = np.linspace(-60.0, 60.0, 481)
+    residual = np.zeros_like(time)
+    residual[np.abs(time - 1.0) < 0.35] = 12.0
+
+    support = measure_parallax_support(
+        time,
+        residual,
+        center=0.0,
+        n_bins=48,
+        clip_sigma=5.0,
+    )
+
+    assert not support.valid
+    assert support.reason in {"no_broad_block_excess", "too_few_active_blocks"}
+
+
+def test_parallax_candidate_reports_center_gap_without_invalidating_support():
+    time = np.r_[
+        np.arange(-60.0, -5.0, 0.25),
+        np.arange(5.0, 60.01, 0.25),
+    ]
+    envelope = np.exp(-0.5 * (time / 24.0) ** 2)
+    nuisance = np.column_stack([np.ones_like(time), time])
+    tangent = np.column_stack([envelope, time * envelope / 24.0])
+    residual = tangent @ np.asarray([3.0, -0.7])
+
+    candidate = parallax_score_test(
+        time,
+        residual,
+        nuisance,
+        tangent,
+        seed_parameters=np.asarray([0.0, 60.0, 0.1]),
+        compact_sigma=100.0,
+    )
+
+    assert candidate.parallax_support is not None
+    assert candidate.parallax_support.valid
+    assert candidate.parallax_support.center_gap
+    assert "parallax_center_gap" in candidate.reason_codes
+    assert "parallax_support_unresolved" not in candidate.reason_codes
+
+
 def test_compact_block_helper_does_not_remove_broad_residual():
     time = np.linspace(0.0, 20.0, 101)
     z = np.full_like(time, 6.0)
@@ -656,6 +801,7 @@ def test_fspl_template_initial_guesses_uses_direct_observed_fwhm(monkeypatch):
 
     assert len(guesses) == 1
     assert captured["kwargs"]["source"] == "observed_magnification_fwhm"
+    np.testing.assert_allclose(captured["kwargs"]["flux_err"], fit.ferr)
     assert captured["seeds"].shape == (180, 4)
     np.testing.assert_allclose(guesses[0], captured["seeds"][0])
     np.testing.assert_allclose(
@@ -836,6 +982,96 @@ def test_short_event_parallax_needs_exact_comparison_even_with_coherent_wings():
 
     assert routed.decision == "exact_probe"
     assert "short_event_parallax_requires_model_comparison" in routed.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("effect", "diagnostics", "reason"),
+    [
+        (
+            "fspl",
+            {"fspl_short_score": 1.0, "fspl_residual_score": 0.0},
+            "short_duration_fspl_exact_probe",
+        ),
+        (
+            "annual_parallax",
+            {"parallax_long_score": 1.0, "parallax_residual_score": 0.0},
+            "long_duration_parallax_exact_probe",
+        ),
+        (
+            "fspl",
+            {"fspl_short_score": 0.0, "fspl_residual_score": 0.8},
+            "fspl_residual_shape_exact_probe",
+        ),
+        (
+            "annual_parallax",
+            {"parallax_long_score": 0.0, "parallax_residual_score": 0.8},
+            "parallax_residual_shape_exact_probe",
+        ),
+    ],
+)
+def test_duration_policy_runs_exact_probe_before_physical_score_cut(
+    effect, diagnostics, reason
+):
+    candidate = EffectCandidate(
+        effect=effect,
+        score=0.0,
+        score_without_compact_blocks=0.0,
+        effective_rank=2,
+        condition_number=4.0,
+        coverage=0.8,
+        max_point_influence=0.1,
+        max_block_influence=0.2,
+        subset_stability=0.9,
+        morphology_diagnostics=diagnostics,
+    )
+
+    routed = route_candidate(candidate)
+
+    assert routed.decision == "exact_probe"
+    assert reason in routed.reason_codes
+
+
+def test_parallax_routing_uses_broad_support_not_peak_fwhm():
+    support = ParallaxSupport(
+        t_center=0.0,
+        t_left=-35.0,
+        t_right=35.0,
+        span=70.0,
+        cadence=0.25,
+        n_points=400,
+        n_occupied_blocks=40,
+        n_active_blocks=10,
+        effective_blocks=5.0,
+        support_fraction=0.25,
+        evidence=8.0,
+        excess=60.0,
+        center_gap=True,
+        center_gap_days=12.0,
+        censored=True,
+    )
+    candidate = EffectCandidate(
+        effect="annual_parallax",
+        score=100.0,
+        score_without_compact_blocks=90.0,
+        effective_rank=2,
+        condition_number=10.0,
+        coverage=0.8,
+        max_point_influence=0.1,
+        max_block_influence=0.2,
+        subset_stability=0.9,
+        seed_parameters=np.asarray([0.0, 80.0, 0.1]),
+        morphology="parallax_coherent_wings",
+        reason_codes=("parallax_center_gap", "parallax_support_edge_touch"),
+        observed_signal_scale=ObservedSignalScale.invalid(
+            reason="empty_peak_region"
+        ),
+        parallax_support=support,
+    )
+
+    routed = route_candidate(candidate)
+
+    assert routed.decision == "fallback"
+    assert "short_event_parallax_requires_model_comparison" not in routed.reason_codes
 
 
 def test_low_score_coherent_long_parallax_gets_a_bounded_fit_rescue():

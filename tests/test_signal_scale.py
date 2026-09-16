@@ -31,8 +31,43 @@ def test_direct_magnification_fwhm_uses_raw_points_and_local_component():
     assert scale.n_weighted_points >= 3
 
 
+def test_direct_magnification_fwhm_uses_baseline_side_for_snr():
+    time = np.linspace(-1.0, 1.0, 401)
+    sigma = 0.4
+    flux = 1.0 + 4.0 * np.exp(-0.5 * (time / sigma) ** 2)
+    flux_err = np.full_like(flux, 0.01)
+
+    scale = measure_observed_magnification_fwhm(
+        time,
+        flux,
+        flux_err=flux_err,
+        center=0.0,
+        search_half_width=1.0,
+    )
+
+    # The event occupies much of this window.  The full-profile MAD would
+    # incorrectly treat the deterministic rise and fall as noise and reject
+    # this otherwise well-resolved 3-sigma signal.
+    assert scale.valid
+    assert scale.reason == "ok"
+    assert 0.7 < scale.width < 1.0
+
+
+def test_direct_magnification_fwhm_rejects_mismatched_flux_errors():
+    time = np.linspace(-1.0, 1.0, 21)
+    flux = np.ones_like(time)
+
+    with pytest.raises(ValueError, match="flux_err"):
+        measure_observed_magnification_fwhm(
+            time,
+            flux,
+            flux_err=np.ones(time.size - 1),
+            center=0.0,
+        )
+
+
 def test_direct_magnification_fwhm_marks_single_point_peak_unresolved():
-    time = np.arange(-5.0, 5.001, 0.01)
+    time = np.linspace(-5.0, 5.0, 1001)
     flux = np.ones_like(time)
     flux[time == 0.0] = 10.0
 
@@ -41,10 +76,12 @@ def test_direct_magnification_fwhm_marks_single_point_peak_unresolved():
         flux,
         center=0.0,
         search_half_width=5.0,
+        peak_points=1,
     )
 
     assert not scale.valid
     assert scale.censored
+    assert scale.reason == "no_contiguous_half_run_ge_3"
 
 
 def test_magnification_scale_uses_local_raw_run_for_unresolved_peak():

@@ -71,3 +71,28 @@ def test_canonical_fspl_fitter_uses_compiled_magnification():
     assert "compiled_magnification" in fit.optimizer_status
     np.testing.assert_allclose(np.asarray(fit.params), truth, atol=1.0e-6)
     assert float(fit.chi2) < 1.0e-10
+
+
+def test_fspl_fit_is_stable_for_large_absolute_event_times():
+    from jacscanomaly import FSPLFitter
+
+    # This reproduces the scale separation in the raw RMDC data: a short event
+    # is represented on a full BJD axis around 2,463,106.
+    truth = np.asarray([2463106.48, 0.06, 0.376, 1.02])
+    time = np.linspace(truth[0] - 0.4, truth[0] + 0.4, 401)
+    fitter = FSPLFitter(maxiter=500, tol=1.0e-10)
+    q_truth_local = np.asarray([0.0, truth[1], truth[2], np.log(truth[3])])
+    magnification = fitter._magnification(time - truth[0], q_truth_local)
+    flux = 1.7 * magnification + 0.2
+    fit = fitter.fit(
+        time,
+        flux,
+        np.full_like(time, 0.01),
+        [truth[0] - 0.01, 0.0675, 0.05, 0.0],
+    )
+
+    assert fit.optimizer_success
+    fitted = np.asarray(fit.params)
+    np.testing.assert_allclose(fitted[[0, 1, 3]], truth[[0, 1, 3]], atol=1.0e-5)
+    np.testing.assert_allclose(abs(fitted[2]), truth[2], atol=1.0e-5)
+    assert float(fit.chi2) < 1.0e-8

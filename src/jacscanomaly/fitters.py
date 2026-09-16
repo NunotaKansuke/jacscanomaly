@@ -413,12 +413,22 @@ class FSPLFitter:
             raise ValueError("FSPL p0 must contain (t0, tE, u0, logrho).")
         if not np.all(np.isfinite(q0)) or q0[1] == 0.0:
             raise ValueError("FSPL p0 must be finite and have nonzero tE.")
-        z0 = np.asarray([q0[0], np.log(abs(q0[1])), q0[2], q0[3]], dtype=float)
+
+        # Keep the optimizer's t0 coordinate close to zero.  SciPy's default
+        # finite-difference step is proportional to max(1, abs(x0)); using an
+        # absolute BJD/HJD here can therefore make the first t0 derivative
+        # many days wide.  The old explicit relative step had the opposite
+        # problem for coordinates at zero (notably logrho=0), where it fell
+        # back to a machine-scale perturbation.  Evaluate the model in the
+        # translated time frame and restore the public t0 below.
+        time_origin = float(q0[0])
+        fit_time = time_np - time_origin
+        z0 = np.asarray([0.0, np.log(abs(q0[1])), q0[2], q0[3]], dtype=float)
 
         def residual(z):
             q = self._decode(z)
             try:
-                magnification = self._magnification(time_np, q)
+                magnification = self._magnification(fit_time, q)
                 fs, fb = _solve_fs_fb_numpy(magnification, flux_np, ferr_np)
                 if not np.isfinite(fs) or not np.isfinite(fb):
                     raise ValueError
@@ -435,13 +445,9 @@ class FSPLFitter:
                 np.asarray(start, dtype=float),
                 maxiter=self.maxiter,
                 tol=self.tol,
-                # ESPL table interpolation is accurate but not smooth at the
-                # scale of SciPy's default finite-difference step.  A
-                # deliberate relative step keeps LM derivatives informative
-                # near a source crossing while retaining the same optimizer.
-                diff_step=1.0e-3,
             )
             q = self._decode(np.asarray(result.x, dtype=float))
+            q[0] += time_origin
             values = residual(np.asarray(result.x, dtype=float))
             return result, q, float(np.dot(values, values))
 

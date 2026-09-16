@@ -29,10 +29,18 @@ class RoutingThresholds:
     min_subset_stability: float = 0.25
     min_planet_mask_retention: float = 0.50
     max_planet_overlap: float = 0.35
-    min_parallax_scale_cadences: float = 6.0
-    """Minimum observed signal width, in cadence intervals, for parallax."""
+    min_parallax_support_effective_blocks: float = 2.0
+    """Minimum effective broad-residual blocks for parallax support."""
+    min_parallax_support_evidence: float = 2.0
+    """Minimum block-level null-excess significance for automatic fallback."""
+    min_parallax_support_span_days: float = 7.0
+    """Minimum non-local residual span for automatic parallax fallback."""
     min_parallax_fallback_tE: float = 20.0
     """Legacy fallback when a manually constructed candidate has no scale."""
+    duration_probe_score: float = 0.999
+    """Morphology score denoting an unconditional short/long exact probe."""
+    residual_probe_score: float = 0.50
+    """Residual-shape score needed to probe an intermediate-duration event."""
     coherent_parallax_rescue_score: float = 4.0
     allow_rank_deficient_exact_probe: bool = True
     exact_probe_available: bool = False
@@ -117,24 +125,38 @@ def route_candidate(
             and planet_mask_conflict
         )
     )
+    parallax_support = candidate.parallax_support
+    parallax_support_available = bool(
+        "parallax" in candidate.effect
+        and parallax_support is not None
+        and parallax_support.valid
+    )
+    parallax_support_ok = bool(
+        parallax_support_available
+        and np.isfinite(parallax_support.effective_blocks)
+        and parallax_support.effective_blocks
+        >= thresholds.min_parallax_support_effective_blocks
+        and np.isfinite(parallax_support.evidence)
+        and parallax_support.evidence >= thresholds.min_parallax_support_evidence
+        and np.isfinite(parallax_support.span)
+        and parallax_support.span >= thresholds.min_parallax_support_span_days
+    )
     morphology_uncertain = (
         "non_fspl_peak_shape" in candidate.reason_codes
         or "parallax_wings_incoherent" in candidate.reason_codes
         or "parallax_too_local" in candidate.reason_codes
-        or "signal_scale_censored" in candidate.reason_codes
-        or "signal_scale_unmeasurable" in candidate.reason_codes
+        or "parallax_support_unresolved" in candidate.reason_codes
+        or (
+            "parallax" not in candidate.effect
+            and "signal_scale_censored" in candidate.reason_codes
+        )
+        or (
+            "parallax" not in candidate.effect
+            and "signal_scale_unmeasurable" in candidate.reason_codes
+        )
         or candidate.morphology == "mixed_or_planet"
         or candidate.morphology == "fspl_partial_peak"
         or parallax_planet_conflict
-    )
-    observed_scale = candidate.observed_signal_scale
-    parallax_scale_points = (
-        float(observed_scale.points_per_width)
-        if observed_scale is not None and observed_scale.valid
-        else float("nan")
-    )
-    scale_available = bool(
-        observed_scale is not None and observed_scale.valid
     )
     parallax_tE = (
         abs(float(np.asarray(candidate.seed_parameters).reshape(-1)[1]))
@@ -146,13 +168,12 @@ def route_candidate(
         else float("nan")
     )
     short_parallax_event = bool(
-        (scale_available and (
-            observed_scale.censored
-            or not np.isfinite(parallax_scale_points)
-            or parallax_scale_points < thresholds.min_parallax_scale_cadences
-        ))
+        (
+            parallax_support is not None
+            and not parallax_support_ok
+        )
         or (
-            not scale_available
+            parallax_support is None
             and np.isfinite(parallax_tE)
             and parallax_tE < thresholds.min_parallax_fallback_tE
         )
@@ -161,23 +182,60 @@ def route_candidate(
         "parallax" in candidate.effect
         and candidate.morphology == "parallax_coherent_wings"
         and (
-            (
-                scale_available
-                and not observed_scale.censored
-                and np.isfinite(parallax_scale_points)
-                and parallax_scale_points >= thresholds.min_parallax_scale_cadences
-            )
+            parallax_support_ok
             or (
-                not scale_available
+                parallax_support is None
                 and np.isfinite(parallax_tE)
                 and parallax_tE >= thresholds.min_parallax_fallback_tE
             )
         )
         and score >= thresholds.coherent_parallax_rescue_score
     )
+    morphology_diagnostics = candidate.morphology_diagnostics or {}
+    if candidate.effect == "fspl":
+        duration_probe_score = float(
+            morphology_diagnostics.get("fspl_short_score", 0.0)
+        )
+        residual_probe_score = float(
+            morphology_diagnostics.get("fspl_residual_score", 0.0)
+        )
+        duration_probe_reason = "short_duration_fspl_exact_probe"
+        residual_probe_reason = "fspl_residual_shape_exact_probe"
+    elif "parallax" in candidate.effect:
+        duration_probe_score = float(
+            morphology_diagnostics.get("parallax_long_score", 0.0)
+        )
+        residual_probe_score = float(
+            morphology_diagnostics.get("parallax_residual_score", 0.0)
+        )
+        duration_probe_reason = "long_duration_parallax_exact_probe"
+        residual_probe_reason = "parallax_residual_shape_exact_probe"
+    else:
+        duration_probe_score = 0.0
+        residual_probe_score = 0.0
+        duration_probe_reason = "duration_exact_probe"
+        residual_probe_reason = "residual_shape_exact_probe"
+    duration_probe = bool(
+        np.isfinite(duration_probe_score)
+        and duration_probe_score >= thresholds.duration_probe_score
+    )
+    residual_probe = bool(
+        np.isfinite(residual_probe_score)
+        and residual_probe_score >= thresholds.residual_probe_score
+    )
     if planet_dominated:
         decision = "planet"
         reasons.append("routed_as_planet_anomaly")
+    elif duration_probe or residual_probe:
+        # Duration is a deliberately broad recall gate: run a bounded exact
+        # comparison, but do not promote the candidate to the expensive
+        # robust fallback until the physical score and diagnostics agree.
+        decision = "exact_probe"
+        reasons.append(
+            duration_probe_reason if duration_probe else residual_probe_reason
+        )
+        if not thresholds.exact_probe_available:
+            reasons.append("exact_probe_unavailable")
     elif (
         score < thresholds.exact_probe_score
         and robust_score < thresholds.exact_probe_score

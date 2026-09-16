@@ -323,6 +323,12 @@ def _coerce_observed_scale(value: Any) -> Optional[ObservedSignalScale]:
             valid=bool(value.get("valid", True)),
             censored=bool(value.get("censored", False)),
             source=str(value.get("source", "observed_scale")),
+            reason=str(
+                value.get(
+                    "reason",
+                    "ok" if bool(value.get("valid", True)) else "unresolved",
+                )
+            ),
         )
     if all(hasattr(value, name) for name in ("t_center", "width", "valid")):
         return value
@@ -353,6 +359,7 @@ def _observed_duration_scale(
     time: np.ndarray,
     flux: np.ndarray,
     *,
+    flux_err: Optional[np.ndarray],
     pspl_params: Optional[np.ndarray],
     observed_scale: Optional[ObservedSignalScale],
 ) -> Optional[tuple[float, float]]:
@@ -393,6 +400,7 @@ def _observed_duration_scale(
     measured = measure_observed_magnification_fwhm(
         time,
         flux,
+        flux_err=flux_err,
         center=center,
         search_half_width=search_half_width,
         min_points=3,
@@ -544,6 +552,7 @@ def fspl_template_initial_guesses(
     duration_scale = _observed_duration_scale(
         time,
         flux,
+        flux_err=ferr,
         pspl_params=pspl,
         observed_scale=supplied_scale,
     )

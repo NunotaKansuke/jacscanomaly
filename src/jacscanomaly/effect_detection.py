@@ -20,7 +20,11 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
-from .signal_scale import ObservedSignalScale, measure_observed_signal_scale
+from .signal_scale import (
+    ObservedSignalScale,
+    measure_observed_magnification_fwhm,
+    measure_observed_signal_scale,
+)
 
 
 def _json_safe(value):
@@ -81,26 +85,28 @@ class EffectMorphologyConfig:
     parallax_block_effective_bins_hard: float = 4.0
     parallax_block_clip_sigma: float = 5.0
 
-    # A short PSPL brightening is the first FSPL cue.  The soft interval avoids
-    # a brittle yes/no cut for sparse cadence.
-    # RMDC26 event 3008 has a PSPL brightening width of about 0.42 d at the
-    # F146 cadence.  Use that as the hard end of the "very short" branch and
-    # keep a soft tail so the score is not a discontinuous event veto.
-    fspl_short_days: float = 0.50
-    fspl_short_days_soft: float = 2.0
+    # The duration policy is deliberately a *probe* policy, not a detection
+    # claim.  Every light curve with a directly short brightening should get
+    # the cheap FSPL model comparison; a successful physical fit still has to
+    # pass the conservative router.  Three days is the RMDC working boundary
+    # chosen from the short-event calibration, with a small shoulder for a
+    # cadence-limited FWHM estimate.
+    fspl_short_days: float = 3.0
+    fspl_short_days_soft: float = 5.0
     # Kept as a diagnostic threshold for downstream calibration.  It is not
     # used as the primary FSPL shortness score.
     fspl_short_ratio: float = 0.25
     fspl_short_ratio_soft: float = 0.60
     fspl_shape_sigma: float = 2.5
 
-    # RMDC-like long-event scale.  The score is continuous over this interval
-    # and does not veto short events; broad residual support is still allowed
-    # to produce a parallax score for a short event.
-    parallax_long_days_soft: float = 10.0
-    parallax_long_days: float = 45.0
-    parallax_broad_days_soft: float = 1.0
-    parallax_broad_days: float = 8.0
+    # Conversely, a clearly long brightening should get a parallax probe even
+    # when a seasonal gap hides t0.  The 30--50 d shoulder avoids making the
+    # boundary brittle.  Residual morphology is reserved for the interval
+    # between the short- and long-duration branches.
+    parallax_long_days_soft: float = 30.0
+    parallax_long_days: float = 50.0
+    parallax_broad_days_soft: float = 7.0
+    parallax_broad_days: float = 20.0
     parallax_broad_ratio_soft: float = 0.15
     parallax_broad_ratio: float = 0.45
 
@@ -134,13 +140,18 @@ class EffectMorphologyScores:
     residual_profile_effective_bins: float
     model_censored: bool
     residual_censored: bool
+    event_width: float
+    event_width_source: str
     fspl_short_score: float
     fspl_shape_score: float
+    fspl_residual_score: float
     fspl_score: float
     parallax_long_score: float
     parallax_broad_score: float
     parallax_weak_broad_score: float
     parallax_strong_broad_score: float
+    parallax_residual_score: float
+    intermediate_duration_score: float
     parallax_score: float
     residual_block_width: float = 0.0
     residual_block_width_ratio: float = 0.0
@@ -179,15 +190,107 @@ class EffectMorphologyScores:
             "residual_block_evidence": float(self.residual_block_evidence),
             "model_censored": bool(self.model_censored),
             "residual_censored": bool(self.residual_censored),
+            "event_width_days": float(self.event_width),
+            "event_width_source": str(self.event_width_source),
             "fspl_short_score": float(self.fspl_short_score),
             "fspl_shape_score": float(self.fspl_shape_score),
+            "fspl_residual_score": float(self.fspl_residual_score),
             "fspl_score": float(self.fspl_score),
             "parallax_long_score": float(self.parallax_long_score),
             "parallax_broad_score": float(self.parallax_broad_score),
             "parallax_weak_broad_score": float(self.parallax_weak_broad_score),
             "parallax_strong_broad_score": float(self.parallax_strong_broad_score),
+            "parallax_residual_score": float(self.parallax_residual_score),
+            "intermediate_duration_score": float(
+                self.intermediate_duration_score
+            ),
             "parallax_block_score": float(self.parallax_block_score),
             "parallax_score": float(self.parallax_score),
+        }
+
+
+@dataclass(frozen=True)
+class ParallaxSupport:
+    """Data-supported temporal extent of a broad parallax residual.
+
+    This is intentionally *not* an event FWHM.  It measures the central
+    80-percent span of the positive block-level residual evidence after a
+    PSPL fit.  A gap around the fitted ``t0`` and support touching an edge of
+    the observing window are both recorded as diagnostics, not eligibility
+    vetoes: annual or space parallax is constrained mainly by temporally
+    separated wings.
+    """
+
+    t_center: float
+    t_left: float
+    t_right: float
+    span: float
+    cadence: float
+    n_points: int
+    n_occupied_blocks: int
+    n_active_blocks: int
+    effective_blocks: float
+    support_fraction: float
+    evidence: float
+    excess: float
+    center_gap: bool = False
+    center_gap_days: float = 0.0
+    valid: bool = True
+    censored: bool = False
+    source: str = "projected_pspl_residual"
+    reason: str = "ok"
+
+    @classmethod
+    def invalid(
+        cls,
+        *,
+        source: str = "projected_pspl_residual",
+        reason: str = "unresolved",
+        center_gap: bool = False,
+        center_gap_days: float = 0.0,
+    ) -> "ParallaxSupport":
+        nan = float("nan")
+        return cls(
+            t_center=nan,
+            t_left=nan,
+            t_right=nan,
+            span=nan,
+            cadence=nan,
+            n_points=0,
+            n_occupied_blocks=0,
+            n_active_blocks=0,
+            effective_blocks=0.0,
+            support_fraction=0.0,
+            evidence=0.0,
+            excess=0.0,
+            center_gap=bool(center_gap),
+            center_gap_days=float(center_gap_days),
+            valid=False,
+            censored=False,
+            source=str(source),
+            reason=str(reason),
+        )
+
+    def summary_dict(self) -> dict[str, object]:
+        return {
+            "t_center": float(self.t_center),
+            "t_left": float(self.t_left),
+            "t_right": float(self.t_right),
+            "support_span_days": float(self.span),
+            "cadence_days": float(self.cadence),
+            "n_points": int(self.n_points),
+            "n_occupied_blocks": int(self.n_occupied_blocks),
+            "n_active_blocks": int(self.n_active_blocks),
+            "effective_blocks": float(self.effective_blocks),
+            "support_fraction": float(self.support_fraction),
+            "evidence": float(self.evidence),
+            "excess": float(self.excess),
+            "center_gap": bool(self.center_gap),
+            "center_gap_days": float(self.center_gap_days),
+            "valid": bool(self.valid),
+            "censored": bool(self.censored),
+            "source": str(self.source),
+            "reason": str(self.reason),
         }
 
 
@@ -220,6 +323,7 @@ class EffectCandidate:
     planet_overlap: float = 0.0
     morphology: str = "unclassified"
     observed_signal_scale: Optional[ObservedSignalScale] = None
+    parallax_support: Optional[ParallaxSupport] = None
     morphology_score: float = float("nan")
     morphology_diagnostics: Optional[dict[str, object]] = None
 
@@ -252,6 +356,7 @@ class EffectCandidate:
             planet_overlap=float(self.planet_overlap),
             morphology=str(self.morphology),
             observed_signal_scale=self.observed_signal_scale,
+            parallax_support=self.parallax_support,
             morphology_score=float(self.morphology_score),
             morphology_diagnostics=None
             if self.morphology_diagnostics is None
@@ -288,6 +393,7 @@ class EffectCandidate:
             planet_overlap=self.planet_overlap,
             morphology=self.morphology,
             observed_signal_scale=self.observed_signal_scale,
+            parallax_support=self.parallax_support,
             morphology_score=float(self.morphology_score),
             morphology_diagnostics=None
             if self.morphology_diagnostics is None
@@ -330,6 +436,11 @@ class EffectCandidate:
                 None
                 if self.observed_signal_scale is None
                 else self.observed_signal_scale.summary_dict()
+            ),
+            "parallax_support": (
+                None
+                if self.parallax_support is None
+                else self.parallax_support.summary_dict()
             ),
             "decision": self.decision,
             "reason_codes": list(self.reason_codes),
@@ -780,31 +891,41 @@ def _profile_residual_morphology(
     return width, support_fraction, effective_bins, n_active, profile_evidence
 
 
-def _signed_block_residual_morphology(
+def measure_parallax_support(
     time: np.ndarray,
     standardized_residual: np.ndarray,
     *,
+    center: Optional[float] = None,
+    valid_mask: Optional[np.ndarray] = None,
     n_bins: int,
     clip_sigma: float,
-) -> tuple[float, float, float, float, float]:
-    """Accumulate weak, signed residuals over broad time blocks.
+) -> ParallaxSupport:
+    """Measure broad, data-supported residual extent for parallax routing.
 
     A parallax residual can be much smaller than one per-point sigma while
     remaining coherent over thousands of observations.  For each equal-time
     block, estimate its signed mean and compare it with the standard error of
     that mean.  The total block statistic is compared with its null
-    expectation, rather than thresholding individual points.  A clipped mean
-    keeps one bad datum from manufacturing a broad signal.
+    expectation rather than thresholding individual points.  The returned
+    support span is a weighted time interval of *observed residual evidence*;
+    no value is interpolated through a cadence or seasonal gap.
 
-    Returns ``(width, support_fraction, effective_bins, evidence, excess)``.
-    ``evidence`` is the approximate normal-equivalent excess significance of
-    the block chi-square, and ``excess`` is retained for diagnostics.
+    ``center`` is optional and only records whether a fitted ``t0`` falls in
+    an observational gap.  It is not an eligibility requirement.
     """
     t = np.asarray(time, dtype=float).reshape(-1)
     z = np.asarray(standardized_residual, dtype=float).reshape(-1)
-    valid = np.isfinite(t) & np.isfinite(z)
+    if t.size != z.size:
+        raise ValueError("time and standardized_residual must have the same length.")
+    if valid_mask is None:
+        valid = np.ones(t.size, dtype=bool)
+    else:
+        valid = np.asarray(valid_mask, dtype=bool).reshape(-1)
+        if valid.size != t.size:
+            raise ValueError("valid_mask must have the same length as time.")
+    valid &= np.isfinite(t) & np.isfinite(z)
     if np.count_nonzero(valid) < 8:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
+        return ParallaxSupport.invalid(reason="too_few_finite_points")
     tv = t[valid]
     zv = z[valid]
     order = np.argsort(tv)
@@ -812,7 +933,35 @@ def _signed_block_residual_morphology(
     zv = zv[order]
     left, right = float(tv[0]), float(tv[-1])
     if not np.isfinite(left) or not np.isfinite(right) or right <= left:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
+        return ParallaxSupport.invalid(reason="nonpositive_time_span")
+
+    positive_steps = np.diff(tv)
+    positive_steps = positive_steps[
+        np.isfinite(positive_steps) & (positive_steps > 0.0)
+    ]
+    cadence = (
+        float(np.median(positive_steps))
+        if positive_steps.size
+        else float("nan")
+    )
+    center_gap = False
+    center_gap_days = 0.0
+    if center is not None and np.isfinite(center):
+        nearest = float(np.min(np.abs(tv - float(center))))
+        center_tolerance = max(
+            0.5 * cadence if np.isfinite(cadence) and cadence > 0.0 else 0.0,
+            np.finfo(float).eps,
+        )
+        if nearest > center_tolerance:
+            insertion = int(np.searchsorted(tv, float(center), side="left"))
+            if 0 < insertion < tv.size:
+                center_gap_days = float(tv[insertion] - tv[insertion - 1])
+                center_gap = bool(
+                    center_gap_days
+                    > max(3.0 * cadence, np.finfo(float).eps)
+                    if np.isfinite(cadence) and cadence > 0.0
+                    else center_gap_days > 0.0
+                )
 
     bins = max(8, min(int(n_bins), int(max(8, 2 * np.sqrt(tv.size)))))
     edges = np.linspace(left, right, bins + 1)
@@ -840,7 +989,11 @@ def _signed_block_residual_morphology(
 
     occupied_count = int(np.count_nonzero(occupied))
     if occupied_count < 2:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
+        return ParallaxSupport.invalid(
+            reason="too_few_occupied_blocks",
+            center_gap=center_gap,
+            center_gap_days=center_gap_days,
+        )
     q2 = block_q2[occupied]
     expected = float(occupied_count)
     total = float(np.sum(q2))
@@ -858,20 +1011,113 @@ def _signed_block_residual_morphology(
         if weight_total > 0.0 and np.sum(weights * weights) > 0.0
         else 0.0
     )
-    if weight_total <= 0.0:
-        return 0.0, support_fraction, effective_bins, evidence, excess
+    if weight_total <= 0.0 or active_count < 2:
+        return ParallaxSupport(
+            t_center=float("nan"),
+            t_left=float("nan"),
+            t_right=float("nan"),
+            span=float("nan"),
+            cadence=cadence,
+            n_points=int(tv.size),
+            n_occupied_blocks=occupied_count,
+            n_active_blocks=active_count,
+            effective_blocks=effective_bins,
+            support_fraction=support_fraction,
+            evidence=evidence,
+            excess=excess,
+            center_gap=center_gap,
+            center_gap_days=center_gap_days,
+            valid=False,
+            censored=False,
+            reason=(
+                "no_broad_block_excess"
+                if weight_total <= 0.0
+                else "too_few_active_blocks"
+            ),
+        )
     block_left, block_right, _ = _weighted_interval(
         centers[active],
         weights[active],
         low=0.10,
         high=0.90,
     )
-    width = (
+    span = (
         max(float(block_right - block_left), 0.0)
         if np.isfinite(block_left) and np.isfinite(block_right)
-        else 0.0
+        else float("nan")
     )
-    return width, support_fraction, effective_bins, evidence, excess
+    if not np.isfinite(span) or span <= 0.0:
+        return ParallaxSupport(
+            t_center=float("nan"),
+            t_left=float(block_left),
+            t_right=float(block_right),
+            span=float("nan"),
+            cadence=cadence,
+            n_points=int(tv.size),
+            n_occupied_blocks=occupied_count,
+            n_active_blocks=active_count,
+            effective_blocks=effective_bins,
+            support_fraction=support_fraction,
+            evidence=evidence,
+            excess=excess,
+            center_gap=center_gap,
+            center_gap_days=center_gap_days,
+            valid=False,
+            censored=False,
+            reason="nonpositive_support_span",
+        )
+    support_center, _, _ = _weighted_interval(
+        centers[active],
+        weights[active],
+        low=0.50,
+        high=0.50,
+    )
+    active_indices = np.flatnonzero(active)
+    occupied_indices = np.flatnonzero(occupied)
+    return ParallaxSupport(
+        t_center=float(support_center),
+        t_left=float(block_left),
+        t_right=float(block_right),
+        span=float(span),
+        cadence=cadence,
+        n_points=int(tv.size),
+        n_occupied_blocks=occupied_count,
+        n_active_blocks=active_count,
+        effective_blocks=effective_bins,
+        support_fraction=support_fraction,
+        evidence=evidence,
+        excess=excess,
+        center_gap=center_gap,
+        center_gap_days=center_gap_days,
+        valid=True,
+        censored=bool(
+            active_indices[0] == occupied_indices[0]
+            or active_indices[-1] == occupied_indices[-1]
+        ),
+    )
+
+
+def _signed_block_residual_morphology(
+    time: np.ndarray,
+    standardized_residual: np.ndarray,
+    *,
+    n_bins: int,
+    clip_sigma: float,
+) -> tuple[float, float, float, float, float]:
+    """Compatibility adapter for morphology-score block diagnostics."""
+    support = measure_parallax_support(
+        time,
+        standardized_residual,
+        n_bins=n_bins,
+        clip_sigma=clip_sigma,
+    )
+    return (
+        float(support.span) if support.valid else 0.0,
+        float(support.support_fraction),
+        float(support.effective_blocks),
+        float(support.evidence),
+        float(support.excess),
+    )
 
 
 def _coherent_support_mask(
@@ -1125,12 +1371,13 @@ def compute_effect_morphology_scores(
     profile with ``B`` bins) and does not call VBMicrolensing, JAX, SVD, or an
     optimizer.  It is intended for the first-stage ``detect_effects`` gate:
 
-    * FSPL gets an ``OR`` score from a very short PSPL brightening or a
-      signed negative/positive/negative/positive/negative residual around the
-      PSPL peak.
-    * parallax requires temporally broad residual support.  Long PSPL events
-      boost that score, but neither short events nor large residual amplitude
-      are hard vetoes.
+    * FSPL is an automatic exact-probe candidate for an observed FWHM below
+      the short-duration boundary.  In the intermediate range, its signed
+      negative/positive/negative/positive/negative residual topology is the
+      additional route into the probe.
+    * Parallax is an automatic exact-probe candidate for a long brightening.
+      In the intermediate range, only temporally broad residual support can
+      route it into the probe.
 
     The returned values are deliberately separate from the physical
     projected-Delta-chi-square scores, so routing calibration remains intact.
@@ -1167,13 +1414,18 @@ def compute_effect_morphology_scores(
             residual_profile_effective_bins=0.0,
             model_censored=True,
             residual_censored=False,
+            event_width=nan,
+            event_width_source="unresolved",
             fspl_short_score=0.0,
             fspl_shape_score=0.0,
+            fspl_residual_score=0.0,
             fspl_score=0.0,
             parallax_long_score=0.0,
             parallax_broad_score=0.0,
             parallax_weak_broad_score=0.0,
             parallax_strong_broad_score=0.0,
+            parallax_residual_score=0.0,
+            intermediate_duration_score=0.0,
             parallax_score=0.0,
         )
 
@@ -1215,6 +1467,35 @@ def compute_effect_morphology_scores(
         np.any(model_active)
         and (model_active[0] or model_active[-1])
     )
+
+    # The duration branches use an observed FWHM whenever possible.  That is
+    # the quantity that matters for whether a light curve looks short or long
+    # to the survey, rather than a potentially degenerate PSPL tE.  A seasonal
+    # gap can make that FWHM unresolved; in that case use a clearly labelled
+    # PSPL timescale fallback solely to decide which inexpensive exact probe to
+    # run.  It is never reported as an observed FWHM.
+    observed_fwhm = ObservedSignalScale.invalid(
+        source="observed_magnification_fwhm",
+        reason="fit_has_no_flux",
+    )
+    flux = getattr(fit, "flux", None)
+    if flux is not None:
+        flux_array = np.asarray(flux, dtype=float).reshape(-1)
+        if flux_array.size == time.size:
+            observed_fwhm = measure_observed_magnification_fwhm(
+                time,
+                flux_array,
+                center=float(params[0]),
+                valid_mask=valid,
+                flux_err=ferr,
+                source="observed_magnification_fwhm",
+            )
+    if observed_fwhm.valid and np.isfinite(observed_fwhm.half_width):
+        event_width = max(2.0 * float(observed_fwhm.half_width), 0.0)
+        event_width_source = "observed_fwhm"
+    else:
+        event_width = max(0.5 * abs(float(params[1])), 0.0)
+        event_width_source = "pspl_tE_half_fallback"
 
     residual_peak_z = float(np.nanmax(np.abs(z))) if z.size else 0.0
     floor = float(cfg.residual_sigma)
@@ -1296,10 +1577,10 @@ def compute_effect_morphology_scores(
     )
     residual_evidence = max(point_residual_evidence, profile_evidence)
     short_score = _decreasing_ramp(
-        model_width,
+        event_width,
         cfg.fspl_short_days,
         cfg.fspl_short_days_soft,
-    ) * residual_evidence
+    )
 
     # Signed FSPL topology: negative outer wings, positive shoulders, and a
     # negative centre.  The support mask excludes weak/isolated points, while
@@ -1314,18 +1595,30 @@ def compute_effect_morphology_scores(
         cadence=cadence,
         shape_sigma=cfg.fspl_shape_sigma,
     )
-    fspl_score = float(np.clip(max(short_score, fspl_shape_score), 0.0, 1.0))
-
-    # Longness uses both the measured PSPL envelope and tE.  The latter keeps
-    # high-magnification events with a narrow peak from being called short
-    # merely because |u0| is small.
-    tE = abs(float(params[1]))
-    event_duration = max(
-        float(model_width) if np.isfinite(model_width) else 0.0,
-        0.5 * tE,
+    # Shape is useful only when duration has not already selected an automatic
+    # short/long probe.  This protects the middle range without turning an
+    # arbitrary narrow residual in a very long event into an FSPL request.
+    intermediate_duration_score = float(
+        np.clip(
+            min(
+                _ramp(event_width, cfg.fspl_short_days, 2.0 * cfg.fspl_short_days),
+                _decreasing_ramp(
+                    event_width,
+                    cfg.parallax_long_days_soft,
+                    cfg.parallax_long_days,
+                ),
+            ),
+            0.0,
+            1.0,
+        )
     )
+    fspl_residual_score = float(
+        np.clip(fspl_shape_score * intermediate_duration_score, 0.0, 1.0)
+    )
+    fspl_score = float(np.clip(max(short_score, fspl_residual_score), 0.0, 1.0))
+
     parallax_long_score = _ramp(
-        event_duration,
+        event_width,
         cfg.parallax_long_days_soft,
         cfg.parallax_long_days,
     )
@@ -1387,25 +1680,25 @@ def compute_effect_morphology_scores(
         np.clip(max(profile_broad_score, parallax_block_score), 0.0, 1.0)
     )
     strong_amplitude = _ramp(residual_peak_z, 5.0, 12.0)
-    parallax_weak_broad_score = float(
+    parallax_weak_broad_score = parallax_block_score
+    parallax_strong_broad_score = float(
         np.clip(
-            parallax_block_score * (0.55 + 0.45 * parallax_long_score),
+            parallax_broad_score * strong_amplitude,
             0.0,
             1.0,
         )
     )
-    parallax_strong_broad_score = float(
+    parallax_residual_score = float(
         np.clip(
-            parallax_broad_score
-            * strong_amplitude
-            * (0.55 + 0.45 * parallax_long_score),
+            max(parallax_weak_broad_score, parallax_strong_broad_score)
+            * intermediate_duration_score,
             0.0,
             1.0,
         )
     )
     parallax_score = float(
         np.clip(
-            max(parallax_weak_broad_score, parallax_strong_broad_score),
+            max(parallax_long_score, parallax_residual_score),
             0.0,
             1.0,
         )
@@ -1425,13 +1718,18 @@ def compute_effect_morphology_scores(
         residual_profile_effective_bins=float(profile_effective_bins),
         model_censored=model_censored,
         residual_censored=residual_censored,
+        event_width=float(event_width),
+        event_width_source=event_width_source,
         fspl_short_score=float(np.clip(short_score, 0.0, 1.0)),
         fspl_shape_score=float(np.clip(fspl_shape_score, 0.0, 1.0)),
+        fspl_residual_score=fspl_residual_score,
         fspl_score=fspl_score,
         parallax_long_score=float(np.clip(parallax_long_score, 0.0, 1.0)),
         parallax_broad_score=float(np.clip(parallax_broad_score, 0.0, 1.0)),
         parallax_weak_broad_score=parallax_weak_broad_score,
         parallax_strong_broad_score=parallax_strong_broad_score,
+        parallax_residual_score=parallax_residual_score,
+        intermediate_duration_score=intermediate_duration_score,
         parallax_score=parallax_score,
         residual_block_width=float(block_width),
         residual_block_width_ratio=float(block_width_ratio),
@@ -1953,6 +2251,22 @@ def parallax_score_test(
     fitted = np.zeros_like(z)
     fitted[indices] = Hp @ beta
     score = float(b @ beta)
+    projected_residual = np.full_like(z, np.nan)
+    projected_residual[indices] = zp
+    support_center = (
+        float(np.asarray(seed_parameters, dtype=float).reshape(-1)[0])
+        if seed_parameters is not None
+        and np.asarray(seed_parameters, dtype=float).size >= 1
+        else None
+    )
+    parallax_support = measure_parallax_support(
+        t,
+        projected_residual,
+        center=support_center,
+        valid_mask=all_mask & ~planet,
+        n_bins=96,
+        clip_sigma=5.0,
+    )
     energy = fitted * fitted
     observed_scale = measure_observed_signal_scale(
         t,
@@ -2081,11 +2395,9 @@ def parallax_score_test(
         if observed_scale.valid and observed_scale.width > 0.0
         else float("nan")
     )
-    signal_scale_ok = bool(
-        observed_scale.valid
-        and not observed_scale.censored
-        and np.isfinite(observed_scale.points_per_width)
-        and observed_scale.points_per_width >= 6.0
+    support_ok = bool(
+        parallax_support.valid
+        and parallax_support.effective_blocks >= 2.0
     )
     subset_rows.append(
         {
@@ -2094,13 +2406,14 @@ def parallax_score_test(
             "duration_over_signal_scale": duration_over_signal_scale,
             "signal_scale_points_per_width": observed_scale.points_per_width,
             "signal_scale_censored": observed_scale.censored,
+            "parallax_support": parallax_support.summary_dict(),
             "wing_coherent": wing_coherent,
-            "valid": bool(wing_coherent and signal_scale_ok),
+            "valid": bool(wing_coherent and support_ok),
             "reason": (
                 "broad_coherent_distortion"
-                if wing_coherent and signal_scale_ok
-                else "signal_scale_censored"
-                if observed_scale.censored
+                if wing_coherent and support_ok
+                else "parallax_support_unresolved"
+                if not parallax_support.valid
                 else "local_or_incoherent_distortion"
             ),
         }
@@ -2124,12 +2437,14 @@ def parallax_score_test(
         reasons.append("planet_morphology_dominated")
     if seed_parameters is not None and not wing_coherent:
         reasons.append("parallax_wings_incoherent")
-    if observed_scale.censored:
-        reasons.append("signal_scale_censored")
-    elif not observed_scale.valid:
-        reasons.append("signal_scale_unmeasurable")
-    elif not signal_scale_ok:
+    if parallax_support.censored:
+        reasons.append("parallax_support_edge_touch")
+    if not parallax_support.valid:
+        reasons.append("parallax_support_unresolved")
+    elif not support_ok:
         reasons.append("parallax_too_local")
+    if parallax_support.center_gap:
+        reasons.append("parallax_center_gap")
     if stability < 0.25:
         reasons.append("subset_unstable")
     if not reasons:
@@ -2160,7 +2475,7 @@ def parallax_score_test(
         planet_overlap=planet_overlap,
         morphology=(
             "parallax_coherent_wings"
-            if wing_coherent and signal_scale_ok
+            if wing_coherent and support_ok
             else "planet_like"
             if (
                 "planet_morphology_dominated" in reasons
@@ -2171,6 +2486,7 @@ def parallax_score_test(
             else "ambiguous"
         ),
         observed_signal_scale=observed_scale,
+        parallax_support=parallax_support,
     )
 
 
@@ -2783,6 +3099,7 @@ __all__ = [
     "EffectCandidate",
     "EffectMorphologyConfig",
     "EffectMorphologyScores",
+    "ParallaxSupport",
     "ProjectionDiagnostics",
     "build_fspl_template_bank",
     "detect_fspl_from_pspl_fit",
@@ -2790,6 +3107,7 @@ __all__ = [
     "detect_physical_effects",
     "compute_effect_morphology_scores",
     "find_compact_blocks",
+    "measure_parallax_support",
     "parallax_score_test",
     "project_out_nuisance",
 ]

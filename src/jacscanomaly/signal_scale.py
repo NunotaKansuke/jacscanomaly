@@ -39,9 +39,15 @@ class ObservedSignalScale:
     valid: bool = True
     censored: bool = False
     source: str = "observed_residual"
+    reason: str = "ok"
 
     @classmethod
-    def invalid(cls, *, source: str = "observed_residual") -> "ObservedSignalScale":
+    def invalid(
+        cls,
+        *,
+        source: str = "observed_residual",
+        reason: str = "unresolved",
+    ) -> "ObservedSignalScale":
         """Return a stable empty value for an unmeasurable signal."""
         nan = float("nan")
         return cls(
@@ -58,6 +64,7 @@ class ObservedSignalScale:
             valid=False,
             censored=True,
             source=str(source),
+            reason=str(reason),
         )
 
     @property
@@ -95,6 +102,7 @@ class ObservedSignalScale:
             "valid": bool(self.valid),
             "censored": bool(self.censored),
             "source": str(self.source),
+            "reason": str(self.reason),
         }
 
 
@@ -697,6 +705,7 @@ def measure_observed_magnification_fwhm(
     *,
     center: float,
     valid_mask: Optional[np.ndarray] = None,
+    flux_err: Optional[np.ndarray] = None,
     search_half_width: float = 300.0,
     baseline_quantile: float = 0.20,
     peak_points: int = 5,
@@ -711,9 +720,13 @@ def measure_observed_magnification_fwhm(
     a lower flux quantile in the local search window.  The
     peak is the median of the brightest few points, which avoids letting one
     outlier set the half-maximum level.  The width is measured at half of the
-    *excess* above baseline, not at half of the absolute flux.  Only a
-    contiguous run around the requested centre is accepted; an isolated
-    excursion elsewhere in the window cannot define the event width.
+    *excess* above baseline, not at half of the absolute flux.  When
+    ``flux_err`` is supplied, the peak-S/N gate uses the larger of the median
+    baseline-side measurement error and the robust scatter of the low-flux
+    baseline points.  It therefore does not mistake the event's own changing
+    profile for noise.  Without ``flux_err``, the baseline-side scatter is
+    used.  Only a contiguous run around the requested centre is accepted; an
+    isolated excursion elsewhere in the window cannot define the event width.
 
     A run must contain at least ``min_points`` observations.  If the direct
     FWHM cannot be resolved, an invalid scale is returned so the caller can
@@ -723,7 +736,10 @@ def measure_observed_magnification_fwhm(
     t = np.asarray(time, dtype=float).reshape(-1)
     y = np.asarray(flux, dtype=float).reshape(-1)
     if t.size != y.size or t.size == 0 or not np.isfinite(center):
-        return ObservedSignalScale.invalid(source=source)
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason="invalid_input",
+        )
     if valid_mask is None:
         valid = np.ones(t.size, dtype=bool)
     else:
@@ -731,19 +747,34 @@ def measure_observed_magnification_fwhm(
         if valid.size != t.size:
             raise ValueError("valid_mask must have the same length as time.")
     valid &= np.isfinite(t) & np.isfinite(y)
+    if flux_err is None:
+        ferr = None
+    else:
+        ferr = np.asarray(flux_err, dtype=float).reshape(-1)
+        if ferr.size != t.size:
+            raise ValueError("flux_err must have the same length as time.")
     half_search = max(float(search_half_width), 1.0)
     valid &= np.abs(t - float(center)) <= half_search
     if np.count_nonzero(valid) < max(int(min_points) + 2, 8):
-        return ObservedSignalScale.invalid(source=source)
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason="too_few_local_points",
+        )
 
     tv = t[valid]
     yv = y[valid]
+    ev = ferr[valid] if ferr is not None else None
     order = np.argsort(tv, kind="stable")
     tv = tv[order]
     yv = yv[order]
+    if ev is not None:
+        ev = ev[order]
     data_left, data_right = float(tv[0]), float(tv[-1])
     if data_right <= data_left:
-        return ObservedSignalScale.invalid(source=source)
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason="nonpositive_time_span",
+        )
 
     cadence_values = np.diff(tv)
     positive_cadence = cadence_values[
@@ -755,12 +786,14 @@ def measure_observed_magnification_fwhm(
         else float("nan")
     )
     if not np.isfinite(cadence) or cadence <= 0.0:
-        return ObservedSignalScale.invalid(source=source)
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason="invalid_cadence",
+        )
 
     baseline = float(
         np.nanpercentile(yv, float(baseline_quantile) * 100.0)
     )
-    noise = 1.4826 * float(np.nanmedian(np.abs(yv - np.nanmedian(yv))))
     # Estimate the peak locally around the PSPL centre.  Using the brightest
     # points in the whole search window would let a stronger, unrelated
     # excursion determine the central event's half-maximum level.
@@ -771,16 +804,50 @@ def measure_observed_magnification_fwhm(
     peak_region = np.abs(tv - float(center)) <= peak_anchor_half_width
     peak_values = yv[peak_region]
     if peak_values.size < 1:
-        return ObservedSignalScale.invalid(source=source)
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason="empty_peak_region",
+        )
     n_peak = max(1, min(int(peak_points), peak_values.size))
     brightest = np.partition(peak_values, peak_values.size - n_peak)[-n_peak:]
     peak = float(np.nanmedian(brightest))
     peak_excess = peak - baseline
     if not np.isfinite(peak_excess) or peak_excess <= 0.0:
-        return ObservedSignalScale.invalid(source=source)
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason="nonpositive_peak_excess",
+        )
+
+    # Estimate noise from the baseline side of the flux distribution.  The
+    # full local MAD is invalid here: for a broad event, its deterministic
+    # rise and fall can dominate the scatter and suppress the true S/N.
+    baseline_side = yv <= np.nanpercentile(yv, 50.0)
+    baseline_values = yv[baseline_side]
+    baseline_noise = 1.4826 * float(
+        np.nanmedian(
+            np.abs(baseline_values - np.nanmedian(baseline_values))
+        )
+    )
+    error_noise = float("nan")
+    if ev is not None:
+        baseline_errors = ev[baseline_side]
+        baseline_errors = baseline_errors[
+            np.isfinite(baseline_errors) & (baseline_errors > 0.0)
+        ]
+        if baseline_errors.size:
+            error_noise = float(np.nanmedian(baseline_errors))
+    noise_candidates = [
+        value
+        for value in (baseline_noise, error_noise)
+        if np.isfinite(value) and value > 0.0
+    ]
+    noise = max(noise_candidates) if noise_candidates else float("nan")
     if np.isfinite(noise) and noise > 0.0:
         if peak_excess < max(float(min_peak_snr), 0.0) * noise:
-            return ObservedSignalScale.invalid(source=source)
+            return ObservedSignalScale.invalid(
+                source=source,
+                reason="peak_snr_below_threshold",
+            )
 
     half_level = baseline + 0.5 * peak_excess
     above = yv >= half_level
@@ -790,9 +857,17 @@ def measure_observed_magnification_fwhm(
         max_gap=max(float(max_gap_cadences), 0.0) * cadence,
     )
     min_run_points = max(int(min_points), 2)
+    if not np.any(above):
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason="no_above_half_points",
+        )
     runs = tuple(run for run in runs if run.size >= min_run_points)
     if not runs:
-        return ObservedSignalScale.invalid(source=source)
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason=f"no_contiguous_half_run_ge_{min_run_points}",
+        )
 
     center_index = int(np.argmin(np.abs(tv - float(center))))
     selected_run = _run_containing(runs, center_index)
@@ -807,7 +882,10 @@ def measure_observed_magnification_fwhm(
             <= anchor_tolerance
         ]
         if not eligible:
-            return ObservedSignalScale.invalid(source=source)
+            return ObservedSignalScale.invalid(
+                source=source,
+                reason="no_half_run_near_center",
+            )
         selected_run = max(
             eligible,
             key=lambda run: float(np.max(yv[run])),
@@ -832,7 +910,10 @@ def measure_observed_magnification_fwhm(
     t_left = float(tv[first]) if touches_left else crossing(first - 1, first)
     t_right = float(tv[last]) if touches_right else crossing(last, last + 1)
     if not np.isfinite(t_left + t_right) or t_right <= t_left:
-        return ObservedSignalScale.invalid(source=source)
+        return ObservedSignalScale.invalid(
+            source=source,
+            reason="invalid_half_max_crossing",
+        )
 
     t_center = 0.5 * (t_left + t_right)
     left_span = max(t_center - t_left, 0.0)
@@ -858,6 +939,7 @@ def measure_observed_magnification_fwhm(
             or t_right >= data_right - edge
         ),
         source=str(source),
+        reason="ok",
     )
 
 
