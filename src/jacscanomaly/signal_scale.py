@@ -707,7 +707,8 @@ def measure_observed_magnification_fwhm(
 ) -> ObservedSignalScale:
     """Measure a direct, observed FWHM without time binning.
 
-    The baseline is a lower flux quantile in the local search window.  The
+    ``time`` and ``flux`` must describe one photometric band.  The baseline is
+    a lower flux quantile in the local search window.  The
     peak is the median of the brightest few points, which avoids letting one
     outlier set the half-maximum level.  The width is measured at half of the
     *excess* above baseline, not at half of the absolute flux.  Only a

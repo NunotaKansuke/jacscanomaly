@@ -666,6 +666,41 @@ def test_fspl_template_initial_guesses_uses_direct_observed_fwhm(monkeypatch):
     )
 
 
+def test_fspl_template_initial_guesses_does_not_label_pspl_scale_as_observed(
+    monkeypatch,
+):
+    captured = {}
+    legacy_seed = np.asarray([10.0, 2.0, 0.2, np.log(0.3)])
+
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization.measure_observed_magnification_fwhm",
+        lambda *args, **kwargs: ObservedSignalScale.invalid(
+            source="observed_magnification_fwhm"
+        ),
+    )
+
+    def fake_legacy(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return (legacy_seed.copy(),)
+
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization._legacy_fspl_template_initial_guesses",
+        fake_legacy,
+    )
+    time = np.linspace(9.0, 11.0, 21)
+    fit = SimpleNamespace(
+        time=time,
+        flux=np.ones_like(time),
+        ferr=np.full_like(time, 0.01),
+        params=np.asarray([10.0, 2.0, 0.2]),
+    )
+
+    guesses = fspl_template_initial_guesses(fit, top_k=1)
+
+    np.testing.assert_allclose(guesses[0], legacy_seed)
+    assert captured["kwargs"]["top_k"] == 1
+
+
 def test_fspl_fitter_calls_duration_initializer_when_p0_is_missing(monkeypatch):
     time = np.linspace(-5.0, 5.0, 81)
     seed = np.asarray([0.0, 2.0, 0.2, np.log(0.3)])

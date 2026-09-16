@@ -349,41 +349,20 @@ def _extract_pspl_parameters(
     return np.asarray(params[:3], dtype=float)
 
 
-def _fallback_duration_scale(
-    time: np.ndarray,
-    flux: np.ndarray,
-    pspl_params: Optional[np.ndarray],
-) -> tuple[float, float]:
-    """Return a conservative scale if the observed-width measurement fails."""
-    finite = np.isfinite(time) & np.isfinite(flux)
-    if not np.any(finite):
-        raise RuntimeError("FSPL initialization has no finite observations.")
-    tv = np.asarray(time[finite], dtype=float)
-    yv = np.asarray(flux[finite], dtype=float)
-    if pspl_params is None:
-        center = float(tv[int(np.nanargmax(yv))])
-    else:
-        center = float(pspl_params[0])
-
-    steps = np.diff(np.sort(tv))
-    steps = steps[np.isfinite(steps) & (steps > 0.0)]
-    cadence = float(np.median(steps)) if steps.size else 1.0
-    if pspl_params is not None and np.isfinite(pspl_params[1]):
-        width = 2.0 * abs(float(pspl_params[1])) * max(abs(float(pspl_params[2])), 1.0e-3)
-    else:
-        width = 4.0 * cadence
-    width = max(width, 2.0 * cadence, 1.0e-6)
-    return center, width
-
-
 def _observed_duration_scale(
     time: np.ndarray,
     flux: np.ndarray,
     *,
     pspl_params: Optional[np.ndarray],
     observed_scale: Optional[ObservedSignalScale],
-) -> tuple[float, float]:
-    """Resolve the observed center/full width used by the duration grid."""
+) -> Optional[tuple[float, float]]:
+    """Return a measured FWHM, or ``None`` when it is unresolved.
+
+    This function intentionally never substitutes ``2*tE*|u0|`` for an
+    observed width.  That quantity is a PSPL seed scale, not a measurement of
+    the light-curve brightening.  Callers that need seeds when the FWHM is
+    unresolved must take an explicit, separately labelled initialization path.
+    """
     if observed_scale is not None and bool(getattr(observed_scale, "valid", False)):
         center = float(observed_scale.t_center)
         width = float(observed_scale.width)
@@ -392,7 +371,7 @@ def _observed_duration_scale(
 
     finite = np.isfinite(time) & np.isfinite(flux)
     if not np.any(finite):
-        return _fallback_duration_scale(time, flux, pspl_params)
+        return None
     tv = np.asarray(time[finite], dtype=float)
     yv = np.asarray(flux[finite], dtype=float)
     if pspl_params is not None:
@@ -422,7 +401,7 @@ def _observed_duration_scale(
     )
     if measured.valid and np.isfinite(measured.width) and measured.width > 0.0:
         return float(measured.t_center), float(measured.width)
-    return _fallback_duration_scale(time, flux, pspl_params)
+    return None
 
 
 def _build_fspl_duration_seed_grid(
@@ -500,10 +479,11 @@ def fspl_template_initial_guesses(
     profiled ``Fs`` and ``Fb``.  With the benchmark defaults this is
     ``5 * 4 * 3 * 3 = 180`` seeds.  A supplied ``pspl_params`` is used only
     to locate the observed interval; the PSPL residual is never used as a
-    template.  If the direct FWHM is unresolved, the legacy PSPL-width
-    fallback is retained only as a final initialization safety net.  ``fit``
-    may expose ``observed_signal_scale`` to reuse a scale already measured by
-    the detector.
+    template.  If the direct FWHM is unresolved, this function explicitly
+    switches to the legacy PSPL-centred *seed grid*; it never presents a PSPL
+    quantity as an observed width.  ``fit`` may expose
+    ``observed_signal_scale`` to reuse a scale already measured by the
+    detector.
 
     The legacy PSPL-centered keyword grid remains available when one of its
     legacy grid arguments is explicitly changed.  This preserves callers of
@@ -561,12 +541,29 @@ def fspl_template_initial_guesses(
         if observed_scale is not None
         else getattr(fit, "observed_signal_scale", None)
     )
-    center, observed_width = _observed_duration_scale(
+    duration_scale = _observed_duration_scale(
         time,
         flux,
         pspl_params=pspl,
         observed_scale=supplied_scale,
     )
+    if duration_scale is None:
+        return _legacy_fspl_template_initial_guesses(
+            fit,
+            top_k=limit,
+            rho_over_u0=rho_over_u0,
+            tE_factors=tE_factors,
+            u0_factors=u0_factors,
+            t0_offsets=t0_offsets,
+            u0_signs=u0_signs,
+            N_fft=N_fft,
+            backend=backend,
+            native_support_rho=native_support_rho,
+            native_support_floor=native_support_floor,
+            magnification_tol=magnification_tol,
+            magnification_reltol=magnification_reltol,
+        )
+    center, observed_width = duration_scale
     width_factor = float(width_to_crossing_time)
     if not np.isfinite(width_factor) or width_factor <= 0.0:
         raise ValueError("width_to_crossing_time must be positive and finite.")
