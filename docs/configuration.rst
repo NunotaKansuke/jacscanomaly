@@ -91,8 +91,9 @@ brightening width, converts it to the validated crossing-time/rho/
 ``u0/rho`` grid, profiles ``Fs`` and ``Fb`` for every complete FSPL model
 with the compiled ``ESPLMag2`` evaluator, and passes the lowest-chi-square
 seeds to the canonical fitter.  With the default grid this is 180 direct
-original-flux trials.  A PSPL parameter triplet may be supplied only to
-locate the observed interval; PSPL residuals are not used as a template.
+original-flux trials.  A PSPL parameter triplet may be supplied only to use
+its ``t0`` as a local event-centre hint; PSPL ``tE``/``u0`` and residuals are
+not used to set the observed duration or as a template.
 Important options include:
 include:
 

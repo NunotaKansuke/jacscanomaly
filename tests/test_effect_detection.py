@@ -812,39 +812,122 @@ def test_fspl_template_initial_guesses_uses_direct_observed_fwhm(monkeypatch):
     )
 
 
-def test_fspl_template_initial_guesses_does_not_label_pspl_scale_as_observed(
+def test_fspl_template_initial_guesses_ignores_pspl_te_in_observed_search(
     monkeypatch,
 ):
+    native = pytest.importorskip("jacscanomaly._vbm_cpp")
+    if not hasattr(native, "score_fspl_seeds"):
+        pytest.skip("The batch FSPL scorer is not available.")
+    captured = []
+
+    def fake_fwhm(time, flux, **kwargs):
+        captured.append(kwargs)
+        return ObservedSignalScale.invalid(
+            source="observed_magnification_fwhm",
+            reason="forced_test_failure",
+        )
+
+    def fake_score(time, flux, ferr, seeds, **kwargs):
+        return np.arange(np.asarray(seeds).shape[0], dtype=float)
+
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization.measure_observed_magnification_fwhm",
+        fake_fwhm,
+    )
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization.measure_observed_magnification_scale",
+        lambda *args, **kwargs: ObservedSignalScale.invalid(
+            source="observed_magnification_scale_fallback",
+            reason="forced_test_failure",
+        ),
+    )
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization._vbm_cpp.score_fspl_seeds",
+        fake_score,
+    )
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization._legacy_fspl_template_initial_guesses",
+        lambda *args, **kwargs: pytest.fail(
+            "canonical FSPL initialization must not fall back to the PSPL grid"
+        ),
+    )
+
+    time = np.linspace(9.0, 11.0, 21)
+    flux = np.ones_like(time)
+    ferr = np.full_like(time, 0.01)
+    fit = SimpleNamespace(
+        time=time,
+        flux=flux,
+        ferr=ferr,
+        params=np.asarray([10.0, 2.0, 0.2]),
+    )
+
+    short_te = fspl_template_initial_guesses(
+        fit,
+        top_k=1,
+        pspl_params=np.asarray([10.0, 0.001, 0.2]),
+    )
+    long_te = fspl_template_initial_guesses(
+        fit,
+        top_k=1,
+        pspl_params=np.asarray([10.0, 1000.0, 0.2]),
+    )
+
+    assert len(captured) == 2
+    assert captured[0]["search_half_width"] == pytest.approx(1.0)
+    assert captured[1]["search_half_width"] == pytest.approx(1.0)
+    np.testing.assert_allclose(short_te[0], long_te[0])
+
+
+def test_fspl_template_initial_guesses_has_data_only_sparse_fallback(monkeypatch):
+    native = pytest.importorskip("jacscanomaly._vbm_cpp")
+    if not hasattr(native, "score_fspl_seeds"):
+        pytest.skip("The batch FSPL scorer is not available.")
     captured = {}
-    legacy_seed = np.asarray([10.0, 2.0, 0.2, np.log(0.3)])
 
     monkeypatch.setattr(
         "jacscanomaly.fspl_initialization.measure_observed_magnification_fwhm",
         lambda *args, **kwargs: ObservedSignalScale.invalid(
-            source="observed_magnification_fwhm"
+            source="observed_magnification_fwhm",
+            reason="peak_snr_below_threshold",
+        ),
+    )
+    monkeypatch.setattr(
+        "jacscanomaly.fspl_initialization.measure_observed_magnification_scale",
+        lambda *args, **kwargs: ObservedSignalScale.invalid(
+            source="observed_magnification_scale_fallback",
+            reason="unresolved",
         ),
     )
 
-    def fake_legacy(*args, **kwargs):
-        captured["kwargs"] = kwargs
-        return (legacy_seed.copy(),)
+    def fake_score(time, flux, ferr, seeds, **kwargs):
+        captured["seeds"] = np.asarray(seeds, dtype=float).copy()
+        return np.zeros(captured["seeds"].shape[0], dtype=float)
 
     monkeypatch.setattr(
-        "jacscanomaly.fspl_initialization._legacy_fspl_template_initial_guesses",
-        fake_legacy,
+        "jacscanomaly.fspl_initialization._vbm_cpp.score_fspl_seeds",
+        fake_score,
     )
     time = np.linspace(9.0, 11.0, 21)
     fit = SimpleNamespace(
         time=time,
         flux=np.ones_like(time),
         ferr=np.full_like(time, 0.01),
-        params=np.asarray([10.0, 2.0, 0.2]),
+        params=np.asarray([10.0, 0.001, 0.2]),
     )
 
     guesses = fspl_template_initial_guesses(fit, top_k=1)
 
-    np.testing.assert_allclose(guesses[0], legacy_seed)
-    assert captured["kwargs"]["top_k"] == 1
+    assert len(guesses) == 1
+    assert captured["seeds"].shape == (180, 4)
+    # cadence=0.1 and data span=2.0 give the data-only 0.5-day fallback
+    # width; the PSPL tE=0.001 is not involved.
+    np.testing.assert_allclose(
+        np.unique(captured["seeds"][:, 0]),
+        [9.875, 10.0, 10.125],
+        rtol=0.0,
+        atol=1.0e-12,
+    )
 
 
 def test_fspl_fitter_calls_duration_initializer_when_p0_is_missing(monkeypatch):

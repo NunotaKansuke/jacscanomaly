@@ -477,6 +477,7 @@ class FSPLFitter:
         ferr_np: np.ndarray,
         *,
         pspl_params=None,
+        observed_scale=None,
     ) -> tuple[np.ndarray, ...]:
         """Build duration-grid FSPL seeds for a fit without an explicit p0."""
         from .fspl_initialization import fspl_template_initial_guesses
@@ -491,12 +492,22 @@ class FSPLFitter:
             proxy,
             top_k=4,
             pspl_params=pspl_params,
+            observed_scale=observed_scale,
             magnification_tol=self.magnification_tol,
             magnification_reltol=self.magnification_reltol,
             espl_table_path=self.espl_table_path,
         )
 
-    def fit(self, time, flux, ferr, p0=None, *, pspl_params=None) -> SingleLensFitResult:
+    def fit(
+        self,
+        time,
+        flux,
+        ferr,
+        p0=None,
+        *,
+        pspl_params=None,
+        observed_scale=None,
+    ) -> SingleLensFitResult:
         """Fit FSPL, using the observed-duration seed grid when ``p0`` is absent."""
         time_np, flux_np, ferr_np = _fit_arrays(time, flux, ferr)
         if p0 is None:
@@ -505,6 +516,7 @@ class FSPLFitter:
                 flux_np,
                 ferr_np,
                 pspl_params=pspl_params,
+                observed_scale=observed_scale,
             )
             best_fit = None
             best_chi2 = np.inf

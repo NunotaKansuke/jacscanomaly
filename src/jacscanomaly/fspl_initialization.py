@@ -23,6 +23,7 @@ from .fitters import FSPLFitter, _solve_fs_fb_numpy, _vbm_cpp
 from .signal_scale import (
     ObservedSignalScale,
     measure_observed_magnification_fwhm,
+    measure_observed_magnification_scale,
 )
 
 
@@ -335,11 +336,18 @@ def _coerce_observed_scale(value: Any) -> Optional[ObservedSignalScale]:
     raise TypeError("observed_scale must be an ObservedSignalScale or mapping.")
 
 
-def _extract_pspl_parameters(
+def _extract_pspl_center(
     fit: Any,
     pspl_params: Optional[Sequence[float]],
-) -> Optional[np.ndarray]:
-    """Return an optional ``(t0, tE, u0)`` locator without fitting PSPL."""
+) -> Optional[float]:
+    """Return only the optional PSPL ``t0`` locator.
+
+    The canonical FSPL initializer deliberately does not inspect PSPL ``tE`` or
+    ``u0``.  A PSPL fit can be badly conditioned in precisely the
+    high-magnification, short-event cases for which the FSPL initializer is
+    needed.  The fitted ``t0`` is retained only as a local event-centre hint;
+    the duration scale is measured from the observed flux below.
+    """
     value = pspl_params
     if value is None and fit is not None:
         value = getattr(fit, "params", None)
@@ -348,11 +356,9 @@ def _extract_pspl_parameters(
     if hasattr(value, "params"):
         value = getattr(value, "params")
     params = np.asarray(value, dtype=float).reshape(-1)
-    if params.size < 3 or not np.all(np.isfinite(params[:3])):
+    if params.size < 1 or not np.isfinite(params[0]):
         return None
-    if float(params[1]) == 0.0:
-        return None
-    return np.asarray(params[:3], dtype=float)
+    return float(params[0])
 
 
 def _observed_duration_scale(
@@ -360,15 +366,16 @@ def _observed_duration_scale(
     flux: np.ndarray,
     *,
     flux_err: Optional[np.ndarray],
-    pspl_params: Optional[np.ndarray],
+    center_hint: Optional[float],
     observed_scale: Optional[ObservedSignalScale],
 ) -> Optional[tuple[float, float]]:
-    """Return a measured FWHM, or ``None`` when it is unresolved.
+    """Resolve an FSPL duration from the observed flux only.
 
-    This function intentionally never substitutes ``2*tE*|u0|`` for an
-    observed width.  That quantity is a PSPL seed scale, not a measurement of
-    the light-curve brightening.  Callers that need seeds when the FWHM is
-    unresolved must take an explicit, separately labelled initialization path.
+    ``center_hint`` may come from PSPL ``t0`` and is used only to choose the
+    local component.  The search window and every width fallback are derived
+    from the data span/cadence; PSPL ``tE`` and ``u0`` never enter this path.
+    If the direct FWHM is unresolved, a binned observed-magnification scale is
+    attempted before a conservative cadence/data-span fallback.
     """
     if observed_scale is not None and bool(getattr(observed_scale, "valid", False)):
         center = float(observed_scale.t_center)
@@ -381,21 +388,31 @@ def _observed_duration_scale(
         return None
     tv = np.asarray(time[finite], dtype=float)
     yv = np.asarray(flux[finite], dtype=float)
-    if pspl_params is not None:
-        center = float(pspl_params[0])
-        search_half_width = max(
-            1.0,
-            min(300.0, 20.0 * abs(float(pspl_params[1]))),
-        )
+    peak_center = float(tv[int(np.nanargmax(yv))])
+    if center_hint is not None and np.isfinite(center_hint):
+        center = float(center_hint)
+        # A stale PSPL centre must not force the local search outside the
+        # observed data.  In that case the observed peak is the only valid
+        # anchor available to the initializer.
+        if center < float(np.min(tv)) or center > float(np.max(tv)):
+            center = peak_center
     else:
-        center = float(tv[int(np.nanargmax(yv))])
-        steps = np.diff(np.sort(tv))
-        steps = steps[np.isfinite(steps) & (steps > 0.0)]
-        cadence = float(np.median(steps)) if steps.size else 1.0
-        # The initializer needs the central brightening envelope, not the
-        # multi-tE PSPL wing.  A short cadence-scaled window keeps ordinary
-        # long-tE events on the same source-crossing scale as the benchmark.
-        search_half_width = max(1.0, min(5.0, 200.0 * cadence))
+        center = peak_center
+
+    sorted_time = np.sort(tv)
+    steps = np.diff(sorted_time)
+    steps = steps[np.isfinite(steps) & (steps > 0.0)]
+    cadence = float(np.median(steps)) if steps.size else float("nan")
+    span = float(np.ptp(tv))
+    if span > 0.0:
+        # Search a data-defined local half-window.  This is intentionally
+        # independent of any PSPL timescale so a pathological PSPL tE cannot
+        # hide the observed brightening from the FWHM measurement.
+        search_half_width = max(1.0, min(300.0, 0.5 * span))
+    elif np.isfinite(cadence) and cadence > 0.0:
+        search_half_width = max(1.0, 4.0 * cadence)
+    else:
+        return None
 
     measured = measure_observed_magnification_fwhm(
         time,
@@ -409,6 +426,33 @@ def _observed_duration_scale(
     )
     if measured.valid and np.isfinite(measured.width) and measured.width > 0.0:
         return float(measured.t_center), float(measured.width)
+
+    # Direct FWHM deliberately rejects unresolved peaks.  The binned profile
+    # has a different failure mode and can recover a short event without
+    # importing a model-derived PSPL width.
+    measured_profile = measure_observed_magnification_scale(
+        time,
+        flux,
+        center=center,
+        search_half_width=search_half_width,
+        allow_point_fallback=True,
+        source="observed_magnification_scale_fallback",
+    )
+    if (
+        measured_profile.valid
+        and np.isfinite(measured_profile.width)
+        and measured_profile.width > 0.0
+    ):
+        return float(measured_profile.t_center), float(measured_profile.width)
+
+    # There is still a useful, fully data-defined seed scale when the event is
+    # too sparse/noisy for either width estimator: use a few cadence intervals,
+    # bounded by the observed support.  This is intentionally a separate
+    # safety net from the old PSPL-centred grid.
+    if np.isfinite(cadence) and cadence > 0.0:
+        width = max(2.0 * cadence, min(0.25 * span, 8.0 * cadence))
+        if np.isfinite(width) and width > 0.0:
+            return center, float(width)
     return None
 
 
@@ -485,13 +529,12 @@ def fspl_template_initial_guesses(
     crossing-time factor it builds the transit grid
     ``rho x (u0/rho) x t0-width-offset`` and evaluates every candidate with
     profiled ``Fs`` and ``Fb``.  With the benchmark defaults this is
-    ``5 * 4 * 3 * 3 = 180`` seeds.  A supplied ``pspl_params`` is used only
-    to locate the observed interval; the PSPL residual is never used as a
-    template.  If the direct FWHM is unresolved, this function explicitly
-    switches to the legacy PSPL-centred *seed grid*; it never presents a PSPL
-    quantity as an observed width.  ``fit`` may expose
-    ``observed_signal_scale`` to reuse a scale already measured by the
-    detector.
+    ``5 * 4 * 3 * 3 = 180`` seeds.  A supplied ``pspl_params`` contributes
+    only its ``t0`` as a local event-centre hint; PSPL ``tE``, ``u0``, and the
+    PSPL residual are never used by the canonical route.  If the direct FWHM
+    is unresolved, the initializer uses an observed binned scale or a
+    cadence/data-span fallback, never a PSPL-width seed.  A caller may pass an
+    explicitly measured observed magnification ``observed_scale`` to reuse it.
 
     The legacy PSPL-centered keyword grid remains available when one of its
     legacy grid arguments is explicitly changed.  This preserves callers of
@@ -543,34 +586,19 @@ def fspl_template_initial_guesses(
     if not np.all(np.isfinite(ferr)) or np.any(ferr <= 0.0):
         raise ValueError("fit ferr must be finite and positive.")
 
-    pspl = _extract_pspl_parameters(fit, pspl_params)
-    supplied_scale = _coerce_observed_scale(
-        observed_scale
-        if observed_scale is not None
-        else getattr(fit, "observed_signal_scale", None)
-    )
+    center_hint = _extract_pspl_center(fit, pspl_params)
+    supplied_scale = _coerce_observed_scale(observed_scale)
     duration_scale = _observed_duration_scale(
         time,
         flux,
         flux_err=ferr,
-        pspl_params=pspl,
+        center_hint=center_hint,
         observed_scale=supplied_scale,
     )
     if duration_scale is None:
-        return _legacy_fspl_template_initial_guesses(
-            fit,
-            top_k=limit,
-            rho_over_u0=rho_over_u0,
-            tE_factors=tE_factors,
-            u0_factors=u0_factors,
-            t0_offsets=t0_offsets,
-            u0_signs=u0_signs,
-            N_fft=N_fft,
-            backend=backend,
-            native_support_rho=native_support_rho,
-            native_support_floor=native_support_floor,
-            magnification_tol=magnification_tol,
-            magnification_reltol=magnification_reltol,
+        raise RuntimeError(
+            "FSPL duration initialization could not resolve a data-defined "
+            "event scale; provide an explicit p0 or observed_scale."
         )
     center, observed_width = duration_scale
     width_factor = float(width_to_crossing_time)

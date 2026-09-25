@@ -432,6 +432,7 @@ class _ParallaxFitter:
         ferr: np.ndarray,
         *,
         pspl_params=None,
+        observed_scale=None,
     ) -> tuple[np.ndarray, ...]:
         """Build FSPL duration-grid seeds and append zero parallax."""
         if not self.finite_source:
@@ -448,6 +449,7 @@ class _ParallaxFitter:
             proxy,
             top_k=4,
             pspl_params=pspl_params,
+            observed_scale=observed_scale,
             magnification_tol=self.magnification_tol,
             magnification_reltol=self.magnification_reltol,
             espl_table_path=self.espl_table_path,
@@ -457,7 +459,16 @@ class _ParallaxFitter:
             for seed in base_seeds
         )
 
-    def fit(self, time, flux, ferr, q0=None, *, pspl_params=None):
+    def fit(
+        self,
+        time,
+        flux,
+        ferr,
+        q0=None,
+        *,
+        pspl_params=None,
+        observed_scale=None,
+    ):
         """Fit parallax, auto-seeding FSPL from the duration grid when needed."""
         time = np.asarray(time, dtype=float); flux = np.asarray(flux, dtype=float); ferr = np.asarray(ferr, dtype=float)
         if time.ndim != 1 or not (time.shape == flux.shape == ferr.shape) or np.any(ferr <= 0) or not np.all(np.isfinite(time)):
@@ -468,6 +479,7 @@ class _ParallaxFitter:
                 flux,
                 ferr,
                 pspl_params=pspl_params,
+                observed_scale=observed_scale,
             )
             best_fit = None
             best_chi2 = np.inf
