@@ -218,8 +218,16 @@ bool evaluate_internal(EvaluatorObject* self, const std::vector<double>& raw, st
                 wxx += w * (magnifications[i] - xm) * (magnifications[i] - xm);
                 wxy += w * (magnifications[i] - xm) * (self->flux[i] - ym);
             }
-            if (!(wxx > 0.0) || !std::isfinite(wxx)) throw std::invalid_argument("dataset flux profile is singular");
-            fs[g] = wxy / wxx; fb[g] = ym - fs[g] * xm;
+            if (!std::isfinite(xm) || !std::isfinite(ym) || !std::isfinite(wxx) || !std::isfinite(wxy)) {
+                throw std::invalid_argument("dataset flux profile is non-finite");
+            }
+            if (wxx > 0.0) {
+                fs[g] = wxy / wxx; fb[g] = ym - fs[g] * xm;
+            } else {
+                // Constant magnification cannot identify fs and fb separately;
+                // use the weighted constant-flux solution.
+                fs[g] = 0.0; fb[g] = ym;
+            }
         }
         residual.resize(n);
         for (size_t i = 0; i < n; ++i) {
@@ -363,7 +371,25 @@ PyObject* evaluator_evaluate(EvaluatorObject* self, PyObject* args, PyObject* kw
     std::vector<double> sw(static_cast<size_t>(max_id + 1), 0.0), sx(sw.size(), 0.0), sy(sw.size(), 0.0);
     for (size_t i = 0; i < self->time.size(); ++i) { const double w = 1.0/(self->ferr[i]*self->ferr[i]); const size_t g=static_cast<size_t>(self->dataset[i]); sw[g]+=w; sx[g]+=w*full_mags[i]; sy[g]+=w*self->flux[i]; }
     std::vector<double> fs(sw.size(), 0.0), fb(sw.size(), 0.0);
-    for (size_t g=0; g<sw.size(); ++g) { const double xm=sx[g]/sw[g], ym=sy[g]/sw[g]; double wxx=0,wxy=0; for(size_t i=0;i<self->time.size();++i) if(static_cast<size_t>(self->dataset[i])==g){const double w=1.0/(self->ferr[i]*self->ferr[i]);wxx+=w*(full_mags[i]-xm)*(full_mags[i]-xm);wxy+=w*(full_mags[i]-xm)*(self->flux[i]-ym);} fs[g]=wxy/wxx;fb[g]=ym-fs[g]*xm; }
+    for (size_t g=0; g<sw.size(); ++g) {
+        if (!(sw[g] > 0.0)) continue;
+        const double xm=sx[g]/sw[g], ym=sy[g]/sw[g];
+        double wxx=0,wxy=0;
+        for(size_t i=0;i<self->time.size();++i) if(static_cast<size_t>(self->dataset[i])==g) {
+            const double w=1.0/(self->ferr[i]*self->ferr[i]);
+            wxx+=w*(full_mags[i]-xm)*(full_mags[i]-xm);
+            wxy+=w*(full_mags[i]-xm)*(self->flux[i]-ym);
+        }
+        if (!std::isfinite(xm) || !std::isfinite(ym) || !std::isfinite(wxx) || !std::isfinite(wxy)) {
+            PyErr_SetString(PyExc_ValueError, "dataset flux profile is non-finite");
+            return nullptr;
+        }
+        if (wxx > 0.0) {
+            fs[g]=wxy/wxx; fb[g]=ym-fs[g]*xm;
+        } else {
+            fs[g]=0.0; fb[g]=ym;
+        }
+    }
     for (size_t i=0;i<model.size();++i){const size_t g=static_cast<size_t>(self->dataset[i]);model[i]=fs[g]*full_mags[i]+fb[g];}
     return make_array(model);
 }

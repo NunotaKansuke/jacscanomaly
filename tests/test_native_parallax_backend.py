@@ -10,7 +10,7 @@ from jacscanomaly import (
     ParallaxEvaluator,
     TimeSpec,
 )
-from jacscanomaly.parallax_backend import parallax_effect_score
+from jacscanomaly.parallax_backend import _profile_fluxes, parallax_effect_score
 from jacscanomaly.plot import _adaptive_single_lens_curve
 
 
@@ -162,7 +162,61 @@ def test_native_annual_fit_recovers_synthetic_and_removes_effect_score():
         atol=1.0e-7,
     )
     assert float(fit.chi2) < 1.0e-12
+    assert fit.diagnostics.backend == "scipy_trf_bounded_compiled_evaluator"
     assert parallax_effect_score(fit) < 1.0e-12
+
+
+def test_parallax_tE_lower_bound_is_independent_of_survey_span():
+    fitter = PSPLParallaxFitter(
+        0.0, 0.0, 1.0, time_spec=TimeSpec("hjd"),
+        earth_ephemeris=_linear_ephemeris(time_spec=TimeSpec("hjd")),
+    )
+    lower, _ = fitter._bounds(np.asarray([-856.0, 856.0]))
+
+    np.testing.assert_allclose(np.exp(lower[1]), 1.0e-6, rtol=0.0, atol=1.0e-18)
+
+
+def test_constant_magnification_uses_finite_constant_flux_profile():
+    magnification = np.ones(5)
+    flux = np.asarray([1.1, 0.9, 1.2, 1.0, 0.8])
+    ferr = np.asarray([0.1, 0.2, 0.1, 0.3, 0.2])
+    weights = 1.0 / ferr**2
+    expected_mean = float(np.sum(weights * flux) / np.sum(weights))
+
+    fs, fb = _profile_fluxes(magnification, flux, ferr)
+
+    assert fs == 0.0
+    np.testing.assert_allclose(fb, expected_mean)
+
+
+def test_native_constant_magnification_evaluator_returns_constant_flux():
+    time = np.linspace(-2.0, 2.0, 5)
+    earth = Ephemeris(
+        np.linspace(-3.0, 3.0, 7),
+        np.zeros((7, 3)),
+        origin="sun",
+        time_spec=TimeSpec("hjd"),
+    )
+    flux = np.asarray([1.1, 0.9, 1.2, 1.0, 0.8])
+    ferr = np.asarray([0.1, 0.2, 0.1, 0.3, 0.2])
+    evaluator = ParallaxEvaluator(
+        time,
+        flux,
+        ferr,
+        ra_deg=0.0,
+        dec_deg=0.0,
+        tref=0.0,
+        time_spec=TimeSpec("hjd"),
+        earth_ephemeris=earth,
+    )
+    raw = np.asarray([1.0e6, np.log(0.1), 0.1, 0.0, 0.0])
+    expected_mean = float(np.sum((flux / ferr**2)) / np.sum(1.0 / ferr**2))
+
+    residual = evaluator.residual(raw)
+    model = evaluator.evaluate(raw)
+
+    assert np.all(np.isfinite(residual))
+    np.testing.assert_allclose(model, expected_mean, rtol=0.0, atol=1.0e-14)
 
 
 def test_native_fixed_evaluation_preserves_public_seed_coordinates():

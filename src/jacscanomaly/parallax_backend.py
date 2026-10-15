@@ -58,7 +58,8 @@ class ParallaxDiagnostics:
     ephemeris_extrapolated: bool
     nonfinite_evaluations: int
     observer_convention: str
-    backend: str = "scipy_lm_compiled_evaluator"
+    backend: str = "scipy_trf_bounded_compiled_evaluator"
+    max_piE_component_fraction: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -340,7 +341,7 @@ class ParallaxEvaluator:
 
 
 class _ParallaxFitter:
-    """Shared C++ evaluator/SciPy LM implementation for parallax models."""
+    """Shared C++ evaluator and bounded SciPy optimizer for parallax models."""
 
     def __init__(self, *, ra_deg, dec_deg, tref, finite_source=False, time_spec=TimeSpec(), observer_convention="earth_geocentric_offset", earth_ephemeris=None, satellite_or_observer_ephemeris=None, reference_ephemeris=None, maxiter=1000, tol=1e-6, max_piE=1.0, espl_table_path=None, magnification_tol=1e-4, magnification_reltol=1e-4):
         self.ra_deg = float(ra_deg); self.dec_deg = float(dec_deg); self.tref = float(tref)
@@ -348,7 +349,10 @@ class _ParallaxFitter:
         self.earth_ephemeris = earth_ephemeris if earth_ephemeris is not None else default_earth_ephemeris(time_spec=time_spec)
         self.satellite_or_observer_ephemeris = satellite_or_observer_ephemeris
         self.reference_ephemeris = reference_ephemeris
-        self.maxiter = int(maxiter); self.tol = float(tol); self.max_piE = float(max_piE)
+        max_piE_value = abs(float(max_piE))
+        if np.isnan(max_piE_value) or max_piE_value <= 0.0:
+            raise ValueError("max_piE must be non-zero.")
+        self.maxiter = int(maxiter); self.tol = float(tol); self.max_piE = max_piE_value
         self.espl_table_path = espl_table_path
         self.magnification_tol = float(magnification_tol)
         self.magnification_reltol = float(magnification_reltol)
@@ -402,7 +406,7 @@ class _ParallaxFitter:
         margin = max(np.ptp(time) * 0.25, 1.0)
         lower[0] = float(np.min(time)) - margin + float(self.time_spec.offset)
         upper[0] = float(np.max(time)) + margin + float(self.time_spec.offset)
-        lower[1] = np.log(max(np.ptp(time) / 1000.0, 1e-6)); upper[1] = np.log(max(np.ptp(time) * 1000.0, 1.0))
+        lower[1] = np.log(1.0e-6); upper[1] = np.log(max(np.ptp(time) * 1000.0, 1.0))
         lower[2] = -10.0; upper[2] = 10.0
         if self.finite_source:
             lower[3] = np.log(1e-8); upper[3] = np.log(1e3); pi_index = 4
@@ -411,18 +415,15 @@ class _ParallaxFitter:
         return lower, upper
 
     def _optimizer_seed(self, raw: np.ndarray) -> np.ndarray:
-        """Translate native raw parameters to the unconstrained LM vector."""
+        """Translate native raw parameters to the relative-time optimizer vector."""
         value = np.asarray(raw, dtype=float).reshape(-1).copy()
         value[0] -= float(self.time_spec.offset)
         return value
 
     def _raw_from_optimizer(self, value: np.ndarray) -> np.ndarray:
-        """Translate an unconstrained LM vector to the evaluator contract."""
+        """Translate the relative-time optimizer vector to the evaluator contract."""
         raw = np.asarray(value, dtype=float).reshape(-1).copy()
         raw[0] += float(self.time_spec.offset)
-        raw[1] = np.clip(raw[1], np.log(1.0e-6), np.log(1.0e8))
-        if self.finite_source:
-            raw[3] = np.clip(raw[3], -50.0, np.log(1.0e3))
         return raw
 
     def _automatic_fspl_initial_guesses(
@@ -525,43 +526,44 @@ class _ParallaxFitter:
             raw_value = self._raw_from_optimizer(optimizer_value)
             return np.asarray(evaluator.jacobian(raw_value), dtype=float)
 
+        lower, upper = self._bounds(time)
+        # A saved PSPL seed may already be outside the default u0 range.
+        # Keep it feasible while retaining a finite search interval.
+        u0_margin = max(1.0, 0.1 * abs(float(raw0[2])))
+        lower[2] = min(lower[2], float(raw0[2]) - u0_margin)
+        upper[2] = max(upper[2], float(raw0[2]) + u0_margin)
+        optimizer_lower = lower.copy()
+        optimizer_upper = upper.copy()
+        optimizer_lower[0] -= float(self.time_spec.offset)
+        optimizer_upper[0] -= float(self.time_spec.offset)
+        finite_width = np.isfinite(optimizer_lower) & np.isfinite(optimizer_upper)
+        inset = np.full(self.parameter_dimension, 1.0e-10, dtype=float)
+        inset[finite_width] = np.minimum(
+            inset[finite_width],
+            0.5 * (optimizer_upper[finite_width] - optimizer_lower[finite_width]),
+        )
+        feasible_lower = np.where(
+            np.isfinite(optimizer_lower), optimizer_lower + inset, optimizer_lower
+        )
+        feasible_upper = np.where(
+            np.isfinite(optimizer_upper), optimizer_upper - inset, optimizer_upper
+        )
+        optimizer_start = np.minimum(
+            np.maximum(optimizer0, feasible_lower), feasible_upper
+        )
         result = least_squares(
             residual_fun,
-            optimizer0,
+            optimizer_start,
             jac=jacobian_fun,
-            method="lm",
+            method="trf",
+            bounds=(optimizer_lower, optimizer_upper),
+            x_scale="jac",
             max_nfev=self.maxiter,
             xtol=self.tol,
             ftol=self.tol,
             gtol=self.tol,
         )
         raw = self._raw_from_optimizer(np.asarray(result.x, dtype=float))
-        pi_index = 4 if self.finite_source else 3
-        bounded = bool(
-            np.isfinite(self.max_piE)
-            and self.max_piE > 0.0
-            and np.any(np.abs(raw[pi_index:pi_index + 2]) > abs(float(self.max_piE)))
-        )
-        if bounded or not bool(result.success):
-            # LM is the common optimizer, but it has no bound support.  Keep
-            # the explicit max_piE contract by using the same SciPy solver in
-            # bounded trust-region mode only when the unconstrained pass
-            # leaves the permitted physical domain.
-            lower, upper = self._bounds(time)
-            raw_start = np.minimum(np.maximum(raw, lower + 1.0e-10), upper - 1.0e-10)
-            result = least_squares(
-                evaluator.residual,
-                raw_start,
-                jac=evaluator.jacobian,
-                method="trf",
-                bounds=(lower, upper),
-                x_scale="jac",
-                max_nfev=self.maxiter,
-                xtol=self.tol,
-                ftol=self.tol,
-                gtol=self.tol,
-            )
-            raw = np.asarray(result.x, dtype=float)
         mags = evaluator.magnification(raw)
         model = evaluator.evaluate(raw)
         residual = flux - model
@@ -583,15 +585,27 @@ class _ParallaxFitter:
         except Exception:
             rank, condition = 0, float("inf")
         pi_index = 4 if self.finite_source else 3
+        component_fraction = (
+            float(np.max(np.abs(raw[pi_index:pi_index + 2])) / abs(float(self.max_piE)))
+            if np.isfinite(self.max_piE) and self.max_piE > 0.0
+            else None
+        )
+        active_mask = np.asarray(
+            getattr(result, "active_mask", np.zeros(self.parameter_dimension)),
+            dtype=int,
+        )
         at_bound = bool(
-            np.isfinite(self.max_piE)
-            and self.max_piE > 0.0
-            and np.any(
-                np.isclose(
-                    np.abs(raw[pi_index:pi_index + 2]),
-                    abs(float(self.max_piE)),
-                    rtol=0.0,
-                    atol=1.0e-7,
+            np.any(active_mask[pi_index:pi_index + 2] != 0)
+            or (
+                np.isfinite(self.max_piE)
+                and self.max_piE > 0.0
+                and np.any(
+                    np.isclose(
+                        np.abs(raw[pi_index:pi_index + 2]),
+                        abs(float(self.max_piE)),
+                        rtol=0.0,
+                        atol=1.0e-7,
+                    )
                 )
             )
         )
@@ -604,11 +618,8 @@ class _ParallaxFitter:
             rank=rank, jacobian_condition=condition, parameter_at_bound=at_bound,
             ephemeris_extrapolated=any(eph is not None and not eph.contains(time + self.time_spec.offset) for eph in (self.earth_ephemeris, self.satellite_or_observer_ephemeris, self.reference_ephemeris)),
             nonfinite_evaluations=0, observer_convention=self.observer_convention,
-            backend=(
-                "scipy_trf_bounded_fallback"
-                if bounded or not bool(result.success)
-                else "scipy_lm_compiled_evaluator"
-            ),
+            backend="scipy_trf_bounded_compiled_evaluator",
+            max_piE_component_fraction=component_fraction,
         )
         fit = SingleLensFitResult(
             time=time,
@@ -627,11 +638,7 @@ class _ParallaxFitter:
             model_evaluator=None,
             model_kind="fspl_parallax" if self.finite_source else "pspl_parallax",
             optimizer_success=bool(result.success),
-            optimizer_status=(
-                "scipy_trf_bounded_fallback"
-                if bounded or not bool(result.success)
-                else "scipy_lm_compiled_evaluator"
-            ) + f":{result.message}",
+            optimizer_status=f"scipy_trf_bounded_compiled_evaluator:{result.message}",
             diagnostics=diagnostics,
         )
         self._last_fit = fit
@@ -858,8 +865,12 @@ def _profile_fluxes(magnification: np.ndarray, flux: np.ndarray, ferr: np.ndarra
     w = 1.0 / np.maximum(np.asarray(ferr, dtype=float), 1e-12) ** 2
     xm = np.sum(w * magnification) / np.sum(w); ym = np.sum(w * flux) / np.sum(w)
     denom = np.sum(w * (magnification - xm) ** 2)
-    if not np.isfinite(denom) or denom <= 0.0:
+    if not np.isfinite(xm) or not np.isfinite(ym) or not np.isfinite(denom):
         raise ValueError("profiled flux solve is singular")
+    if denom <= 0.0:
+        # Constant magnification contains no information separating source
+        # and blend flux. The finite profiled model is the weighted mean.
+        return 0.0, float(ym)
     fs = float(np.sum(w * (magnification - xm) * (flux - ym)) / denom)
     return fs, float(ym - fs * xm)
 

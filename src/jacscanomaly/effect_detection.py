@@ -109,6 +109,11 @@ class EffectMorphologyConfig:
     parallax_broad_days: float = 20.0
     parallax_broad_ratio_soft: float = 0.15
     parallax_broad_ratio: float = 0.45
+    # A residual whose width is comparable to the observed main-event FWHM
+    # can be a parallax-shaped distortion even when the event itself is short.
+    # Ramp this dimensionless ratio from half an event width to one full width.
+    parallax_event_scale_ratio_soft: float = 0.5
+    parallax_event_scale_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -118,8 +123,10 @@ class EffectMorphologyScores:
     ``fspl_score`` is the maximum of a compactness score and the signed
     ``- + - + -`` residual-shape score.  ``parallax_score`` requires residual
     support spread over time, then boosts that score when the PSPL brightening
-    is long.  In particular, a large residual amplitude is not penalized: a
-    very long event with a strong but broad residual is intentionally kept.
+    is long. A significant residual on the scale of an observed main-event
+    FWHM can also score highly, including for short, high-magnification events.
+    In particular, a large residual amplitude is not penalized: a very long
+    event with a strong but broad residual is intentionally kept.
 
     All score fields are in ``[0, 1]``.  They are ranking features only; the
     physical detector's ``EffectCandidate.score`` remains a Delta-chi-square
@@ -159,6 +166,8 @@ class EffectMorphologyScores:
     residual_block_effective_bins: float = 0.0
     residual_block_evidence: float = 0.0
     parallax_block_score: float = 0.0
+    residual_event_width_ratio: float = 0.0
+    parallax_event_scale_score: float = 0.0
 
     def summary_dict(self) -> dict[str, object]:
         """Return JSON-friendly diagnostics for logs and candidate output."""
@@ -170,6 +179,7 @@ class EffectMorphologyScores:
             "residual_width_cadences": float(self.residual_width_cadences),
             "residual_center": float(self.residual_center),
             "residual_model_width_ratio": float(self.residual_model_width_ratio),
+            "residual_event_width_ratio": float(self.residual_event_width_ratio),
             "residual_peak_z": float(self.residual_peak_z),
             "residual_evidence": float(self.residual_evidence),
             "residual_support_points": int(self.residual_support_points),
@@ -205,6 +215,7 @@ class EffectMorphologyScores:
                 self.intermediate_duration_score
             ),
             "parallax_block_score": float(self.parallax_block_score),
+            "parallax_event_scale_score": float(self.parallax_event_scale_score),
             "parallax_score": float(self.parallax_score),
         }
 
@@ -1427,6 +1438,8 @@ def compute_effect_morphology_scores(
             parallax_residual_score=0.0,
             intermediate_duration_score=0.0,
             parallax_score=0.0,
+            residual_event_width_ratio=0.0,
+            parallax_event_scale_score=0.0,
         )
 
     t = time[valid]
@@ -1622,6 +1635,16 @@ def compute_effect_morphology_scores(
         cfg.parallax_long_days_soft,
         cfg.parallax_long_days,
     )
+    residual_event_width_ratio = 0.0
+    if (
+        event_width_source == "observed_fwhm"
+        and not model_censored
+        and not residual_censored
+        and np.isfinite(event_width)
+        and event_width > 0.0
+    ):
+        residual_event_width_ratio = float(residual_width / event_width)
+
     broad_width = max(residual_width, profile_width)
     broad_days_score = _ramp(
         broad_width,
@@ -1680,6 +1703,19 @@ def compute_effect_morphology_scores(
         np.clip(max(profile_broad_score, parallax_block_score), 0.0, 1.0)
     )
     strong_amplitude = _ramp(residual_peak_z, 5.0, 12.0)
+    parallax_event_scale_score = float(
+        np.clip(
+            _ramp(
+                residual_event_width_ratio,
+                cfg.parallax_event_scale_ratio_soft,
+                cfg.parallax_event_scale_ratio,
+            )
+            * strong_amplitude
+            * residual_evidence,
+            0.0,
+            1.0,
+        )
+    )
     parallax_weak_broad_score = parallax_block_score
     parallax_strong_broad_score = float(
         np.clip(
@@ -1698,7 +1734,11 @@ def compute_effect_morphology_scores(
     )
     parallax_score = float(
         np.clip(
-            max(parallax_long_score, parallax_residual_score),
+            max(
+                parallax_long_score,
+                parallax_residual_score,
+                parallax_event_scale_score,
+            ),
             0.0,
             1.0,
         )
@@ -1737,6 +1777,8 @@ def compute_effect_morphology_scores(
         residual_block_effective_bins=float(block_effective_bins),
         residual_block_evidence=float(block_evidence),
         parallax_block_score=parallax_block_score,
+        residual_event_width_ratio=residual_event_width_ratio,
+        parallax_event_scale_score=parallax_event_scale_score,
     )
 
 
