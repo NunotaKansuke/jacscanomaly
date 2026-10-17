@@ -362,10 +362,16 @@ PyObject* evaluator_evaluate(EvaluatorObject* self, PyObject* args, PyObject* kw
     // contract.  Magnification is available through magnification().
     std::vector<unsigned char> mask; if (!active_mask(mask_obj, self->time.size(), mask)) return nullptr;
     std::vector<double> model(self->time.size());
-    // Reprofile via residual relation is not enough for masked points; use the
-    // same full-data profile through a second internal call without exposing it.
-    // The public model() method is the canonical unmasked output.
-    std::vector<double> full_mags, full_residual; if (!evaluate_internal(self, raw, full_mags, full_residual, Py_None)) return nullptr;
+    // The public model() method returns the full-data profile. Reuse the first
+    // curve when unmasked; masked requests still need the full-data evaluation.
+    std::vector<double> full_mags, full_residual;
+    if (mask_obj == Py_None) {
+        // The first call already evaluated the full unmasked curve. Reuse it
+        // instead of repeating the trajectory and magnification work.
+        full_mags.swap(mags);
+    } else if (!evaluate_internal(self, raw, full_mags, full_residual, Py_None)) {
+        return nullptr;
+    }
     // Solve profile from the full residual equation using a two-pass weighted fit.
     long long max_id = 0; for (long long id : self->dataset) max_id = std::max(max_id, id);
     std::vector<double> sw(static_cast<size_t>(max_id + 1), 0.0), sx(sw.size(), 0.0), sy(sw.size(), 0.0);

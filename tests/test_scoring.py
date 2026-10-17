@@ -1,6 +1,7 @@
 import numpy as np
 
 from jacscanomaly import CandidateCriteria, Finder, FinderConfig
+from jacscanomaly.finder import _GridQualityIndex
 from jacscanomaly.models import SeasonSummary
 
 
@@ -169,3 +170,47 @@ def test_score_adaptively_clips_strong_secondary_cluster():
     expected_scale = 1.482602218505602 * 2.0
     assert np.isclose(best.std_others, expected_scale)
     assert np.isclose(best.score, (100.0 - 4.5) / expected_scale)
+
+
+def test_grid_quality_index_matches_legacy_nearest_for_runner_order():
+    rows = []
+    for season_start in (0.0, 100.0):
+        for teff, step in ((0.1, 1.0), (0.2, 0.5), (0.4, 0.25)):
+            for index, t0 in enumerate(np.arange(season_start, season_start + 4.0, step)):
+                rows.append(
+                    [
+                        t0,
+                        teff,
+                        10.0 + index,
+                        20.0 + index,
+                        5.0 + index,
+                        1.0 + index,
+                        0.1 + 0.01 * index,
+                        0.02 * index,
+                        3.0 + index,
+                    ]
+                )
+    metrics = np.asarray(rows, dtype=float)
+    index = _GridQualityIndex(metrics)
+
+    for row in metrics:
+        indexed_row = index.row(float(row[0]), float(row[1]))
+        assert indexed_row is not None
+        assert np.array_equal(indexed_row, row)
+        indexed_quality = Finder._quality_from_row(indexed_row)
+        legacy_quality = Finder._quality_for_point(float(row[0]), float(row[1]), metrics)
+        assert indexed_quality == legacy_quality
+
+
+def test_grid_quality_index_falls_back_for_unordered_grid():
+    metrics = np.asarray(
+        [
+            [1.0, 0.1, 5.0, 10.0, 3.0, 2.0, 0.2, 0.1, 1.0],
+            [0.0, 0.1, 4.0, 9.0, 2.0, 1.0, 0.3, 0.2, 0.0],
+        ],
+        dtype=float,
+    )
+    index = _GridQualityIndex(metrics)
+
+    assert index.row(1.0, 0.1) is None
+    assert Finder._quality_for_point(1.0, 0.1, metrics).n_window == 10

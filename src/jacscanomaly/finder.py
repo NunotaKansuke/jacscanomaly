@@ -18,7 +18,7 @@ from .fitters import (
 from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
-from .runner import SeasonGridRunner
+from .runner import SeasonGridRunner, _cpp_grid
 from .models import (
     AnomalyResult,
     BestCandidate,
@@ -72,6 +72,79 @@ def _vbm_coordinate_string(ra_deg: float, dec_deg: float) -> str:
     return f"{rah:02d}:{ram:02d}:{ras:08.5f} {sign}{ded:02d}:{dem:02d}:{des:07.4f}"
 
 logger = logging.getLogger(__name__)
+
+
+class _GridQualityIndex:
+    """Fast exact lookup for the sorted teff/t0 grid emitted by the runner.
+
+    Extracted clusters use coordinates from this grid. The index stores only
+    small slice bounds; it does not copy the million-row metric array. Queries
+    that are not exact grid points, or whose grid ordering is unusual, return
+    None so callers can preserve the historical nearest-point fallback.
+    """
+
+    def __init__(self, metrics: np.ndarray):
+        self._metrics = np.asarray(metrics, dtype=float) if metrics is not None else None
+        self._groups = {}
+
+        if (
+            self._metrics is None
+            or self._metrics.ndim != 2
+            or self._metrics.shape[0] == 0
+            or self._metrics.shape[1] < 2
+        ):
+            return
+
+        coordinates = self._metrics[:, :2]
+        if not np.isfinite(coordinates).all():
+            return
+
+        changes = np.flatnonzero(self._metrics[1:, 1] != self._metrics[:-1, 1]) + 1
+        bounds = np.concatenate(([0], changes, [self._metrics.shape[0]]))
+        segments_by_teff = {}
+        invalid_teff = set()
+
+        for lo, hi in zip(bounds[:-1], bounds[1:]):
+            teff = float(self._metrics[lo, 1])
+            t0_values = self._metrics[lo:hi, 0]
+            if t0_values.size > 1 and np.any(t0_values[1:] < t0_values[:-1]):
+                invalid_teff.add(teff)
+                continue
+            segments_by_teff.setdefault(teff, []).append(
+                (int(lo), int(hi), float(t0_values[0]), float(t0_values[-1]))
+            )
+
+        for teff, segments in segments_by_teff.items():
+            if teff in invalid_teff:
+                self._groups[teff] = None
+                continue
+            segments.sort(key=lambda segment: segment[2])
+            starts = np.fromiter((segment[2] for segment in segments), dtype=float)
+            ends = np.fromiter((segment[3] for segment in segments), dtype=float)
+            # Overlapping same-teff slices make the historical first-match
+            # behavior ambiguous across seasons; keep those queries on fallback.
+            if starts.size > 1 and np.any(starts[1:] <= np.maximum.accumulate(ends)[:-1]):
+                self._groups[teff] = None
+                continue
+            self._groups[teff] = (starts, ends, segments)
+
+    def row(self, t0: float, teff: float) -> Optional[np.ndarray]:
+        """Return the exact grid row, or None when legacy lookup is required."""
+        group = self._groups.get(float(teff))
+        if group is None:
+            return None
+
+        starts, ends, segments = group
+        segment_idx = int(np.searchsorted(starts, float(t0), side="right")) - 1
+        if segment_idx < 0 or float(t0) > float(ends[segment_idx]):
+            return None
+
+        lo, hi, _start, _end = segments[segment_idx]
+        t0_values = self._metrics[lo:hi, 0]
+        offset = int(np.searchsorted(t0_values, float(t0), side="left"))
+        if offset >= t0_values.size or float(t0_values[offset]) != float(t0):
+            return None
+        return self._metrics[lo + offset]
 
 
 @dataclass
@@ -1050,13 +1123,24 @@ class Finder:
             if planet_before is None
             else np.asarray(planet_before.finder_support_array(), dtype=bool)
         )
-        effects = tuple(
-            self.detect_effects(
-                fit=baseline_fit,
-                route=True,
-                routing_thresholds=thresholds,
-                execute_exact_probe=True,
-                planet_mask=planet_mask,
+        reuse_preliminary_effects = (
+            baseline_fit is initial_fit
+            and (planet_mask is None or not np.any(planet_mask))
+            and (planet_before is None or not planet_before.candidates)
+        )
+        # If the planet pass did not change the fit or exclude any samples,
+        # the preliminary diagnostics are exactly the post-planet diagnostics.
+        effects = (
+            preliminary_effects
+            if reuse_preliminary_effects
+            else tuple(
+                self.detect_effects(
+                    fit=baseline_fit,
+                    route=True,
+                    routing_thresholds=thresholds,
+                    execute_exact_probe=True,
+                    planet_mask=planet_mask,
+                )
             )
         )
         # A compact signal can be routed as ``planet`` before the physical
@@ -2261,13 +2345,17 @@ class Finder:
         if raw_clusters.size == 0:
             return []
 
+        quality_index = _GridQualityIndex(grid_metrics_all)
+        background_stats = self._indexed_score_backgrounds(raw_clusters)
         scored = [
             self._score_candidate(
                 candidate,
                 raw_clusters,
                 grid_metrics_all,
+                quality_index=quality_index,
+                background_stats=background_stats[index],
             )
-            for candidate in raw_clusters
+            for index, candidate in enumerate(raw_clusters)
         ]
         return sorted(
             scored,
@@ -2279,26 +2367,80 @@ class Finder:
             reverse=True,
         )
 
+    def _indexed_score_backgrounds(self, raw_clusters: np.ndarray) -> list:
+        """Reuse sorted teff-local backgrounds and leave-one-out order statistics.
+
+        The native path needs unique candidate epochs so that the historical
+        first-isclose exclusion is exactly the candidate's own row. Ambiguous,
+        sparse and degenerate cases continue through the scalar reference.
+        """
+        count = len(raw_clusters)
+        result = [None] * count
+        if (
+            _cpp_grid is None
+            or not hasattr(_cpp_grid, "score_backgrounds")
+            or count < 2
+            or np.any(raw_clusters[:, 1] <= 0.0)
+            or np.any(np.diff(np.sort(raw_clusters[:, 0])) <= 1e-9)
+        ):
+            return result
+        ratio = float(self.config.best_score_teff_ratio)
+        minimum = int(self.config.best_score_min_reference_clusters)
+        sigma = float(self.config.best_score_upper_clip_sigma)
+        maxiters = int(self.config.best_score_clip_maxiters)
+        if not np.isfinite(ratio) or ratio < 1.0 or minimum < 2 or not sigma > 0.0 or maxiters < 0:
+            return result
+        for teff in np.unique(raw_clusters[:, 1]):
+            candidates = np.flatnonzero(raw_clusters[:, 1] == teff)
+            local = np.flatnonzero(
+                np.abs(np.log(raw_clusters[:, 1] / float(teff))) <= np.log(ratio) + 1e-12
+            )
+            if local.size - 1 < minimum and local.size != count:
+                continue
+            excluded = np.searchsorted(local, candidates).astype(np.int64)
+            statistics = _cpp_grid.score_backgrounds(
+                raw_clusters[local, 2], excluded, clip_sigma=sigma, maxiters=maxiters
+            )
+            for index, row in zip(candidates, statistics):
+                if row[3]:
+                    result[int(index)] = (float(row[0]), float(row[1]), int(row[2]))
+        return result
+
     def _score_candidate(
         self,
         candidate: np.ndarray,
         raw_clusters: np.ndarray,
         grid_metrics_all: np.ndarray,
+        *,
+        quality_index: Optional[_GridQualityIndex] = None,
+        background_stats: Optional[tuple[float, float, int]] = None,
     ) -> ScoredCandidate:
-        references = self._score_reference_clusters(candidate, raw_clusters)
-        bulk_dchi2 = self._upper_clip_score_background(references[:, 2])
-
-        if bulk_dchi2.shape[0] >= 2:
-            med = float(np.median(bulk_dchi2))
-            std = self._robust_scale(bulk_dchi2)
-            score = (candidate[2] - med) / std if std > 0 else float("nan")
+        if background_stats is None:
+            references = self._score_reference_clusters(candidate, raw_clusters)
+            bulk_dchi2 = self._upper_clip_score_background(references[:, 2])
+            n_score_reference = int(bulk_dchi2.shape[0])
+            if n_score_reference >= 2:
+                med = float(np.median(bulk_dchi2))
+                std = self._robust_scale(bulk_dchi2)
+            else:
+                med = std = float("nan")
         else:
-            med = std = score = float("nan")
+            med, std, n_score_reference = background_stats
+        score = (candidate[2] - med) / std if std > 0 else float("nan")
 
-        quality = self._quality_for_point(
-            float(candidate[0]),
-            float(candidate[1]),
-            grid_metrics_all,
+        quality_row = (
+            None
+            if quality_index is None
+            else quality_index.row(float(candidate[0]), float(candidate[1]))
+        )
+        quality = (
+            self._quality_from_row(quality_row)
+            if quality_row is not None
+            else self._quality_for_point(
+                float(candidate[0]),
+                float(candidate[1]),
+                grid_metrics_all,
+            )
         )
         return ScoredCandidate(
             t0=float(candidate[0]),
@@ -2308,7 +2450,7 @@ class Finder:
             std_others=std,
             score=float(score),
             quality=quality,
-            n_score_reference=int(bulk_dchi2.shape[0]),
+            n_score_reference=n_score_reference,
         )
 
     def _best_from_scored_candidates(
@@ -2353,12 +2495,18 @@ class Finder:
         if criteria is None:
             return raw_clusters
 
+        quality_index = _GridQualityIndex(grid_metrics_all)
         accepted = []
         for cluster in raw_clusters:
-            quality = self._quality_for_point(
-                float(cluster[0]),
-                float(cluster[1]),
-                grid_metrics_all,
+            quality_row = quality_index.row(float(cluster[0]), float(cluster[1]))
+            quality = (
+                self._quality_from_row(quality_row)
+                if quality_row is not None
+                else self._quality_for_point(
+                    float(cluster[0]),
+                    float(cluster[1]),
+                    grid_metrics_all,
+                )
             )
             if criteria.accepts(dchi2=float(cluster[2]), quality=quality):
                 accepted.append(cluster)
@@ -2457,6 +2605,17 @@ class Finder:
         return float(np.std(values))
 
     @staticmethod
+    def _quality_from_row(row: np.ndarray) -> CandidateQuality:
+        return CandidateQuality(
+            n_window=int(round(float(row[3]))),
+            n_contrib=int(round(float(row[4]))),
+            n_eff=float(row[5]),
+            peak_frac=float(row[6]),
+            rho1=float(row[7]),
+            longest_run=int(round(float(row[8]))),
+        )
+
+    @staticmethod
     def _quality_for_point(t0: float, teff: float, grid_metrics_all: np.ndarray) -> CandidateQuality:
         if grid_metrics_all is None or grid_metrics_all.size == 0:
             return CandidateQuality(
@@ -2470,15 +2629,7 @@ class Finder:
 
         dist = np.abs(grid_metrics_all[:, 0] - t0) + np.abs(grid_metrics_all[:, 1] - teff)
         i = int(np.argmin(dist))
-        row = grid_metrics_all[i]
-        return CandidateQuality(
-            n_window=int(round(float(row[3]))),
-            n_contrib=int(round(float(row[4]))),
-            n_eff=float(row[5]),
-            peak_frac=float(row[6]),
-            rho1=float(row[7]),
-            longest_run=int(round(float(row[8]))),
-        )
+        return Finder._quality_from_row(grid_metrics_all[i])
 
 
     # ----------------------------

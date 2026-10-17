@@ -715,6 +715,207 @@ fail:
     return nullptr;
 }
 
+
+// A sorted background prefix with one original observation removed. Upper
+// clipping only shortens the prefix; no candidate-specific arrays are built.
+struct LeaveOneOutBackground {
+    const std::vector<double>& values;
+    npy_intp end;
+    npy_intp excluded;
+
+    npy_intp size() const { return end - (excluded >= 0 && excluded < end); }
+    double at(npy_intp k) const {
+        return values[static_cast<std::size_t>(k + (excluded >= 0 && k >= excluded))];
+    }
+    double median() const {
+        const npy_intp n = size();
+        return n % 2 ? at(n / 2) : (at(n / 2 - 1) + at(n / 2)) / 2.0;
+    }
+    // Absolute deviations form two sorted sequences on either side of the
+    // median. Select their kth union element with a binary partition.
+    double deviation_at(npy_intp k, double center, npy_intp left) const {
+        const npy_intp right = size() - left;
+        npy_intp lo = std::max<npy_intp>(0, k + 1 - right);
+        npy_intp hi = std::min<npy_intp>(left, k + 1);
+        const double inf = std::numeric_limits<double>::infinity();
+        while (lo <= hi) {
+            const npy_intp i = lo + (hi - lo) / 2;
+            const npy_intp j = k + 1 - i;
+            const double al = i ? center - at(left - i) : -inf;
+            const double ar = i < left ? center - at(left - 1 - i) : inf;
+            const double bl = j ? at(left + j - 1) - center : -inf;
+            const double br = j < right ? at(left + j) - center : inf;
+            if (al > br) hi = i - 1;
+            else if (bl > ar) lo = i + 1;
+            else return std::max(al, bl);
+        }
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    double mad_scale(double center) const {
+        npy_intp left = std::upper_bound(values.begin(), values.begin() + end, center) - values.begin();
+        if (excluded >= 0 && excluded < left) --left;
+        const npy_intp n = size();
+        const double middle = deviation_at(n / 2, center, left);
+        const double mad = n % 2 ? middle : (deviation_at(n / 2 - 1, center, left) + middle) / 2.0;
+        return 1.482602218505602 * mad;
+    }
+};
+
+PyObject* score_backgrounds(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject* values_obj = nullptr;
+    PyObject* excluded_obj = nullptr;
+    double clip_sigma = 5.0;
+    int maxiters = 5;
+    static const char* kwlist[] = {"values", "excluded", "clip_sigma", "maxiters", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|di", const_cast<char**>(kwlist),
+                                    &values_obj, &excluded_obj, &clip_sigma, &maxiters)) return nullptr;
+    PyArrayObject* values_arr = as_double_array(values_obj);
+    PyArrayObject* excluded_arr = reinterpret_cast<PyArrayObject*>(
+        PyArray_FROM_OTF(excluded_obj, NPY_INT64, NPY_ARRAY_IN_ARRAY));
+    if (!values_arr || !excluded_arr) {
+        Py_XDECREF(values_arr); Py_XDECREF(excluded_arr); return nullptr;
+    }
+    if (PyArray_NDIM(values_arr) != 1 || PyArray_NDIM(excluded_arr) != 1 ||
+        !(clip_sigma > 0.0) || maxiters < 0) {
+        PyErr_SetString(PyExc_ValueError, "Expected one-dimensional arrays, clip_sigma > 0, and maxiters >= 0.");
+        Py_DECREF(values_arr); Py_DECREF(excluded_arr); return nullptr;
+    }
+    const npy_intp n = PyArray_SIZE(values_arr);
+    const npy_intp m = PyArray_SIZE(excluded_arr);
+    const double* input = static_cast<const double*>(PyArray_DATA(values_arr));
+    const npy_int64* excluded = static_cast<const npy_int64*>(PyArray_DATA(excluded_arr));
+    std::vector<npy_intp> order(static_cast<std::size_t>(n));
+    for (npy_intp i = 0; i < n; ++i) {
+        if (!std::isfinite(input[i])) {
+            PyErr_SetString(PyExc_ValueError, "Background values must be finite.");
+            Py_DECREF(values_arr); Py_DECREF(excluded_arr); return nullptr;
+        }
+        order[static_cast<std::size_t>(i)] = i;
+    }
+    std::sort(order.begin(), order.end(), [&](npy_intp a, npy_intp b) {
+        return input[a] < input[b] || (input[a] == input[b] && a < b);
+    });
+    std::vector<double> sorted(static_cast<std::size_t>(n));
+    std::vector<npy_intp> ranks(static_cast<std::size_t>(n));
+    for (npy_intp i = 0; i < n; ++i) {
+        sorted[static_cast<std::size_t>(i)] = input[order[static_cast<std::size_t>(i)]];
+        ranks[static_cast<std::size_t>(order[static_cast<std::size_t>(i)])] = i;
+    }
+    npy_intp dims[2] = {m, 4};
+    PyArrayObject* out = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(2, dims, NPY_DOUBLE));
+    if (!out) { Py_DECREF(values_arr); Py_DECREF(excluded_arr); return nullptr; }
+    double* result = static_cast<double*>(PyArray_DATA(out));
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (npy_intp q = 0; q < m; ++q) {
+        double* row = result + q * 4;
+        row[0] = row[1] = nan; row[2] = 0.0; row[3] = 0.0;
+        if (excluded[q] < -1 || excluded[q] >= n) continue;
+        const npy_intp rank = excluded[q] < 0 ? -1 : ranks[static_cast<std::size_t>(excluded[q])];
+        LeaveOneOutBackground bulk{sorted, n, rank};
+        bool supported = true;
+        for (int iteration = 0; iteration < maxiters && std::isfinite(clip_sigma); ++iteration) {
+            if (bulk.size() < 3) break;
+            const double med = bulk.median();
+            const double scale = bulk.mad_scale(med);
+            // Zero-MAD/IQR/std degeneracies retain NumPy's original path,
+            // including its original-order floating-point reduction.
+            if (!(scale > 0.0) || !std::isfinite(scale)) { supported = false; break; }
+            const double limit = med + clip_sigma * scale;
+            if (!std::isfinite(limit)) { supported = false; break; }
+            const npy_intp new_end = std::upper_bound(sorted.begin(), sorted.begin() + bulk.end, limit) - sorted.begin();
+            const npy_intp kept = new_end - (rank >= 0 && rank < new_end);
+            if (kept == bulk.size() || kept < 2) break;
+            bulk.end = new_end;
+        }
+        if (!supported) continue;
+        row[2] = static_cast<double>(bulk.size());
+        if (bulk.size() >= 2) {
+            row[0] = bulk.median();
+            row[1] = bulk.mad_scale(row[0]);
+            if (!(row[1] > 0.0) || !std::isfinite(row[0]) || !std::isfinite(row[1])) continue;
+        }
+        row[3] = 1.0;
+    }
+    Py_DECREF(values_arr); Py_DECREF(excluded_arr);
+    return reinterpret_cast<PyObject*>(out);
+}
+
+// Sort priorities once, and maintain a successor set over each teff's sorted
+// t0 grid. Each grid point is removed at most once, rather than scanned once
+// per extracted cluster. Binary searches evaluate the ORIGINAL overlap
+// predicate, so strict boundaries and floating-point rounding are preserved.
+bool extract_clusters_indexed(const double* t0, const double* teff, const double* dchi2,
+                              npy_intp n, double sigma, int min_points, std::vector<double>& rows) {
+    if (!(sigma > 0.0) || !std::isfinite(sigma) || n < 128) return false;
+    std::vector<npy_intp> grid(static_cast<std::size_t>(n));
+    for (npy_intp i = 0; i < n; ++i) {
+        if (!std::isfinite(t0[i]) || !std::isfinite(teff[i]) || !(teff[i] > 0.0)) return false;
+        grid[static_cast<std::size_t>(i)] = i;
+    }
+    double min_teff = teff[0], max_teff = teff[0];
+    for (npy_intp i = 1; i < n; ++i) {
+        min_teff = std::min(min_teff, teff[i]);
+        max_teff = std::max(max_teff, teff[i]);
+    }
+    if (!(sigma * (min_teff + min_teff) > 0.0) ||
+        !std::isfinite(sigma * (max_teff + max_teff))) return false;
+    const auto grid_less = [&](npy_intp a, npy_intp b) {
+        return teff[a] < teff[b] || (teff[a] == teff[b] &&
+            (t0[a] < t0[b] || (t0[a] == t0[b] && a < b)));
+    };
+    if (!std::is_sorted(grid.begin(), grid.end(), grid_less)) std::sort(grid.begin(), grid.end(), grid_less);
+    std::vector<std::pair<npy_intp, npy_intp>> groups;
+    for (npy_intp lo = 0; lo < n;) {
+        npy_intp hi = lo + 1;
+        while (hi < n && teff[grid[static_cast<std::size_t>(hi)]] == teff[grid[static_cast<std::size_t>(lo)]]) ++hi;
+        groups.emplace_back(lo, hi); lo = hi;
+    }
+    // Highly irregular inputs with one teff per point favor the original scan.
+    if (groups.size() > static_cast<std::size_t>(n / 32)) return false;
+    std::vector<npy_intp> priority;
+    priority.reserve(static_cast<std::size_t>(n));
+    for (npy_intp i = 0; i < n; ++i) if (dchi2[i] > -std::numeric_limits<double>::infinity()) priority.push_back(i);
+    std::sort(priority.begin(), priority.end(), [&](npy_intp a, npy_intp b) {
+        return dchi2[a] > dchi2[b] || (dchi2[a] == dchi2[b] && a < b);
+    });
+    std::vector<npy_intp> next(static_cast<std::size_t>(n + 1));
+    for (npy_intp i = 0; i <= n; ++i) next[static_cast<std::size_t>(i)] = i;
+    const auto find_next = [&](npy_intp x) {
+        npy_intp root = x;
+        while (next[static_cast<std::size_t>(root)] != root) root = next[static_cast<std::size_t>(root)];
+        while (next[static_cast<std::size_t>(x)] != x) {
+            const npy_intp parent = next[static_cast<std::size_t>(x)];
+            next[static_cast<std::size_t>(x)] = root; x = parent;
+        }
+        return root;
+    };
+    std::vector<unsigned char> remaining(static_cast<std::size_t>(n), 1);
+    npy_intp count = n;
+    for (const npy_intp best : priority) {
+        if (!remaining[static_cast<std::size_t>(best)]) continue;
+        if (!std::isfinite(dchi2[best])) break;
+        for (const auto& group : groups) {
+            const auto begin = grid.begin() + group.first;
+            const auto end = grid.begin() + group.second;
+            const double radius = sigma * (teff[*begin] + teff[best]);
+            const auto lower = std::partition_point(begin, end, [&](npy_intp i) {
+                return t0[i] < t0[best] && !(std::abs(t0[i] - t0[best]) < radius);
+            });
+            const auto upper = std::partition_point(lower, end, [&](npy_intp i) {
+                return t0[i] <= t0[best] || std::abs(t0[i] - t0[best]) < radius;
+            });
+            const npy_intp stop = upper - grid.begin();
+            for (npy_intp i = find_next(lower - grid.begin()); i < stop; i = find_next(i)) {
+                remaining[static_cast<std::size_t>(grid[static_cast<std::size_t>(i)])] = 0;
+                next[static_cast<std::size_t>(i)] = find_next(i + 1); --count;
+            }
+        }
+        rows.push_back(t0[best]); rows.push_back(teff[best]); rows.push_back(dchi2[best]);
+        if (count < min_points) break;
+    }
+    return true;
+}
+
 PyObject* extract_clusters(PyObject*, PyObject* args, PyObject* kwargs) {
     PyObject* t0_obj = nullptr;
     PyObject* teff_obj = nullptr;
@@ -746,33 +947,34 @@ PyObject* extract_clusters(PyObject*, PyObject* args, PyObject* kwargs) {
     const double* t0 = static_cast<const double*>(PyArray_DATA(t0_arr));
     const double* teff = static_cast<const double*>(PyArray_DATA(teff_arr));
     const double* dchi2 = static_cast<const double*>(PyArray_DATA(dchi2_arr));
-    std::vector<unsigned char> remaining(static_cast<std::size_t>(n), 1);
     std::vector<double> rows;
-    rows.reserve(static_cast<std::size_t>(n) * 3);
-    npy_intp remaining_count = n;
-    while (remaining_count > 0) {
-        npy_intp best = -1;
-        double best_value = -std::numeric_limits<double>::infinity();
-        for (npy_intp i = 0; i < n; ++i) {
-            if (remaining[static_cast<std::size_t>(i)] && dchi2[i] > best_value) {
-                best = i;
-                best_value = dchi2[i];
+    if (!extract_clusters_indexed(t0, teff, dchi2, n, sigma_overlap, min_points, rows)) {
+        std::vector<unsigned char> remaining(static_cast<std::size_t>(n), 1);
+        npy_intp remaining_count = n;
+        while (remaining_count > 0) {
+            npy_intp best = -1;
+            double best_value = -std::numeric_limits<double>::infinity();
+            for (npy_intp i = 0; i < n; ++i) {
+                if (remaining[static_cast<std::size_t>(i)] && dchi2[i] > best_value) {
+                    best = i;
+                    best_value = dchi2[i];
+                }
             }
-        }
-        if (best < 0 || !std::isfinite(best_value)) break;
-        const double t0_best = t0[best];
-        const double teff_best = teff[best];
-        for (npy_intp i = 0; i < n; ++i) {
-            if (!remaining[static_cast<std::size_t>(i)]) continue;
-            if (std::abs(t0[i] - t0_best) < sigma_overlap * (teff[i] + teff_best)) {
-                remaining[static_cast<std::size_t>(i)] = 0;
-                --remaining_count;
+            if (best < 0 || !std::isfinite(best_value)) break;
+            const double t0_best = t0[best];
+            const double teff_best = teff[best];
+            for (npy_intp i = 0; i < n; ++i) {
+                if (!remaining[static_cast<std::size_t>(i)]) continue;
+                if (std::abs(t0[i] - t0_best) < sigma_overlap * (teff[i] + teff_best)) {
+                    remaining[static_cast<std::size_t>(i)] = 0;
+                    --remaining_count;
+                }
             }
+            rows.push_back(t0_best);
+            rows.push_back(teff_best);
+            rows.push_back(best_value);
+            if (remaining_count < min_points) break;
         }
-        rows.push_back(t0_best);
-        rows.push_back(teff_best);
-        rows.push_back(best_value);
-        if (remaining_count < min_points) break;
     }
     npy_intp dims[2] = {static_cast<npy_intp>(rows.size() / 3), 3};
     PyArrayObject* out = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(2, dims, NPY_DOUBLE));
@@ -1017,6 +1219,12 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
 }
 
 PyMethodDef methods[] = {
+    {
+        "score_backgrounds",
+        reinterpret_cast<PyCFunction>(score_backgrounds),
+        METH_VARARGS | METH_KEYWORDS,
+        "Compute exact leave-one-out clipped median/MAD backgrounds from one sorted sample.",
+    },
     {
         "run_grid",
         reinterpret_cast<PyCFunction>(run_grid),

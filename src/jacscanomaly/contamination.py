@@ -7,6 +7,11 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+try:
+    from . import _contamination_dp as _native_contamination_dp
+except ImportError:  # Source-only installations retain the reference implementation.
+    _native_contamination_dp = None
+
 from .signal_scale import ObservedSignalScale
 
 
@@ -127,6 +132,8 @@ def _run_dp(
     occupancy_penalty: float,
     protected_penalty: float,
     forced_anomaly: np.ndarray,
+    *,
+    use_native: bool = True,
 ) -> tuple[np.ndarray, float]:
     n = z.size
     emission_b = _student_nll(z, cfg.baseline_scale, cfg.student_dof)
@@ -136,6 +143,15 @@ def _run_dp(
     # the single-lens fit by forcing the DP anomaly state. A large finite
     # emission keeps every objective numerical and comparable.
     emission_b = np.where(np.asarray(forced_anomaly, dtype=bool), 1.0e12, emission_b)
+    if use_native and _native_contamination_dp is not None:
+        return _native_contamination_dp.run_dp(
+            np.ascontiguousarray(time, dtype=np.float64),
+            np.ascontiguousarray(emission_b, dtype=np.float64),
+            np.ascontiguousarray(emission_a, dtype=np.float64),
+            float(cfg.season_gap),
+            float(cfg.transition_penalty),
+            float(cfg.span_penalty),
+        )
     dp = np.full((n, 2), np.inf, dtype=float)
     parent = np.zeros((n, 2), dtype=np.int8)
     dp[0] = [emission_b[0], emission_a[0]]
@@ -654,14 +670,6 @@ def robust_refine_with_fitter(
     current_fit = initial_fit
     iterations: list[RobustFitIteration] = []
     converged = False
-    segmentation = segment_anomaly_dp(
-        t,
-        np.asarray(current_fit.residual, dtype=float) / fe,
-        config=config,
-        protected_mask=protected_mask,
-        protected_masks=protected_masks,
-        forced_anomaly_mask=forced_anomaly_mask,
-    )
     for iteration in range(max(1, int(config.max_iter))):
         z = np.asarray(current_fit.residual, dtype=float) / fe
         segmentation = segment_anomaly_dp(

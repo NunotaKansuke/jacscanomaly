@@ -575,13 +575,31 @@ class _ParallaxFitter:
         else: pi_index = 3
         params = np.r_[params, raw[pi_index:pi_index + 2]]; names.extend(["piEN", "piEE"])
         from .singlelens_fit import SingleLensFitResult
-        final_residual = evaluator.residual(raw)
-        chi2 = float(np.sum(final_residual * final_residual))
+        weighted_residual = np.asarray(getattr(result, "fun", None), dtype=float)
+        if (
+            weighted_residual.shape != time.shape
+            or not np.all(np.isfinite(weighted_residual))
+        ):
+            # Preserve a fallback for optimizer implementations that do not
+            # retain their final objective vector.
+            weighted_residual = evaluator.residual(raw)
+        chi2 = float(np.sum(weighted_residual * weighted_residual))
         try:
-            jacobian = evaluator.jacobian(raw)
+            jacobian = np.asarray(getattr(result, "jac", None), dtype=float)
+            if (
+                jacobian.shape != (time.size, self.parameter_dimension)
+                or not np.all(np.isfinite(jacobian))
+            ):
+                # Keep the established diagnostic path if the optimizer does
+                # not return a usable Jacobian for an unusual SciPy backend.
+                jacobian = evaluator.jacobian(raw)
             singular = np.linalg.svd(jacobian, compute_uv=False)
-            rank = int(np.linalg.matrix_rank(jacobian))
-            condition = float(singular[0] / singular[-1]) if singular.size and singular[-1] > 0 else float("inf")
+            if singular.size and singular[0] > 0.0:
+                tolerance = singular[0] * max(jacobian.shape) * np.finfo(float).eps
+                rank = int(np.count_nonzero(singular > tolerance))
+                condition = float(singular[0] / singular[-1]) if singular[-1] > 0.0 else float("inf")
+            else:
+                rank, condition = 0, float("inf")
         except Exception:
             rank, condition = 0, float("inf")
         pi_index = 4 if self.finite_source else 3

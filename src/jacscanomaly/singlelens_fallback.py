@@ -656,27 +656,27 @@ def run_robust_fallback(
     if "parallax" not in effect:
         # A compact FSPL peak is itself the physical signal; do not pre-mask it.
         initial_standardized_residual = None
-    for seed in seeds:
-        if protected_mask is None and protected_masks is None:
-            masks = tuple(
-                protected_support_mask(
-                    t,
-                    candidate.effect,
-                    candidate.seed_parameters,
-                    observed_scale=getattr(candidate, "observed_signal_scale", None),
-                )
-                for candidate in candidate_tuple
-                if candidate.seed_parameters is not None
-                and (
-                    candidate.effect == effect
-                    or candidate.effect in effect
-                    or effect == "mixed"
-                )
+    if protected_mask is None and protected_masks is None:
+        masks = tuple(
+            protected_support_mask(
+                t,
+                candidate.effect,
+                candidate.seed_parameters,
+                observed_scale=getattr(candidate, "observed_signal_scale", None),
             )
-        else:
-            masks = protected_masks
-            if protected_mask is not None:
-                masks = (np.asarray(protected_mask, dtype=bool),)
+            for candidate in candidate_tuple
+            if candidate.seed_parameters is not None
+            and (
+                candidate.effect == effect
+                or candidate.effect in effect
+                or effect == "mixed"
+            )
+        )
+    else:
+        masks = protected_masks
+        if protected_mask is not None:
+            masks = (np.asarray(protected_mask, dtype=bool),)
+    for seed in seeds:
         try:
             result = robust_refine_with_fitter(
                 fitter,

@@ -10,6 +10,7 @@ from setuptools.command.build_ext import build_ext as _build_ext
 
 
 CPP_GRID_SOURCE = Path("src/jacscanomaly/_cpp_grid.cpp")
+CONTAMINATION_DP_SOURCE = Path("src/jacscanomaly/_contamination_dp.cpp")
 VBM_CPP_SOURCE = Path("src/jacscanomaly/_vbm_cpp.cpp")
 PARALLAX_CPP_SOURCE = Path("src/jacscanomaly/_parallax_cpp.cpp")
 
@@ -107,6 +108,16 @@ extensions = [
             depends=[str(CPP_GRID_SOURCE)],
         )
 ]
+
+extensions.append(
+    Extension(
+        "jacscanomaly._contamination_dp",
+        [str(CONTAMINATION_DP_SOURCE)],
+        include_dirs=[np.get_include()],
+        language="c++",
+        depends=[str(CONTAMINATION_DP_SOURCE)],
+    )
+)
 
 extensions.append(
     Extension(
