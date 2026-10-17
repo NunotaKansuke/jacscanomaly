@@ -415,12 +415,109 @@ PyObject* evaluator_residual(EvaluatorObject* self, PyObject* args, PyObject* kw
     std::vector<double> raw,mags,residual; if(!parse_raw(self,raw_obj,raw))return nullptr; if(!evaluate_internal(self,raw,mags,residual,mask_obj))return nullptr; return make_array(residual);
 }
 
-PyObject* evaluator_jacobian(EvaluatorObject* self, PyObject* args, PyObject* kwargs) {
-    PyObject* raw_obj=nullptr; PyObject* mask_obj=Py_None; double fd_step=1e-5; static const char* kwlist[]={"raw_params","active_mask","fd_step",nullptr};
-    if(!PyArg_ParseTupleAndKeywords(args,kwargs,"O|Od",const_cast<char**>(kwlist),&raw_obj,&mask_obj,&fd_step))return nullptr;
+PyObject* evaluator_jacobian_fd(EvaluatorObject* self, PyObject* raw_obj, PyObject* mask_obj, double fd_step) {
     std::vector<double> raw,base; if(!parse_raw(self,raw_obj,raw))return nullptr; if(!evaluate_internal(self,raw,base,base,mask_obj))return nullptr;
     const size_t n=self->time.size(); npy_intp dims[2]={static_cast<npy_intp>(n),static_cast<npy_intp>(self->nparam)}; PyArrayObject* out=reinterpret_cast<PyArrayObject*>(PyArray_ZEROS(2,dims,NPY_DOUBLE,0)); if(!out)return nullptr; double* jd=static_cast<double*>(PyArray_DATA(out));
     for(int k=0;k<self->nparam;++k){ double step=std::max(std::abs(fd_step),1e-8); if(k==0)step=std::max(step,1e-6); if(k==1|| (self->finite_source&&k==3))step=std::max(step,1e-5); std::vector<double> plus=raw,minus=raw,rp,rm; plus[k]+=step;minus[k]-=step; bool okp=evaluate_internal(self,plus,rp,rp,mask_obj); bool okm=evaluate_internal(self,minus,rm,rm,mask_obj); if(okp&&okm){for(size_t i=0;i<n;++i)jd[i*self->nparam+k]=(rp[i]-rm[i])/(2*step);} else if(okp){std::vector<double> r0;evaluate_internal(self,raw,r0,r0,mask_obj);for(size_t i=0;i<n;++i)jd[i*self->nparam+k]=(rp[i]-r0[i])/step;} else if(okm){std::vector<double> r0;evaluate_internal(self,raw,r0,r0,mask_obj);for(size_t i=0;i<n;++i)jd[i*self->nparam+k]=(r0[i]-rm[i])/step;} }
+    return reinterpret_cast<PyObject*>(out);
+}
+
+// Analytic Jacobian of the profiled residual.
+//
+// The magnification depends on the parameters only through u(t) (and rho), so
+// dA/dtheta = A_u du/dtheta + A_rho drho/dtheta, with du/dtheta from the
+// trajectory.  The per-dataset flux solution (fs, fb) is the weighted
+// regression of flux on A; its exact derivative is
+//   dfs = sum_j w_j dA_j (y_j - ym - 2 fs a_j) / Sxx,   a_j = A_j - xm
+//   dr_i = -(dfs a_i + fs (dA_i - dxm)) / sigma_i,      dxm = sum_j w_j dA_j / sum_j w_j
+// which is what the finite-difference Jacobian approximates by refitting.
+bool analytic_jacobian(EvaluatorObject* self, const std::vector<double>& raw, PyObject* mask_obj, std::vector<double>& jac) {
+    try {
+        double t0, tE, u0, rho, piEN, piEE;
+        unpack_raw(self, raw, t0, tE, u0, rho, piEN, piEE);
+        const size_t n = self->time.size();
+        const size_t np = static_cast<size_t>(self->nparam);
+        const size_t pi_index = self->finite_source ? 4 : 3;
+        std::vector<unsigned char> mask;
+        if (!active_mask(mask_obj, n, mask)) return false;
+        const double peak_slope = self->trajectory->source_peak_time_derivative(t0);
+        std::vector<double> mags(n), dmag(n * np, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+            const TrajectoryComponents row = self->trajectory->at(self->time[i], t0, tE, u0, piEN, piEE);
+            double a, a_u, a_rho;
+            self->magnification->value_and_gradient(row.u, rho, a, a_u, a_rho);
+            mags[i] = a;
+            const double d_n = row.observer_n, d_e = row.observer_e;
+            const double tau_rect = row.tau + piEN * d_n + piEE * d_e;
+            // d(tau, beta)/d(t0, ln tE, u0, piEN, piEE)
+            const double dtau[5] = {-peak_slope / tE, -tau_rect, 0.0, -d_n, -d_e};
+            const double dbeta[5] = {0.0, 0.0, 1.0, -d_e, d_n};
+            double* out = &dmag[i * np];
+            const int map[5] = {0, 1, 2, static_cast<int>(pi_index), static_cast<int>(pi_index) + 1};
+            for (int j = 0; j < 5; ++j) out[map[j]] = a_u * (row.tau * dtau[j] + row.beta * dbeta[j]) / row.u;
+            if (self->finite_source) out[3] = a_rho * rho;
+        }
+        long long max_id = 0;
+        for (long long id : self->dataset) max_id = std::max(max_id, id);
+        if (max_id < 0 || max_id > 1000000) throw std::invalid_argument("dataset_id contains an invalid group id");
+        const size_t ng = static_cast<size_t>(max_id + 1);
+        std::vector<double> sw(ng, 0.0), sx(ng, 0.0), sy(ng, 0.0);
+        auto weight = [&](size_t i) { return mask[i] ? 1.0 / (self->ferr[i] * self->ferr[i]) : 0.0; };
+        for (size_t i = 0; i < n; ++i) {
+            const size_t g = static_cast<size_t>(self->dataset[i]);
+            const double w = weight(i); sw[g] += w; sx[g] += w * mags[i]; sy[g] += w * self->flux[i];
+        }
+        std::vector<double> xm(ng, 0.0), ym(ng, 0.0), wxx(ng, 0.0), wxy(ng, 0.0), fs(ng, 0.0);
+        for (size_t g = 0; g < ng; ++g) if (sw[g] > 0.0) { xm[g] = sx[g] / sw[g]; ym[g] = sy[g] / sw[g]; }
+        for (size_t i = 0; i < n; ++i) {
+            const size_t g = static_cast<size_t>(self->dataset[i]);
+            const double w = weight(i), a = mags[i] - xm[g];
+            wxx[g] += w * a * a; wxy[g] += w * a * (self->flux[i] - ym[g]);
+        }
+        for (size_t g = 0; g < ng; ++g) if (wxx[g] > 0.0) fs[g] = wxy[g] / wxx[g];
+        std::vector<double> s_dxm(ng * np, 0.0), s_dfs(ng * np, 0.0);  // sum w dA, sum w dA c
+        for (size_t i = 0; i < n; ++i) {
+            const size_t g = static_cast<size_t>(self->dataset[i]);
+            if (!(wxx[g] > 0.0)) continue;
+            const double w = weight(i);
+            if (w == 0.0) continue;
+            const double c = (self->flux[i] - ym[g]) - 2.0 * fs[g] * (mags[i] - xm[g]);
+            for (size_t k = 0; k < np; ++k) {
+                const double wd = w * dmag[i * np + k];
+                s_dxm[g * np + k] += wd; s_dfs[g * np + k] += wd * c;
+            }
+        }
+        jac.assign(n * np, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+            const size_t g = static_cast<size_t>(self->dataset[i]);
+            if (!mask[i] || !(wxx[g] > 0.0)) continue;
+            const double a = mags[i] - xm[g];
+            for (size_t k = 0; k < np; ++k) {
+                const double dfs = s_dfs[g * np + k] / wxx[g];
+                const double dxm = s_dxm[g * np + k] / sw[g];
+                const double value = -(dfs * a + fs[g] * (dmag[i * np + k] - dxm)) / self->ferr[i];
+                if (!std::isfinite(value)) throw std::invalid_argument("analytic Jacobian is not finite");
+                jac[i * np + k] = value;
+            }
+        }
+        return true;
+    } catch (const std::exception& exc) {
+        PyErr_SetString(PyExc_ValueError, exc.what());
+        return false;
+    }
+}
+
+PyObject* evaluator_jacobian(EvaluatorObject* self, PyObject* args, PyObject* kwargs) {
+    PyObject* raw_obj=nullptr; PyObject* mask_obj=Py_None; double fd_step=1e-5; const char* method="analytic"; static const char* kwlist[]={"raw_params","active_mask","fd_step","method",nullptr};
+    if(!PyArg_ParseTupleAndKeywords(args,kwargs,"O|Ods",const_cast<char**>(kwlist),&raw_obj,&mask_obj,&fd_step,&method))return nullptr;
+    const std::string kind(method);
+    if (kind == "fd") return evaluator_jacobian_fd(self, raw_obj, mask_obj, fd_step);
+    if (kind != "analytic") { PyErr_SetString(PyExc_ValueError, "method must be 'analytic' or 'fd'"); return nullptr; }
+    std::vector<double> raw, jac; if(!parse_raw(self,raw_obj,raw))return nullptr;
+    if (!analytic_jacobian(self, raw, mask_obj, jac)) return nullptr;
+    const size_t n=self->time.size(); npy_intp dims[2]={static_cast<npy_intp>(n),static_cast<npy_intp>(self->nparam)};
+    PyArrayObject* out=reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(2,dims,NPY_DOUBLE)); if(!out)return nullptr;
+    std::copy(jac.begin(), jac.end(), static_cast<double*>(PyArray_DATA(out)));
     return reinterpret_cast<PyObject*>(out);
 }
 

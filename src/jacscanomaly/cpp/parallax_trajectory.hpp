@@ -103,6 +103,14 @@ public:
             * AU_C_DAY;
     }
 
+    // d(source_peak_time)/dt0 as used by at(): 1 plus the light-time slope.
+    double source_peak_time_derivative(double t0) const {
+        if (strict_gulls_ || time_kind_ != "jd") return 1.0;
+        const Ephemeris& source_ephemeris = convention_ == ObserverConvention::EarthGeocentricOffset ? earth_ : observer_;
+        constexpr double h = 1.0e-3;
+        return 1.0 + (observer_light_time(t0 + h, source_ephemeris) - observer_light_time(t0 - h, source_ephemeris)) / (2.0 * h);
+    }
+
     TrajectoryComponents at(double t, double t0, double tE, double u0, double piEN, double piEE) const {
         if (!(tE > 0.0) || !std::isfinite(tE)) throw std::invalid_argument("tE must be positive");
         Vec3 displacement{};

@@ -285,3 +285,47 @@ def test_adaptive_parallax_plot_is_clipped_to_ephemeris_support():
     assert time[0] == pytest.approx(0.0)
     assert time[-1] == pytest.approx(10.0)
     np.testing.assert_allclose(flux, 3.0)
+
+
+@pytest.mark.parametrize("finite_source", [False, True])
+@pytest.mark.parametrize("scale", ["jd", "hjd"])
+def test_analytic_jacobian_matches_finite_difference(finite_source, scale):
+    spec = TimeSpec(scale)
+    ephemeris_time = np.linspace(-5.0, 25.0, 61)
+    earth = Ephemeris(
+        ephemeris_time,
+        np.column_stack([
+            0.01 * (ephemeris_time - 10.0) ** 2,
+            0.3 * np.sin(ephemeris_time / 5.0),
+            0.002 * (ephemeris_time - 10.0) ** 2,
+        ]),
+        origin="sun", time_spec=spec,
+    )
+    time = np.linspace(0.0, 20.0, 400)
+    dataset = np.arange(time.size) % 2
+    kwargs = dict(
+        ra_deg=268.0, dec_deg=-29.0, tref=10.0, time_spec=spec,
+        earth_ephemeris=earth, finite_source=finite_source,
+    )
+    geometry = ParallaxEvaluator(time, np.ones_like(time), np.ones_like(time), **kwargs)
+    if finite_source:
+        raw = np.asarray([10.3, np.log(4.0), 0.05, np.log(0.08), 0.25, -0.15])
+    else:
+        raw = np.asarray([10.3, np.log(4.0), 0.12, 0.25, -0.15])
+    magnification = geometry.magnification(raw)
+    rng = np.random.default_rng(3)
+    flux = np.where(dataset == 0, 2.0, 0.7) * magnification + 0.3 + 0.01 * rng.normal(size=time.size)
+    evaluator = ParallaxEvaluator(
+        time, flux, np.full_like(time, 0.01), dataset, **kwargs
+    )
+    mask = np.ones(time.size, dtype=bool)
+    mask[50:80] = False
+    for active in (None, mask):
+        native = evaluator._native
+        fd = np.asarray(native.jacobian(raw, active_mask=active, method="fd"))
+        analytic = np.asarray(native.jacobian(raw, active_mask=active))
+        scale_per_column = np.linalg.norm(fd, axis=0)
+        error = np.linalg.norm(analytic - fd, axis=0) / scale_per_column
+        assert np.all(error < 2.0e-4), error
+    with pytest.raises(ValueError):
+        evaluator._native.jacobian(raw, method="nope")
