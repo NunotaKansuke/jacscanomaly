@@ -111,12 +111,19 @@ public:
         return 1.0 + (observer_light_time(t0 + h, source_ephemeris) - observer_light_time(t0 - h, source_ephemeris)) / (2.0 * h);
     }
 
-    TrajectoryComponents at(double t, double t0, double tE, double u0, double piEN, double piEE) const {
-        if (!(tE > 0.0) || !std::isfinite(tE)) throw std::invalid_argument("tE must be positive");
+    // Parameter-independent part of the trajectory at one epoch: the observer
+    // displacement projected on the sky and the (light-time shifted) source
+    // time.  It depends only on the epoch, so evaluators cache it per point.
+    struct SiteGeometry {
+        double d_n = 0.0;
+        double d_e = 0.0;
+        double source_time = 0.0;
+    };
+
+    SiteGeometry site_geometry(double t, Vec3* earth_out = nullptr, Vec3* satellite_out = nullptr) const {
         Vec3 displacement{};
         Vec3 earth_displacement{};
         Vec3 satellite_displacement{};
-        const bool use_light_time = !strict_gulls_ && convention_ == ObserverConvention::EarthGeocentricOffset;
         if (convention_ == ObserverConvention::EarthGeocentricOffset) {
             const double eval_t = ephemeris_time(t, earth_);
             const double dt = t - tref_;
@@ -128,25 +135,57 @@ public:
                 displacement = displacement + satellite_displacement;
             }
         } else {
+            // Strict GULLS uses complete observer and reference heliocentric
+            // orbits; no VBM light-time term is added to the displacement.
             const double eval_t = ephemeris_time(t, observer_);
             const double dt = t - tref_;
             const Vec3 r_obs = observer_.interpolate_position(eval_t);
             displacement = r_obs - reference_ref_ - reference_vref_ * dt;
-            if (convention_ == ObserverConvention::Gulls) {
-                // Strict GULLS uses complete observer and reference heliocentric
-                // orbits; no VBM light-time term is added here.
-                (void)use_light_time;
-            }
         }
-        const double d_n = sky_.north_component(displacement);
-        const double d_e = sky_.east_component(displacement);
-        double source_time = t;
-        double source_peak_time = t0;
+        SiteGeometry out;
+        out.d_n = sky_.north_component(displacement);
+        out.d_e = sky_.east_component(displacement);
+        out.source_time = t;
         if (!strict_gulls_ && time_kind_ == "jd") {
             const Ephemeris& source_ephemeris = convention_ == ObserverConvention::EarthGeocentricOffset ? earth_ : observer_;
-            source_time = t + observer_light_time(t, source_ephemeris);
-            source_peak_time = t0 + observer_light_time(t0, source_ephemeris);
+            out.source_time = t + observer_light_time(t, source_ephemeris);
         }
+        if (earth_out) *earth_out = earth_displacement;
+        if (satellite_out) *satellite_out = satellite_displacement;
+        return out;
+    }
+
+    double source_peak_time(double t0) const {
+        if (!strict_gulls_ && time_kind_ == "jd") {
+            const Ephemeris& source_ephemeris = convention_ == ObserverConvention::EarthGeocentricOffset ? earth_ : observer_;
+            return t0 + observer_light_time(t0, source_ephemeris);
+        }
+        return t0;
+    }
+
+    // tau, beta, u (observer_n/e hold the cached projections) from cached geometry.
+    TrajectoryComponents at(const SiteGeometry& geometry, double source_peak_time, double tE, double u0, double piEN, double piEE) const {
+        if (!(tE > 0.0) || !std::isfinite(tE)) throw std::invalid_argument("tE must be positive");
+        const double d_n = geometry.d_n, d_e = geometry.d_e;
+        const double tau_rect = (geometry.source_time - source_peak_time) / tE;
+        TrajectoryComponents out;
+        out.tau = tau_rect + (-(piEN * d_n + piEE * d_e));
+        out.beta = u0 + (piEE * d_n - piEN * d_e);
+        out.u = std::hypot(out.tau, out.beta);
+        out.observer_n = d_n;
+        out.observer_e = d_e;
+        return out;
+    }
+
+    TrajectoryComponents at(double t, double t0, double tE, double u0, double piEN, double piEE) const {
+        if (!(tE > 0.0) || !std::isfinite(tE)) throw std::invalid_argument("tE must be positive");
+        Vec3 earth_displacement{};
+        Vec3 satellite_displacement{};
+        const SiteGeometry geometry = site_geometry(t, &earth_displacement, &satellite_displacement);
+        const double d_n = geometry.d_n;
+        const double d_e = geometry.d_e;
+        const double source_time = geometry.source_time;
+        const double source_peak_time = this->source_peak_time(t0);
         const double tau_rect = (source_time - source_peak_time) / tE;
         const double d_tau = -(piEN * d_n + piEE * d_e);
         const double d_beta = piEE * d_n - piEN * d_e;

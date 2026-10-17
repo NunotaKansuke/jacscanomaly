@@ -134,6 +134,13 @@ struct EvaluatorObject {
     std::vector<long long> dataset;
     bool finite_source = false;
     int nparam = 0;
+    // Epoch-only trajectory geometry, computed once per evaluator.
+    std::vector<ParallaxTrajectory::SiteGeometry> geometry;
+    // Magnifications of the most recent evaluation, so the Jacobian requested
+    // at the same parameters (the optimizer's usual pattern) skips the
+    // expensive magnification calls.
+    std::vector<double> cached_raw;
+    std::vector<double> cached_magnifications;
 };
 
 bool parse_raw(EvaluatorObject* self, PyObject* obj, std::vector<double>& raw) {
@@ -184,11 +191,14 @@ bool evaluate_internal(EvaluatorObject* self, const std::vector<double>& raw, st
         if (!active_mask(mask_obj, n, mask)) return false;
         magnifications.resize(n);
         std::vector<double> weights(n);
+        const double peak_time = self->trajectory->source_peak_time(t0);
         for (size_t i = 0; i < n; ++i) {
-            const TrajectoryComponents row = self->trajectory->at(self->time[i], t0, tE, u0, piEN, piEE);
+            const TrajectoryComponents row = self->trajectory->at(self->geometry[i], peak_time, tE, u0, piEN, piEE);
             magnifications[i] = (*self->magnification)(row.u, rho);
             weights[i] = mask[i] ? 1.0 / (self->ferr[i] * self->ferr[i]) : 0.0;
         }
+        self->cached_raw = raw;
+        self->cached_magnifications = magnifications;
         std::vector<double> sums(5, 0.0);
         for (size_t i = 0; i < n; ++i) {
             const double w = weights[i];
@@ -321,6 +331,9 @@ int evaluator_init(EvaluatorObject* self, PyObject* args, PyObject* kwargs) {
         self->trajectory = std::make_unique<ParallaxTrajectory>(
             std::move(earth), std::move(satellite), has_satellite, std::move(observer), has_observer || has_satellite,
             std::move(reference), has_reference, ra, dec, tref, mode, std::string(time_kind), mode == ObserverConvention::Gulls);
+        self->geometry.clear(); self->geometry.reserve(self->time.size());
+        for (double t : self->time) self->geometry.push_back(self->trajectory->site_geometry(t));
+        self->cached_raw.clear(); self->cached_magnifications.clear();
         self->finite_source = finite_source != 0;
         self->nparam = self->finite_source ? 6 : 5;
         self->magnification = std::make_unique<VbmMagnification>(self->finite_source, table, tol, reltol);
@@ -441,11 +454,18 @@ bool analytic_jacobian(EvaluatorObject* self, const std::vector<double>& raw, Py
         std::vector<unsigned char> mask;
         if (!active_mask(mask_obj, n, mask)) return false;
         const double peak_slope = self->trajectory->source_peak_time_derivative(t0);
+        const bool reuse = self->cached_raw == raw && self->cached_magnifications.size() == n;
         std::vector<double> mags(n), dmag(n * np, 0.0);
+        const double peak_time = self->trajectory->source_peak_time(t0);
         for (size_t i = 0; i < n; ++i) {
-            const TrajectoryComponents row = self->trajectory->at(self->time[i], t0, tE, u0, piEN, piEE);
+            const TrajectoryComponents row = self->trajectory->at(self->geometry[i], peak_time, tE, u0, piEN, piEE);
             double a, a_u, a_rho;
-            self->magnification->value_and_gradient(row.u, rho, a, a_u, a_rho);
+            if (reuse) {
+                a = self->cached_magnifications[i];
+                self->magnification->gradient(row.u, rho, a_u, a_rho);
+            } else {
+                self->magnification->value_and_gradient(row.u, rho, a, a_u, a_rho);
+            }
             mags[i] = a;
             const double d_n = row.observer_n, d_e = row.observer_e;
             const double tau_rect = row.tau + piEN * d_n + piEE * d_e;

@@ -39,6 +39,11 @@ public:
     // derivative is piecewise, exactly like the interpolant).
     void value_and_gradient(double u, double rho, double& magnification, double& d_du, double& d_drho) {
         magnification = (*this)(u, rho);
+        gradient(u, rho, d_du, d_drho);
+    }
+
+    // Derivatives only, for callers that already hold the magnification.
+    void gradient(double u, double rho, double& d_du, double& d_drho) {
         d_drho = 0.0;
         const double u2 = u * u;
         const double u2_4 = u2 + 4.0;
