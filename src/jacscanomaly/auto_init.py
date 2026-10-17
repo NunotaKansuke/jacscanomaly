@@ -11,9 +11,12 @@ hint.  The standalone FSPL fitter, the parallax fitters and ``Finder`` all call
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
+
+from .config import FinderConfig
+from .pspl_fft import PSPLFFTScanner
 
 
 
@@ -60,3 +63,162 @@ def fspl_initial_guesses(
     if parallax:
         result = tuple(np.concatenate([seed, [0.0, 0.0]]) for seed in result)
     return result
+
+
+def _pspl_seed(t0: float, tE: float, u0: float, parallax: bool) -> np.ndarray:
+    values = [t0, tE, u0] + ([0.0, 0.0] if parallax else [])
+    return np.asarray(values, dtype=float)
+
+
+def pspl_initial_guesses(
+    time,
+    flux,
+    ferr,
+    *,
+    config: Optional[FinderConfig] = None,
+    parallax: bool = False,
+) -> tuple[np.ndarray, ...]:
+    """Return PSPL seeds ``(t0, tE, u0)`` from a profiled ``tE -> (u0, t0)`` FFT bank.
+
+    The scan ranks templates by profiled chi-square with free source and
+    blend fluxes.  With ``parallax=True`` each seed is extended with
+    ``(piEN, piEE) = (0, 0)``.  ``config`` supplies the ``auto_init_*`` scan
+    settings and defaults to :class:`FinderConfig`.
+    """
+    time = np.asarray(time, dtype=float)
+    flux_np = np.asarray(flux, dtype=float)
+    ferr_np = np.asarray(ferr, dtype=float)
+    cfg = config if config is not None else FinderConfig()
+    if cfg.auto_init_u0_min <= 0 or cfg.auto_init_u0_max <= 0:
+        raise ValueError("auto_init_u0_min and auto_init_u0_max must be positive.")
+    if cfg.auto_init_u0_max < cfg.auto_init_u0_min:
+        raise ValueError("auto_init_u0_max must be >= auto_init_u0_min.")
+    if cfg.auto_init_tE_min <= 0 or cfg.auto_init_tE_max <= 0:
+        raise ValueError("auto_init_tE_min and auto_init_tE_max must be positive.")
+    if cfg.auto_init_tE_max < cfg.auto_init_tE_min:
+        raise ValueError("auto_init_tE_max must be >= auto_init_tE_min.")
+
+    n_u0 = int(cfg.auto_init_u0_grid_n)
+    n_tE = int(cfg.auto_init_fft_tE_grid_n)
+    top_k = int(cfg.auto_init_fft_top_k)
+    if n_tE < 1 or n_u0 < 1:
+        raise ValueError("PSPL FFT template-grid sizes must be at least one.")
+    if top_k < 1:
+        raise ValueError("auto_init_fft_top_k must be at least one.")
+
+    u0_grid = np.geomspace(
+        float(cfg.auto_init_u0_min),
+        float(cfg.auto_init_u0_max),
+        n_u0,
+    )
+    tE_grid = np.geomspace(
+        float(cfg.auto_init_tE_min),
+        float(cfg.auto_init_tE_max),
+        n_tE,
+    )
+    scanner = PSPLFFTScanner(
+        grid_dt=cfg.auto_init_fft_grid_dt,
+        max_grid_points=int(cfg.auto_init_fft_max_grid_points),
+        fft_workers=int(cfg.auto_init_fft_workers),
+    )
+    # ``top_k`` is only a post-ranking truncation inside the FFT scanner.
+    # Ask for the complete one-peak-per-template pool here so a handful of
+    # gap/cancellation artefacts cannot hide the first usable seed.
+    candidate_pool_size = max(1, n_u0 * n_tE, int(cfg.auto_init_fft_top_k))
+    search = scanner.search_tE(
+        time,
+        flux_np,
+        ferr_np,
+        u0_grid=u0_grid,
+        tE_grid=tE_grid,
+        top_k=candidate_pool_size,
+    )
+
+    candidates = filter_pspl_fft_candidates(
+        search.candidates,
+        config=cfg,
+        time_np=time,
+        flux_np=flux_np,
+        limit=top_k,
+    )
+    if candidates:
+        return tuple(
+            _pspl_seed(candidate.t0, candidate.tE, candidate.u0, parallax)
+            for candidate in candidates
+        )
+
+    # Keep the automatic workflow recoverable for flat or numerically
+    # singular light curves. The subsequent fitter will decide whether
+    # this conservative seed is usable.
+    i_peak = int(np.nanargmax(flux_np))
+    t0 = float(time[i_peak])
+    teff = float(np.sqrt(float(cfg.auto_init_teff_min) * float(cfg.auto_init_teff_max)))
+    u0 = float(np.sqrt(float(cfg.auto_init_u0_min) * float(cfg.auto_init_u0_max)))
+    return (_pspl_seed(t0, teff / u0, u0, parallax),)
+
+
+
+def filter_pspl_fft_candidates(
+    candidates: Sequence,
+    *,
+    time_np: np.ndarray,
+    flux_np: np.ndarray,
+    limit: int,
+    config: FinderConfig,
+) -> list:
+    """Reject FFT seeds that are not supported by actual observations.
+
+    The profiled FFT score can be dominated by a tiny PSPL wing in a long
+    seasonal gap when the source and blend fluxes nearly cancel.  Apply the
+    fitter's support condition before ranking, and reject that cancellation
+    pathology at the initializer boundary.
+    """
+    cfg = config
+    minimum_support = int(cfg.auto_init_min_t0_support_points)
+    support_coeff = float(cfg.auto_init_t0_support_tE_coeff)
+    nearest_coeff = float(cfg.auto_init_nearest_support_tE_coeff)
+    cancellation_limit = float(cfg.auto_init_max_flux_cancellation_ratio)
+    if minimum_support < 1 or support_coeff <= 0.0:
+        raise ValueError(
+            "PSPL automatic-initialization support settings must be positive."
+        )
+    if nearest_coeff <= 0.0:
+        raise ValueError(
+            "auto_init_nearest_support_tE_coeff must be positive."
+        )
+
+    time_values = np.asarray(time_np, dtype=float)
+    flux_values = np.asarray(flux_np, dtype=float)
+    median_flux = float(np.median(np.abs(flux_values)))
+    selected = []
+    max_selected = max(1, int(limit))
+
+    for candidate in candidates:
+        t0 = float(candidate.t0)
+        t_e = abs(float(candidate.tE))
+        u0 = abs(float(candidate.u0))
+        fs = float(candidate.fs)
+        fb = float(candidate.fb)
+        if not all(np.isfinite(value) for value in (t0, t_e, u0, fs, fb)):
+            continue
+        if t_e <= 0.0 or u0 < float(cfg.auto_init_u0_min):
+            continue
+
+        distances = np.abs(time_values - t0)
+        support = int(np.count_nonzero(distances <= support_coeff * t_e))
+        if support < minimum_support:
+            continue
+        if float(np.min(distances)) > nearest_coeff * t_e:
+            continue
+
+        baseline = max(abs(fs + fb), median_flux, 1.0e-30)
+        cancellation = (abs(fs) + abs(fb)) / baseline
+        if np.isfinite(cancellation_limit) and cancellation > cancellation_limit:
+            continue
+
+        selected.append(candidate)
+        if len(selected) >= max_selected:
+            break
+
+    return selected
+

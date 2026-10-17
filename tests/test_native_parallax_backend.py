@@ -155,6 +155,8 @@ def test_native_annual_fit_recovers_synthetic_and_removes_effect_score():
         tol=1.0e-10,
     )
     fit = fitter.fit(time, flux, ferr, [10.2, 3.7, 0.14, 0.1, -0.05])
+    auto_fit = fitter.fit(time, flux, ferr)
+    np.testing.assert_allclose(np.asarray(auto_fit.params), np.asarray(fit.params), rtol=1.0e-4, atol=1.0e-4)
 
     np.testing.assert_allclose(
         np.asarray(fit.params),

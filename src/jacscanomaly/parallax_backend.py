@@ -435,10 +435,11 @@ class _ParallaxFitter:
         pspl_params=None,
         observed_scale=None,
     ) -> tuple[np.ndarray, ...]:
-        """Build FSPL duration-grid seeds and append zero parallax."""
+        """Build automatic seeds: PSPL FFT scan or FSPL duration grid, with zero parallax."""
+        from .auto_init import fspl_initial_guesses, pspl_initial_guesses
+
         if not self.finite_source:
-            raise ValueError("PSPL parallax fitting still requires an explicit q0.")
-        from .auto_init import fspl_initial_guesses
+            return pspl_initial_guesses(time, flux, ferr, parallax=True)
 
         return fspl_initial_guesses(
             time,
@@ -489,7 +490,7 @@ class _ParallaxFitter:
                     best_fit = candidate
                     best_chi2 = chi2
             if best_fit is None:
-                message = "All automatic FSPL parallax initial guesses failed."
+                message = "All automatic parallax initial guesses failed."
                 if errors:
                     message += f" First error: {errors[0]}"
                 raise RuntimeError(message)
