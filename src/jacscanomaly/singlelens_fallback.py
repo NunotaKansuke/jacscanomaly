@@ -14,6 +14,7 @@ from .contamination import (
     robust_refine_with_fitter,
     scaled_parameter_distance,
 )
+from .auto_init import seed_family
 from .effect_detection import EffectCandidate
 
 
@@ -406,72 +407,23 @@ def detector_seed_parameters(
         # after the null baseline and before the single-effect atlas.
         seeds[1:1] = combined
 
-    # Baseline perturbations are appended after detector-derived seeds so the
-    # seed budget cannot discard the physical detector's best basin.
-    for factor in config.tE_factors:
-        for u0_factor in config.u0_factors:
-            candidate = base.copy()
-            candidate[1] *= float(factor)
-            candidate[2] *= float(u0_factor)
-            seeds.append(candidate)
-            if config.u0_sign_flip:
-                flipped = candidate.copy()
-                flipped[2] *= -1.0
-                seeds.append(flipped)
-            if dimension in (4, 6):
-                tstar0 = max(abs(base[1]) * np.exp(base[3]), 1.0e-8)
-                for tstar_factor in config.t_star_factors:
-                    for ratio in config.rho_over_u0:
-                        fspl_seed = candidate.copy()
-                        rho_ratio = max(float(ratio) * abs(fspl_seed[2]), 1.0e-6)
-                        rho_tstar = max(
-                            float(tstar_factor) * tstar0 / max(abs(fspl_seed[1]), 1.0e-8),
-                            1.0e-6,
-                        )
-                        fspl_seed[3] = np.log(np.sqrt(rho_ratio * rho_tstar))
-                        for offset in config.t0_offsets:
-                            shifted = fspl_seed.copy()
-                            shifted[0] += float(offset) * max(abs(float(candidate[1] * candidate[2])), 1.0e-6)
-                            seeds.append(shifted)
-
-    # Re-centre the same degeneracy families on each physical detector seed.
-    # This is important for FSPL: perturbing only the PSPL baseline can spend
-    # the entire seed budget in the wrong rho basin, leaving the detector's
-    # good 4-D seed without an independent basin check.
-    for anchor in tuple(detector_anchors):
-        for factor in config.tE_factors:
-            for u0_factor in config.u0_factors:
-                candidate = anchor.copy()
-                candidate[1] *= float(factor)
-                candidate[2] *= float(u0_factor)
-                seeds.append(candidate)
-                if config.u0_sign_flip:
-                    flipped = candidate.copy()
-                    flipped[2] *= -1.0
-                    seeds.append(flipped)
-                if dimension in (4, 6):
-                    tstar0 = max(abs(anchor[1]) * np.exp(anchor[3]), 1.0e-8)
-                    for tstar_factor in config.t_star_factors:
-                        for ratio in config.rho_over_u0:
-                            fspl_seed = candidate.copy()
-                            rho_ratio = max(
-                                float(ratio) * abs(fspl_seed[2]),
-                                1.0e-6,
-                            )
-                            rho_tstar = max(
-                                float(tstar_factor) * tstar0
-                                / max(abs(fspl_seed[1]), 1.0e-8),
-                                1.0e-6,
-                            )
-                            fspl_seed[3] = np.log(
-                                np.sqrt(rho_ratio * rho_tstar)
-                            )
-                            for offset in config.t0_offsets:
-                                shifted = fspl_seed.copy()
-                                shifted[0] += float(offset) * max(
-                                    abs(float(candidate[1] * candidate[2])), 1.0e-6
-                                )
-                                seeds.append(shifted)
+    # Degeneracy families around the null baseline come after the detector
+    # seeds so the seed budget cannot discard the physical detector's best
+    # basin, then the same families are re-centred on each detector anchor.
+    # This matters for FSPL: perturbing only the PSPL baseline can spend the
+    # whole budget in the wrong rho basin.
+    for anchor in (base, *detector_anchors):
+        seeds.extend(
+            seed_family(
+                anchor,
+                tE_factors=config.tE_factors,
+                u0_factors=config.u0_factors,
+                u0_sign_flip=config.u0_sign_flip,
+                t_star_factors=config.t_star_factors if dimension in (4, 6) else (),
+                rho_over_u0=config.rho_over_u0,
+                t0_offsets=config.t0_offsets,
+            )
+        )
 
     unique: list[np.ndarray] = []
     for seed in seeds:

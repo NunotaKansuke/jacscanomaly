@@ -222,3 +222,52 @@ def filter_pspl_fft_candidates(
 
     return selected
 
+
+
+def seed_family(
+    anchor,
+    *,
+    tE_factors: Sequence[float],
+    u0_factors: Sequence[float],
+    u0_sign_flip: bool,
+    t_star_factors: Sequence[float] = (),
+    rho_over_u0: Sequence[float] = (),
+    t0_offsets: Sequence[float] = (0.0,),
+) -> list[np.ndarray]:
+    """Degeneracy family around one anchor seed, in a fixed priority order.
+
+    * ``tE x u0`` rescalings, each also with the opposite ``u0`` sign.  The sign
+      is a genuine degeneracy for point lenses and, with parallax, selects
+      physically different solutions, so both signs are always tried.
+    * For finite-source anchors (pass ``t_star_factors``), a ``rho`` grid built
+      from ``rho = sqrt((rho/u0) * (t_star / tE))`` with ``t0`` offsets in units
+      of ``tE * u0`` (the 4th entry of ``anchor`` is ``ln rho``).
+    """
+    anchor = np.asarray(anchor, dtype=float).reshape(-1)
+    seeds: list[np.ndarray] = []
+    finite_source = len(tuple(t_star_factors)) > 0
+    tstar0 = max(abs(anchor[1]) * np.exp(anchor[3]), 1.0e-8) if finite_source else 0.0
+    for factor in tE_factors:
+        for u0_factor in u0_factors:
+            candidate = anchor.copy()
+            candidate[1] *= float(factor)
+            candidate[2] *= float(u0_factor)
+            seeds.append(candidate)
+            if u0_sign_flip:
+                flipped = candidate.copy()
+                flipped[2] *= -1.0
+                seeds.append(flipped)
+            for tstar_factor in t_star_factors:
+                for ratio in rho_over_u0:
+                    fspl_seed = candidate.copy()
+                    rho_ratio = max(float(ratio) * abs(fspl_seed[2]), 1.0e-6)
+                    rho_tstar = max(
+                        float(tstar_factor) * tstar0 / max(abs(fspl_seed[1]), 1.0e-8),
+                        1.0e-6,
+                    )
+                    fspl_seed[3] = np.log(np.sqrt(rho_ratio * rho_tstar))
+                    for offset in t0_offsets:
+                        shifted = fspl_seed.copy()
+                        shifted[0] += float(offset) * max(abs(float(candidate[1] * candidate[2])), 1.0e-6)
+                        seeds.append(shifted)
+    return seeds
