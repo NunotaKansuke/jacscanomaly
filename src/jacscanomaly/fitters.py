@@ -24,6 +24,7 @@ from typing import Optional
 import numpy as np
 import jax.numpy as jnp
 
+from .auto_init import fspl_initial_guesses
 from .plot import SingleLensPlotter
 from .singlelens_fit import SingleLensFitResult
 from .parallax_backend import (
@@ -604,16 +605,10 @@ class FSPLFitter:
         observed_scale=None,
     ) -> tuple[np.ndarray, ...]:
         """Build duration-grid FSPL seeds for a fit without an explicit p0."""
-        from .fspl_initialization import fspl_template_initial_guesses
-
-        proxy = SimpleNamespace(
-            time=time_np,
-            flux=flux_np,
-            ferr=ferr_np,
-            params=pspl_params,
-        )
-        return fspl_template_initial_guesses(
-            proxy,
+        return fspl_initial_guesses(
+            time_np,
+            flux_np,
+            ferr_np,
             top_k=4,
             pspl_params=pspl_params,
             observed_scale=observed_scale,

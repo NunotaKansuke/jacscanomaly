@@ -438,26 +438,19 @@ class _ParallaxFitter:
         """Build FSPL duration-grid seeds and append zero parallax."""
         if not self.finite_source:
             raise ValueError("PSPL parallax fitting still requires an explicit q0.")
-        from .fspl_initialization import fspl_template_initial_guesses
+        from .auto_init import fspl_initial_guesses
 
-        proxy = SimpleNamespace(
-            time=time,
-            flux=flux,
-            ferr=ferr,
-            params=pspl_params,
-        )
-        base_seeds = fspl_template_initial_guesses(
-            proxy,
+        return fspl_initial_guesses(
+            time,
+            flux,
+            ferr,
             top_k=4,
             pspl_params=pspl_params,
             observed_scale=observed_scale,
             magnification_tol=self.magnification_tol,
             magnification_reltol=self.magnification_reltol,
             espl_table_path=self.espl_table_path,
-        )
-        return tuple(
-            np.concatenate([np.asarray(seed, dtype=float), [0.0, 0.0]])
-            for seed in base_seeds
+            parallax=True,
         )
 
     def fit(

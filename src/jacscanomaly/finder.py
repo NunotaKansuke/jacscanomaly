@@ -15,6 +15,7 @@ from .fitters import (
     PSPLFitter,
     FSPLFitter,
 )
+from .auto_init import fspl_initial_guesses
 from .plot import AnomalyPlotter
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
@@ -2106,30 +2107,17 @@ class Finder:
         PSPL residual as a template.
         """
         cfg = self.config
-        flux_np = np.asarray(jax.device_get(flux_j), dtype=float)
-        ferr_np = np.asarray(jax.device_get(ferr_j), dtype=float)
-        requested = max(1, int(cfg.auto_init_fspl_template_top_k))
-        proxy = SimpleNamespace(
-            time=time_np,
-            flux=flux_np,
-            ferr=ferr_np,
-            params=None,
-        )
-        seeds = fspl_template_initial_guesses(
-            proxy,
-            top_k=requested,
+        seeds = fspl_initial_guesses(
+            time_np,
+            np.asarray(jax.device_get(flux_j), dtype=float),
+            np.asarray(jax.device_get(ferr_j), dtype=float),
+            top_k=cfg.auto_init_fspl_template_top_k,
             magnification_tol=float(cfg.magnification_tol),
             magnification_reltol=float(cfg.magnification_reltol),
             espl_table_path=getattr(self.fitter, "espl_table_path", None),
+            parallax=cfg.fitter_kind == "fspl_parallax",
         )
-        result = np.asarray(seeds, dtype=float)
-        if result.ndim != 2 or result.shape[0] == 0:
-            raise RuntimeError("FSPL duration initializer returned no seeds.")
-        if cfg.fitter_kind == "fspl_parallax":
-            result = np.column_stack(
-                [result, np.zeros((result.shape[0], 2), dtype=float)]
-            )
-        return result
+        return np.asarray(seeds, dtype=float)
 
     def _estimate_pspl_fft_initial_guesses(
         self,
