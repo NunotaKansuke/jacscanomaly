@@ -329,3 +329,41 @@ def test_analytic_jacobian_matches_finite_difference(finite_source, scale):
         assert np.all(error < 2.0e-4), error
     with pytest.raises(ValueError):
         evaluator._native.jacobian(raw, method="nope")
+
+
+@pytest.mark.parametrize("kind", ["pspl", "fspl"])
+def test_single_lens_analytic_jacobian_matches_finite_difference(kind):
+    from scipy.optimize._numdiff import approx_derivative
+
+    from jacscanomaly import fitters
+
+    rng = np.random.default_rng(3)
+    time = np.linspace(-40.0, 40.0, 300)
+    ferr = np.full(time.size, 0.02)
+    z = np.array([1.0, np.log(12.0), 0.05, np.log(0.08)] if kind == "fspl" else [1.0, np.log(12.0), 0.3])
+    table = fitters.default_espl_table_path()
+
+    def magnification_and_gradient(z):
+        if kind == "pspl":
+            q = fitters.PSPLFitter._decode(z)
+            return fitters._pspl_magnification(time, *q), fitters._pspl_gradient(time, *q)
+        q = fitters.FSPLFitter._decode(z)
+        u, du = fitters._trajectory_gradient(time, *q[:3])
+        rho = np.exp(q[3])
+        a, d_du, d_drho = fitters._cpp_fspl_magnification_gradient(
+            u, rho, espl_table_path=table, tol=1e-4, reltol=1e-4
+        )
+        return a, np.column_stack([d_du[:, None] * du, d_drho * rho])
+
+    flux = magnification_and_gradient(z)[0] + 0.3 + rng.normal(0.0, 0.02, time.size)
+
+    def residual(z):
+        a = magnification_and_gradient(z)[0]
+        fs, fb = fitters._solve_fs_fb_numpy(a, flux, ferr)
+        return (flux - fs * a - fb) / ferr
+
+    a, gradient = magnification_and_gradient(z)
+    analytic = fitters._profiled_residual_jacobian(a, gradient, flux, ferr)
+    numeric = approx_derivative(residual, z, method="2-point", rel_step=1e-7)
+    error = np.abs(analytic - numeric).max(axis=0) / np.abs(numeric).max(axis=0)
+    assert np.all(error < 1e-5)

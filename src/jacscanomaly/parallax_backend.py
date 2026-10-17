@@ -332,8 +332,8 @@ class ParallaxEvaluator:
     def residual(self, raw_params, active_mask=None):
         return np.asarray(self._native.residual(np.asarray(raw_params, dtype=float), active_mask=active_mask))
 
-    def jacobian(self, raw_params, active_mask=None, fd_step=1.0e-5):
-        return np.asarray(self._native.jacobian(np.asarray(raw_params, dtype=float), active_mask=active_mask, fd_step=float(fd_step)))
+    def jacobian(self, raw_params, active_mask=None, fd_step=1.0e-5, method="analytic"):
+        return np.asarray(self._native.jacobian(np.asarray(raw_params, dtype=float), active_mask=active_mask, fd_step=float(fd_step), method=method))
 
     def residual_and_jacobian(self, raw_params, active_mask=None, fd_step=1.0e-5):
         residual, jacobian = self._native.residual_and_jacobian(np.asarray(raw_params, dtype=float), active_mask=active_mask, fd_step=float(fd_step))

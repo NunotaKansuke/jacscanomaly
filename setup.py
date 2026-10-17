@@ -123,9 +123,9 @@ extensions.append(
     Extension(
         "jacscanomaly._vbm_cpp",
         [str(VBM_CPP_SOURCE)],
-        include_dirs=[np.get_include()],
+        include_dirs=[np.get_include(), str(VBM_CPP_SOURCE.parent)],
         language="c++",
-        depends=[str(VBM_CPP_SOURCE)],
+        depends=[str(VBM_CPP_SOURCE), "src/jacscanomaly/cpp/vbm_magnification.hpp"],
     )
 )
 extensions.append(

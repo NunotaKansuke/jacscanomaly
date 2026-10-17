@@ -4,12 +4,14 @@
 #include <numpy/arrayobject.h>
 
 #include "VBMicrolensingLibrary.h"
+#include "cpp/vbm_magnification.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -118,6 +120,78 @@ PyObject* finite_source_magnification(
 
     Py_DECREF(u_array);
     return reinterpret_cast<PyObject*>(output);
+}
+
+PyObject* finite_source_magnification_gradient(
+    PyObject*, PyObject* args, PyObject* kwargs
+) {
+    PyObject* u_object = nullptr;
+    PyObject* table_object = Py_None;
+    double rho = 0.0;
+    double tol = 1.0e-4;
+    double reltol = 1.0e-4;
+    static const char* kwlist[] = {
+        "u", "rho", "espl_table", "tol", "reltol", nullptr
+    };
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "Od|Odd", const_cast<char**>(kwlist),
+            &u_object, &rho, &table_object, &tol, &reltol)) {
+        return nullptr;
+    }
+    PyArrayObject* u_array = as_double_array(u_object);
+    if (u_array == nullptr) return nullptr;
+    if (PyArray_NDIM(u_array) != 1 || !std::isfinite(rho) || !(rho > 0.0)
+        || !std::isfinite(tol) || !(tol > 0.0)
+        || !std::isfinite(reltol) || !(reltol > 0.0)) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "u must be one-dimensional; rho, tol, and reltol must be finite and positive."
+        );
+        Py_DECREF(u_array);
+        return nullptr;
+    }
+    std::string table;
+    if (table_object != Py_None) {
+        const char* text = PyUnicode_AsUTF8(table_object);
+        if (text == nullptr) {
+            Py_DECREF(u_array);
+            return nullptr;
+        }
+        table = text;
+    }
+    const npy_intp n = PyArray_DIM(u_array, 0);
+    npy_intp dimensions[1] = {n};
+    PyArrayObject* outputs[3];
+    for (auto& output : outputs) {
+        output = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, dimensions, NPY_DOUBLE));
+    }
+    if (!outputs[0] || !outputs[1] || !outputs[2]) {
+        for (auto* output : outputs) Py_XDECREF(output);
+        Py_DECREF(u_array);
+        return nullptr;
+    }
+    try {
+        jacscanomaly::VbmMagnification magnifier(true, table, tol, reltol);
+        const double* input = static_cast<const double*>(PyArray_DATA(u_array));
+        double* value = static_cast<double*>(PyArray_DATA(outputs[0]));
+        double* d_du = static_cast<double*>(PyArray_DATA(outputs[1]));
+        double* d_drho = static_cast<double*>(PyArray_DATA(outputs[2]));
+        for (npy_intp index = 0; index < n; ++index) {
+            if (!std::isfinite(input[index])) {
+                throw std::invalid_argument("u must contain only finite values.");
+            }
+            magnifier.value_and_gradient(
+                std::abs(input[index]), rho, value[index], d_du[index], d_drho[index]
+            );
+        }
+    } catch (const std::exception& exception) {
+        for (auto* output : outputs) Py_DECREF(output);
+        Py_DECREF(u_array);
+        PyErr_SetString(PyExc_ValueError, exception.what());
+        return nullptr;
+    }
+    Py_DECREF(u_array);
+    return Py_BuildValue("NNN", outputs[0], outputs[1], outputs[2]);
 }
 
 PyObject* score_finite_source_seeds(
@@ -348,6 +422,12 @@ PyMethodDef methods[] = {
         reinterpret_cast<PyCFunction>(finite_source_magnification),
         METH_VARARGS | METH_KEYWORDS,
         "Evaluate finite-source point-lens magnification in the compiled kernel."
+    },
+    {
+        "fspl_magnification_gradient",
+        reinterpret_cast<PyCFunction>(finite_source_magnification_gradient),
+        METH_VARARGS | METH_KEYWORDS,
+        "Finite-source magnification with analytic derivatives (A, dA/du, dA/drho)."
     },
     {
         "score_fspl_seeds",

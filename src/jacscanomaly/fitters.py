@@ -92,6 +92,59 @@ def _pspl_magnification(time: np.ndarray, t0: float, tE: float, u0: float) -> np
     )
 
 
+def _profiled_residual_jacobian(
+    magnification: np.ndarray,
+    magnification_gradient: np.ndarray,
+    flux: np.ndarray,
+    ferr: np.ndarray,
+) -> np.ndarray:
+    """Jacobian of the profiled-flux residual (variable projection).
+
+    ``magnification_gradient`` is dA/dz with shape (n, k).  With
+    r = (y - ym - fs (A - xm)) / sigma and fs = Sxy / Sxx the exact derivative
+    including the dependence of the profiled fs and fb on the parameters is
+    dr = -(dfs (A - xm) + fs (dA - dxm)) / sigma.
+    """
+    errors = np.maximum(np.asarray(ferr, dtype=float), 1.0e-12)
+    weights = 1.0 / (errors * errors)
+    weight_sum = np.sum(weights)
+    x_mean = np.sum(weights * magnification) / weight_sum
+    y_mean = np.sum(weights * flux) / weight_sum
+    centered = magnification - x_mean
+    denominator = np.sum(weights * centered * centered)
+    source_flux = np.sum(weights * centered * (flux - y_mean)) / denominator
+    projection = weights * (flux - y_mean - 2.0 * source_flux * centered)
+    d_source_flux = (projection @ magnification_gradient) / denominator
+    d_x_mean = (weights @ magnification_gradient) / weight_sum
+    return -(
+        np.outer(centered, d_source_flux)
+        + source_flux * (magnification_gradient - d_x_mean)
+    ) / errors[:, None]
+
+
+def _trajectory_gradient(
+    time: np.ndarray, t0: float, tE: float, u0: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return u(t) and du/d(t0, ln tE, u0) for the rectilinear trajectory."""
+    tE_safe = max(abs(float(tE)), 1.0e-12)
+    tau = (np.asarray(time, dtype=float) - float(t0)) / tE_safe
+    u = np.sqrt(tau * tau + float(u0) * float(u0))
+    u_safe = np.maximum(u, 1.0e-12)
+    du = np.column_stack(
+        [-tau / (tE_safe * u_safe), -tau * tau / u_safe, np.full_like(u, float(u0)) / u_safe]
+    )
+    return u, du
+
+
+def _pspl_gradient(time: np.ndarray, t0: float, tE: float, u0: float) -> np.ndarray:
+    """dA/d(t0, ln tE, u0) of the point-source point-lens magnification."""
+    u, du = _trajectory_gradient(time, t0, tE, u0)
+    u_safe = np.maximum(u, 1.0e-12)
+    u2 = u_safe * u_safe
+    dA_du = -8.0 / (u2 * (u2 + 4.0) * np.sqrt(u2 + 4.0))
+    return dA_du[:, None] * du
+
+
 def _run_scipy_lm(
     residual,
     initial: np.ndarray,
@@ -99,19 +152,20 @@ def _run_scipy_lm(
     maxiter: int,
     tol: float,
     diff_step: Optional[float] = None,
+    jac="2-point",
 ):
     if least_squares is None:
         raise ImportError("scipy is required for single-lens fitting.")
     tolerance = max(float(tol), 1.0e-14)
     kwargs = {
-        "jac": "2-point",
+        "jac": jac,
         "method": "lm",
         "max_nfev": max(1, int(maxiter)),
         "xtol": tolerance,
         "ftol": tolerance,
         "gtol": tolerance,
     }
-    if diff_step is not None:
+    if diff_step is not None and jac == "2-point":
         kwargs["diff_step"] = float(diff_step)
     return least_squares(residual, np.asarray(initial, dtype=float), **kwargs)
 
@@ -168,6 +222,34 @@ def _cpp_fspl_magnification(
     if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
         raise ValueError("VBMicrolensing returned an invalid FSPL magnification.")
     return values
+
+
+def _cpp_fspl_magnification_gradient(
+    u: np.ndarray,
+    rho: float,
+    *,
+    espl_table_path: Optional[str],
+    tol: float,
+    reltol: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """FSPL magnification with analytic dA/du and dA/drho from the C++ kernel."""
+    if _vbm_cpp is None or not hasattr(_vbm_cpp, "fspl_magnification_gradient"):
+        raise ImportError(
+            "Analytic FSPL Jacobian requires the compiled jacscanomaly._vbm_cpp "
+            "backend; rebuild jacscanomaly."
+        )
+    values, d_du, d_drho = _vbm_cpp.fspl_magnification_gradient(
+        np.asarray(u, dtype=float),
+        max(float(rho), 1.0e-12),
+        espl_table=espl_table_path,
+        tol=float(tol),
+        reltol=float(reltol),
+    )
+    return (
+        np.asarray(values, dtype=float),
+        np.asarray(d_du, dtype=float),
+        np.asarray(d_drho, dtype=float),
+    )
 
 
 @dataclass
@@ -253,11 +335,27 @@ class PSPLFitter:
             values = (flux_np - (fs * magnification + fb)) / ferr_np
             return values if np.all(np.isfinite(values)) else np.full_like(values, 1.0e50)
 
+        def jacobian(z):
+            q = self._decode(z)
+            magnification = self._magnification(time_np, q)
+            gradient = _pspl_gradient(time_np, q[0], q[1], q[2])
+            if np.isfinite(gradient).all():
+                try:
+                    value = _profiled_residual_jacobian(
+                        magnification, gradient, flux_np, ferr_np
+                    )
+                    if np.isfinite(value).all():
+                        return value
+                except FloatingPointError:
+                    pass
+            return np.zeros((time_np.size, 3), dtype=float)
+
         result = _run_scipy_lm(
             residual,
             z0,
             maxiter=self.maxiter,
             tol=self.tol,
+            jac=jacobian,
         )
         q = self._decode(np.asarray(result.x, dtype=float))
         return self._make_fit(time_np, flux_np, ferr_np, q, result)
@@ -439,12 +537,38 @@ class FSPLFitter:
             except Exception:
                 return np.full(time_np.size, 1.0e50, dtype=float)
 
+        def jacobian(z):
+            q = self._decode(z)
+            try:
+                t0, tE, u0, logrho = map(float, q)
+                u, du = _trajectory_gradient(fit_time, t0, tE, u0)
+                rho = np.exp(np.clip(logrho, -50.0, 10.0))
+                magnification, dA_du, dA_drho = _cpp_fspl_magnification_gradient(
+                    u,
+                    rho,
+                    espl_table_path=self.espl_table_path,
+                    tol=self.magnification_tol,
+                    reltol=self.magnification_reltol,
+                )
+                in_range = -50.0 < logrho < 10.0
+                dA_dlogrho = dA_drho * rho if in_range else np.zeros_like(dA_drho)
+                gradient = np.column_stack([dA_du[:, None] * du, dA_dlogrho])
+                value = _profiled_residual_jacobian(
+                    magnification, gradient, flux_np, ferr_np
+                )
+                if not np.isfinite(value).all():
+                    raise ValueError
+                return value
+            except Exception:
+                return np.zeros((time_np.size, 4), dtype=float)
+
         def run_once(start: np.ndarray):
             result = _run_scipy_lm(
                 residual,
                 np.asarray(start, dtype=float),
                 maxiter=self.maxiter,
                 tol=self.tol,
+                jac=jacobian,
             )
             q = self._decode(np.asarray(result.x, dtype=float))
             q[0] += time_origin
