@@ -298,8 +298,9 @@ def automatic_seeds(
 
     Anchors are the data-driven initial guesses (PSPL FFT bank, or the FSPL
     duration grid, whose ``rho`` comes from the observed duration), followed by
-    the ``tE x u0`` degeneracy family -- each with both ``u0`` signs -- around
-    each anchor in priority order, capped at ``max_seeds``.  Assumptions:
+    (with ``parallax=True`` only) the ``tE x u0`` degeneracy family -- each with
+    both ``u0`` signs -- around each anchor in priority order, capped at
+    ``max_seeds``.  Assumptions:
     ``rho`` is not re-gridded around finite-source anchors, and parallax
     starts at ``piE = 0`` (no direction hint exists without a detector).
     """
@@ -314,7 +315,11 @@ def automatic_seeds(
     else:
         anchors = pspl_initial_guesses(time, flux, ferr, config=config, parallax=parallax)
     seeds = list(anchors)
-    for anchor in anchors:
+    # Without parallax the model depends on u0 only through |u|, so the sign
+    # flip is an exact duplicate and the tE x u0 family was never part of the
+    # point-lens fits: keep just the anchors.  With parallax the sign selects
+    # physically different solutions, so the family is added.
+    for anchor in anchors if parallax else ():
         seeds.extend(
             seed_family(
                 anchor,
