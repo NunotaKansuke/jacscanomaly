@@ -24,7 +24,7 @@ from typing import Optional
 import numpy as np
 import jax.numpy as jnp
 
-from .auto_init import fspl_initial_guesses
+from .auto_init import automatic_seeds, best_fit_over_seeds
 from .plot import SingleLensPlotter
 from .singlelens_fit import SingleLensFitResult
 from .parallax_backend import (
@@ -318,8 +318,16 @@ class PSPLFitter:
         self._last_fit = fit
         return fit
 
-    def fit(self, time, flux, ferr, p0) -> SingleLensFitResult:
+    def fit(self, time, flux, ferr, p0=None) -> SingleLensFitResult:
+        """Fit PSPL, using the shared automatic multistart when ``p0`` is absent."""
         time_np, flux_np, ferr_np = _fit_arrays(time, flux, ferr)
+        if p0 is None:
+            seeds = automatic_seeds(time_np, flux_np, ferr_np, finite_source=False)
+            best_fit = best_fit_over_seeds(
+                lambda seed: self.fit(time_np, flux_np, ferr_np, seed), seeds, "PSPL"
+            )
+            self._last_fit = best_fit
+            return best_fit
         q0 = np.asarray(p0, dtype=float).reshape(-1)
         if q0.size != 3:
             raise ValueError("PSPL p0 must contain (t0, tE, u0).")
@@ -604,12 +612,12 @@ class FSPLFitter:
         pspl_params=None,
         observed_scale=None,
     ) -> tuple[np.ndarray, ...]:
-        """Build duration-grid FSPL seeds for a fit without an explicit p0."""
-        return fspl_initial_guesses(
+        """Shared multistart set (duration-grid anchors + degeneracy family)."""
+        return automatic_seeds(
             time_np,
             flux_np,
             ferr_np,
-            top_k=4,
+            finite_source=True,
             pspl_params=pspl_params,
             observed_scale=observed_scale,
             magnification_tol=self.magnification_tol,
@@ -637,29 +645,11 @@ class FSPLFitter:
                 pspl_params=pspl_params,
                 observed_scale=observed_scale,
             )
-            best_fit = None
-            best_chi2 = np.inf
-            errors = []
-            for seed in seeds:
-                try:
-                    candidate = self._fit_from_seed(
-                        time_np,
-                        flux_np,
-                        ferr_np,
-                        seed,
-                    )
-                    chi2 = float(np.asarray(candidate.chi2))
-                except Exception as exc:
-                    errors.append(exc)
-                    continue
-                if np.isfinite(chi2) and chi2 < best_chi2:
-                    best_fit = candidate
-                    best_chi2 = chi2
-            if best_fit is None:
-                message = "All automatic FSPL initial guesses failed."
-                if errors:
-                    message += f" First error: {errors[0]}"
-                raise RuntimeError(message)
+            best_fit = best_fit_over_seeds(
+                lambda seed: self._fit_from_seed(time_np, flux_np, ferr_np, seed),
+                seeds,
+                "FSPL",
+            )
             self._last_fit = best_fit
             return best_fit
         return self._fit_from_seed(time_np, flux_np, ferr_np, p0)

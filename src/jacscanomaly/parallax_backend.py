@@ -435,23 +435,20 @@ class _ParallaxFitter:
         pspl_params=None,
         observed_scale=None,
     ) -> tuple[np.ndarray, ...]:
-        """Build automatic seeds: PSPL FFT scan or FSPL duration grid, with zero parallax."""
-        from .auto_init import fspl_initial_guesses, pspl_initial_guesses
+        """Shared multistart set, with parallax starting at zero."""
+        from .auto_init import automatic_seeds
 
-        if not self.finite_source:
-            return pspl_initial_guesses(time, flux, ferr, parallax=True)
-
-        return fspl_initial_guesses(
+        return automatic_seeds(
             time,
             flux,
             ferr,
-            top_k=4,
+            finite_source=self.finite_source,
+            parallax=True,
             pspl_params=pspl_params,
             observed_scale=observed_scale,
             magnification_tol=self.magnification_tol,
             magnification_reltol=self.magnification_reltol,
             espl_table_path=self.espl_table_path,
-            parallax=True,
         )
 
     def fit(
@@ -476,24 +473,11 @@ class _ParallaxFitter:
                 pspl_params=pspl_params,
                 observed_scale=observed_scale,
             )
-            best_fit = None
-            best_chi2 = np.inf
-            errors = []
-            for seed in seeds:
-                try:
-                    candidate = self.fit(time, flux, ferr, seed)
-                    chi2 = float(np.asarray(candidate.chi2))
-                except Exception as exc:
-                    errors.append(exc)
-                    continue
-                if np.isfinite(chi2) and chi2 < best_chi2:
-                    best_fit = candidate
-                    best_chi2 = chi2
-            if best_fit is None:
-                message = "All automatic parallax initial guesses failed."
-                if errors:
-                    message += f" First error: {errors[0]}"
-                raise RuntimeError(message)
+            from .auto_init import best_fit_over_seeds
+
+            best_fit = best_fit_over_seeds(
+                lambda seed: self.fit(time, flux, ferr, seed), seeds, "parallax"
+            )
             self._last_fit = best_fit
             return best_fit
         evaluator = ParallaxEvaluator(

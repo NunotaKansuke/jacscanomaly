@@ -18,6 +18,12 @@ import numpy as np
 from .config import FinderConfig
 from .pspl_fft import PSPLFFTScanner
 
+# Degeneracy-family grid shared by every automatic multistart (and by the
+# detector fallback's FallbackConfig defaults).
+SEED_TE_FACTORS = (0.75, 1.0, 1.5)
+SEED_U0_FACTORS = (0.7, 1.0, 1.4)
+SEED_MAX = 24
+
 
 
 def fspl_initial_guesses(
@@ -271,3 +277,76 @@ def seed_family(
                         shifted[0] += float(offset) * max(abs(float(candidate[1] * candidate[2])), 1.0e-6)
                         seeds.append(shifted)
     return seeds
+
+
+def automatic_seeds(
+    time,
+    flux,
+    ferr,
+    *,
+    finite_source: bool,
+    parallax: bool = False,
+    max_seeds: int = SEED_MAX,
+    pspl_params=None,
+    observed_scale=None,
+    magnification_tol: float = 1.0e-4,
+    magnification_reltol: float = 1.0e-4,
+    espl_table_path: Optional[str] = None,
+    config: Optional[FinderConfig] = None,
+) -> tuple[np.ndarray, ...]:
+    """The one automatic multistart set used by every fitter when no seed is given.
+
+    Anchors are the data-driven initial guesses (PSPL FFT bank, or the FSPL
+    duration grid, whose ``rho`` comes from the observed duration), followed by
+    the ``tE x u0`` degeneracy family -- each with both ``u0`` signs -- around
+    each anchor in priority order, capped at ``max_seeds``.  Assumptions:
+    ``rho`` is not re-gridded around finite-source anchors, and parallax
+    starts at ``piE = 0`` (no direction hint exists without a detector).
+    """
+    if finite_source:
+        anchors = fspl_initial_guesses(
+            time, flux, ferr, top_k=4, pspl_params=pspl_params,
+            observed_scale=observed_scale,
+            magnification_tol=magnification_tol,
+            magnification_reltol=magnification_reltol,
+            espl_table_path=espl_table_path, parallax=parallax,
+        )
+    else:
+        anchors = pspl_initial_guesses(time, flux, ferr, config=config, parallax=parallax)
+    seeds = list(anchors)
+    for anchor in anchors:
+        seeds.extend(
+            seed_family(
+                anchor,
+                tE_factors=SEED_TE_FACTORS,
+                u0_factors=SEED_U0_FACTORS,
+                u0_sign_flip=True,
+            )
+        )
+    unique: list[np.ndarray] = []
+    for seed in seeds:
+        if not any(np.allclose(seed, other, rtol=0.0, atol=1.0e-12) for other in unique):
+            unique.append(np.asarray(seed, dtype=float))
+        if len(unique) >= max(1, int(max_seeds)):
+            break
+    return tuple(unique)
+
+
+def best_fit_over_seeds(fit_one, seeds, label: str):
+    """Fit every seed with ``fit_one(seed)`` and return the lowest-chi-square fit."""
+    best, best_chi2, errors = None, np.inf, []
+    for seed in seeds:
+        try:
+            candidate = fit_one(seed)
+            chi2 = float(np.asarray(candidate.chi2))
+        except Exception as exc:
+            errors.append(exc)
+            continue
+        if np.isfinite(chi2) and chi2 < best_chi2:
+            best, best_chi2 = candidate, chi2
+    if best is None:
+        message = f"All automatic {label} initial guesses failed."
+        if errors:
+            message += f" First error: {errors[0]}"
+        raise RuntimeError(message)
+    return best

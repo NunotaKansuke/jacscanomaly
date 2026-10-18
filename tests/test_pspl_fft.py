@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 import jax.numpy as jnp
 
+from jacscanomaly.auto_init import filter_pspl_fft_candidates, pspl_initial_guesses
 import jacscanomaly
 from jacscanomaly import (
     Finder,
@@ -254,8 +255,7 @@ def test_finder_uses_tE_outer_batched_pspl_fft_initialization():
     flux = 1.2 + 2.5 * pspl_excess_magnification(time - true_t0, true_u0, true_teff)
     flux += rng.normal(0.0, ferr)
 
-    finder = Finder(
-        FinderConfig(
+    config = FinderConfig(
             fitter_kind="pspl",
             auto_init_teff_min=0.3,
             auto_init_teff_max=1.0,
@@ -269,14 +269,8 @@ def test_finder_uses_tE_outer_batched_pspl_fft_initialization():
             auto_init_fft_grid_dt=0.05,
             auto_init_fft_max_grid_points=1_000,
             auto_init_fft_top_k=4,
-        )
     )
-    guesses = finder._estimate_single_lens_initial_guesses(
-        time_j=jnp.asarray(time),
-        flux_j=jnp.asarray(flux),
-        ferr_j=jnp.asarray(ferr),
-        time_np=time,
-    )
+    guesses = np.asarray(pspl_initial_guesses(time, flux, ferr, config=config))
 
     assert guesses.shape == (4, 3)
     teff = guesses[:, 1] * guesses[:, 2]
@@ -289,7 +283,6 @@ def test_finder_uses_tE_outer_batched_pspl_fft_initialization():
 
 
 def test_finder_rejects_gap_and_cancellation_fft_seeds():
-    finder = Finder(FinderConfig())
     time = np.r_[np.linspace(0.0, 10.0, 21), np.linspace(100.0, 110.0, 21)]
     flux = np.ones_like(time)
 
@@ -307,7 +300,7 @@ def test_finder_rejects_gap_and_cancellation_fft_seeds():
             grid_index=0,
         )
 
-    selected = finder._filter_pspl_fft_initial_candidates(
+    selected = filter_pspl_fft_candidates(
         [
             candidate(50.0, 1.0, 1.0, 0.0),
             candidate(5.0, 1.0, 1_000.0, -999.0),
@@ -316,6 +309,7 @@ def test_finder_rejects_gap_and_cancellation_fft_seeds():
         time_np=time,
         flux_np=flux,
         limit=1,
+        config=FinderConfig(),
     )
 
     assert len(selected) == 1

@@ -14,7 +14,7 @@ from .contamination import (
     robust_refine_with_fitter,
     scaled_parameter_distance,
 )
-from .auto_init import seed_family
+from .auto_init import SEED_MAX, SEED_TE_FACTORS, SEED_U0_FACTORS, seed_family
 from .effect_detection import EffectCandidate
 
 
@@ -22,17 +22,17 @@ from .effect_detection import EffectCandidate
 class FallbackConfig:
     """Controls structured multistart and robust fallback effort."""
 
-    tE_factors: tuple[float, ...] = (0.75, 1.0, 1.5)
+    tE_factors: tuple[float, ...] = SEED_TE_FACTORS
     u0_sign_flip: bool = True
     parallax_radii: tuple[float, ...] = (0.0, 0.05, 0.2, 0.5)
     parallax_angle_steps: int = 8
-    max_seeds: int = 24
+    max_seeds: int = SEED_MAX
     contamination: ContaminationConfig = ContaminationConfig()
     max_point_parameter_change: float = 10.0
     max_basin_distance: float = 0.5
     parameter_dimension: Optional[int] = None
     default_logrho: float = -3.0
-    u0_factors: tuple[float, ...] = (0.7, 1.0, 1.4)
+    u0_factors: tuple[float, ...] = SEED_U0_FACTORS
     rho_over_u0: tuple[float, ...] = (0.35, 0.75, 1.5, 3.0)
     t_star_factors: tuple[float, ...] = (0.6, 1.0, 1.6)
     t0_offsets: tuple[float, ...] = (-0.25, 0.0, 0.25)
