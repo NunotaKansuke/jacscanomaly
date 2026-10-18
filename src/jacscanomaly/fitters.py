@@ -318,11 +318,16 @@ class PSPLFitter:
         self._last_fit = fit
         return fit
 
-    def fit(self, time, flux, ferr, p0=None) -> SingleLensFitResult:
-        """Fit PSPL, using the shared automatic multistart when ``p0`` is absent."""
+    def fit(self, time, flux, ferr, p0=None, *, pspl_params=None) -> SingleLensFitResult:
+        """Fit PSPL, using the shared automatic multistart when ``p0`` is absent.
+
+        ``pspl_params`` (only its ``t0``) roughly locates the brightening.
+        """
         time_np, flux_np, ferr_np = _fit_arrays(time, flux, ferr)
         if p0 is None:
-            seeds = automatic_seeds(time_np, flux_np, ferr_np, finite_source=False)
+            seeds = automatic_seeds(
+                time_np, flux_np, ferr_np, finite_source=False, pspl_params=pspl_params
+            )
             best_fit = best_fit_over_seeds(
                 lambda seed: self.fit(time_np, flux_np, ferr_np, seed), seeds, "PSPL"
             )

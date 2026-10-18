@@ -314,3 +314,24 @@ def test_finder_rejects_gap_and_cancellation_fft_seeds():
 
     assert len(selected) == 1
     assert selected[0].t0 == pytest.approx(5.0)
+
+
+def test_t0_hint_selects_the_requested_brightening():
+    from jacscanomaly import PSPLFitter
+
+    time = np.linspace(-200.0, 200.0, 4000)
+    ferr = np.full_like(time, 0.005)
+
+    def pspl(t0, tE, u0):
+        u = np.hypot((time - t0) / tE, u0)
+        return (u * u + 2.0) / (u * np.sqrt(u * u + 4.0))
+
+    # Two separate events: a strong one near t=-80 and a weaker one near t=90.
+    flux = 1.0 + (pspl(-80.0, 12.0, 0.1) - 1.0) + (pspl(90.0, 10.0, 0.5) - 1.0)
+
+    fitter = PSPLFitter(maxiter=300, tol=1.0e-8)
+    free = fitter.fit(time, flux, ferr)
+    hinted = fitter.fit(time, flux, ferr, pspl_params=[88.0, 1.0, 1.0])
+
+    assert abs(free.params[0] - (-80.0)) < 2.0
+    assert abs(hinted.params[0] - 90.0) < 2.0

@@ -23,6 +23,13 @@ from .pspl_fft import PSPLFFTScanner
 SEED_TE_FACTORS = (0.75, 1.0, 1.5)
 SEED_U0_FACTORS = (0.7, 1.0, 1.4)
 SEED_MAX = 24
+# A t0 hint is a rough "this brightening" locator: an FFT candidate matches it
+# when its t0 lies within this many of its own Einstein times of the hint,
+# but never farther than this fraction of the data span (so that a very wide
+# template centred on another brightening cannot match).
+T0_HINT_TE_COEFF = 1.0
+T0_HINT_SPAN_FRACTION = 0.05
+T0_HINT_PEAKS_PER_TEMPLATE = 8
 
 
 
@@ -83,12 +90,15 @@ def pspl_initial_guesses(
     *,
     config: Optional[FinderConfig] = None,
     parallax: bool = False,
+    t0_hint: Optional[float] = None,
 ) -> tuple[np.ndarray, ...]:
     """Return PSPL seeds ``(t0, tE, u0)`` from a profiled ``tE -> (u0, t0)`` FFT bank.
 
     The scan ranks templates by profiled chi-square with free source and
     blend fluxes.  With ``parallax=True`` each seed is extended with
-    ``(piEN, piEE) = (0, 0)``.  ``config`` supplies the ``auto_init_*`` scan
+    ``(piEN, piEE) = (0, 0)``.  A rough ``t0_hint`` keeps only candidates
+    within ``min(T0_HINT_TE_COEFF * tE, T0_HINT_SPAN_FRACTION * span)`` of it (all candidates if none match), so a
+    different brightening cannot win the ranking.  ``config`` supplies the ``auto_init_*`` scan
     settings and defaults to :class:`FinderConfig`.
     """
     time = np.asarray(time, dtype=float)
@@ -130,7 +140,10 @@ def pspl_initial_guesses(
     # ``top_k`` is only a post-ranking truncation inside the FFT scanner.
     # Ask for the complete one-peak-per-template pool here so a handful of
     # gap/cancellation artefacts cannot hide the first usable seed.
-    candidate_pool_size = max(1, n_u0 * n_tE, int(cfg.auto_init_fft_top_k))
+    # With a t0 hint the global best peak of a template may be another
+    # brightening, so keep several local peaks per template to find the hinted one.
+    peaks = T0_HINT_PEAKS_PER_TEMPLATE if t0_hint is not None else 1
+    candidate_pool_size = max(1, n_u0 * n_tE * peaks, int(cfg.auto_init_fft_top_k))
     search = scanner.search_tE(
         time,
         flux_np,
@@ -138,6 +151,7 @@ def pspl_initial_guesses(
         u0_grid=u0_grid,
         tE_grid=tE_grid,
         top_k=candidate_pool_size,
+        peaks_per_template=peaks,
     )
 
     candidates = filter_pspl_fft_candidates(
@@ -146,6 +160,7 @@ def pspl_initial_guesses(
         time_np=time,
         flux_np=flux_np,
         limit=top_k,
+        t0_hint=t0_hint,
     )
     if candidates:
         return tuple(
@@ -171,6 +186,7 @@ def filter_pspl_fft_candidates(
     flux_np: np.ndarray,
     limit: int,
     config: FinderConfig,
+    t0_hint: Optional[float] = None,
 ) -> list:
     """Reject FFT seeds that are not supported by actual observations.
 
@@ -198,6 +214,7 @@ def filter_pspl_fft_candidates(
     median_flux = float(np.median(np.abs(flux_values)))
     selected = []
     max_selected = max(1, int(limit))
+    span = float(np.ptp(time_values))
 
     for candidate in candidates:
         t0 = float(candidate.t0)
@@ -222,9 +239,19 @@ def filter_pspl_fft_candidates(
         if np.isfinite(cancellation_limit) and cancellation > cancellation_limit:
             continue
 
+        if t0_hint is not None and abs(t0 - float(t0_hint)) > min(
+            T0_HINT_TE_COEFF * t_e, T0_HINT_SPAN_FRACTION * span
+        ):
+            continue
+
         selected.append(candidate)
         if len(selected) >= max_selected:
             break
+
+    if not selected and t0_hint is not None:
+        return filter_pspl_fft_candidates(
+            candidates, time_np=time_np, flux_np=flux_np, limit=limit, config=config
+        )
 
     return selected
 
@@ -303,6 +330,8 @@ def automatic_seeds(
     ``max_seeds``.  Assumptions:
     ``rho`` is not re-gridded around finite-source anchors, and parallax
     starts at ``piE = 0`` (no direction hint exists without a detector).
+    ``pspl_params`` contributes only its ``t0``, as a rough locator of the
+    brightening to fit (its ``tE`` and ``u0`` are never used).
     """
     if finite_source:
         anchors = fspl_initial_guesses(
@@ -313,7 +342,12 @@ def automatic_seeds(
             espl_table_path=espl_table_path, parallax=parallax,
         )
     else:
-        anchors = pspl_initial_guesses(time, flux, ferr, config=config, parallax=parallax)
+        t0_hint = None
+        if pspl_params is not None and np.size(pspl_params) >= 1 and np.isfinite(pspl_params[0]):
+            t0_hint = float(pspl_params[0])
+        anchors = pspl_initial_guesses(
+            time, flux, ferr, config=config, parallax=parallax, t0_hint=t0_hint
+        )
     seeds = list(anchors)
     # Without parallax the model depends on u0 only through |u|, so the sign
     # flip is an exact duplicate and the tE x u0 family was never part of the
