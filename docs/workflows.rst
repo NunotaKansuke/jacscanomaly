@@ -24,8 +24,8 @@ Workflow map
 
 ``signal_mask`` / ``fitter.fit(..., mask=...)`` / ``measure_features``
    Post-fit components: mask the signal inside candidate windows, refit the
-   baseline without it, and classify the residual into bumps, dips and
-   caustics. Each runs on its own; see :ref:`post-fit-components`.
+   baseline without it, and classify the residual into bumps and dips.
+   Each runs on its own; see :ref:`post-fit-components`.
 
 Standard template scan
 ----------------------
@@ -121,7 +121,7 @@ No component calls another one, and none of them reads a scan result.
 
    sm = signal_mask(fit, cands)                    # True = signal point
    fit2 = fitter.fit(time, flux, ferr, p0=fit.params, mask=sm.mask)
-   feats = measure_features(fit2, cands)           # bumps / dips / caustics
+   feats = measure_features(fit2, cands)           # bumps / dips
 
    print(feats.summary_text())
 
@@ -149,8 +149,8 @@ No component calls another one, and none of them reads a scan result.
    take the same argument.
 
 ``measure_features(fit, candidates)``
-   Classifies the residual inside the candidate windows into ``bump``,
-   ``dip`` and ``caustic`` features; see :doc:`planet_features`.
+   Classifies the residual inside the candidate windows into ``bump``
+   and ``dip`` features; see :doc:`planet_features`.
 
 Iteration (mask, refit, re-mask) is written by the caller, not hidden in a
 configuration object.

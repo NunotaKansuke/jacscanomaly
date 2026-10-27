@@ -28,7 +28,7 @@ The following pages document the later stages in detail:
 
 * :doc:`template_free_method` explains the residual-only zero-crossing search.
 * :ref:`post-fit-components` explains signal masking and masked refits.
-* :doc:`planet_features` explains the bump, dip and caustic measurements.
+* :doc:`planet_features` explains the bump and dip measurements.
 
 Detection statistic
 -------------------
@@ -182,7 +182,7 @@ What the standard scan does not do
 
 The standard scan does not choose a 2L1S or 1L2S model, fit caustic geometry,
 or estimate a planet mass ratio. It reports local residual candidates.
-:doc:`planet_features` adds direct bump, dip and caustic counts, positions,
+:doc:`planet_features` adds direct bump and dip counts, positions,
 timescales, and strengths.
 
 Method details

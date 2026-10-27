@@ -76,9 +76,6 @@ Feature measurement API
 .. autoclass:: jacscanomaly.Feature
    :no-index:
 
-.. autoclass:: jacscanomaly.CausticDetail
-   :no-index:
-
 .. autoclass:: jacscanomaly.FeatureResult
    :no-index:
 

@@ -251,8 +251,12 @@ Not a component: a fixed recipe built from `fit(mask=)`, `Candidate` and
 `signal_mask`, for the one case users hit in practice — the automatic fit
 locked onto a short spike instead of its host event (2371 0042,
 RMDC26_306492/306548). It returns `HostRelock(relocked, fit, host, mask,
-dchi2, span_ratio)`; `fit` is `fit0` unless relocked. The test and its
-assumptions (anomaly <= 0.15 x host `|tE u0|`) are in `relock.py`. Usage:
+dJ)`; `fit` is `fit0` unless relocked. Two hypotheses, each minimised in
+`J = chi2_kept + 2 n_masked` by alternating `signal_mask` and the masked
+refit: H0 starts from `fit0` (anomaly anywhere), H1 from the fit with
+`fit0`'s core excluded (anomaly inside the core). It relocks when
+`J1 <= J0` and `host_detected(H1 host)` (a host the kept samples see, not a
+fit to the baseline). Details in `relock.py`. Usage:
 
 ```python
 r = relock_host(finder.fitter, result.fit)
@@ -261,6 +265,48 @@ if r.relocked:
 ```
 
 `refit=False` matters: an unmasked refit slides back onto the spike.
+
+### 8. `masked_refit(fitter, fit, candidates)` (component)
+
+Refits `fit` with the union of the candidate windows masked (the windows
+themselves, not a per-point test). Returns `MaskedRefit(fit, mask,
+candidates, chi2, criterion, n_fit)` with
+`criterion = chi2_kept + 2 n_masked + k ln n` over all `n` samples: a masked
+sample costs 2 (AIC, as in `signal_mask` / `relock_host`), so models with
+different windows compare on the same data.
+
+Model choice is a flow, not a component; it lives in the pipeline
+(`aethra/tools/rmdc_physical_stage.post_scan`). One step per model:
+
+1. fit the model without a mask (PSPL: the relocked host, `run_scan`);
+2. `search_anomalies` with that model's finder: its own windows and masked
+   fit (`.refit`). What is anomalous depends on the model (a finite-source
+   peak or a parallax trend is a PSPL residual, not an FSPL/parallax one);
+3. select the smallest `criterion`; `single_lens = host_detected(selected)`;
+4. features: `measure_features(selected.fit, selected windows)`, or, when
+   not single-lens, of the data over the whole light curve against
+   `constant_fit` of the kept samples (`features.model = "constant"`).
+
+Cost: one fit and one scan per model; rescans only when a model has
+anomalies. Assumption: one start per model; an anomaly that pulls the
+unmasked fit is corrected only by the local masked refit.
+
+### 9. `host_detected`, `constant_fit`, `search_anomalies`
+
+* `constant_fit(time, flux, ferr, mask=None)`: the weighted-mean level of
+  the kept samples as a `SingleLensFitResult` (`fs = NaN`), so any component
+  that takes a fit (e.g. `measure_features`) accepts it.
+* `host_detected(fit, mask)` (component): the fit beats that constant on the
+  kept samples, `chi2 + (k + 2) ln n < chi2_const + ln n`. False means the
+  mask covers the event: a single lens + local anomaly does not describe it.
+* `search_anomalies(finder, t, f, e, x0, min_score=, scan=)` (composed
+  layer of `Finder.run`, `Candidate`, `masked_refit`): scan with the host
+  fixed, take the best candidate, refit the host with all windows masked,
+  rescan the samples outside the windows; stop below `min_score`. Returns
+  `AnomalySearch(candidates, windows, refit, scans)`; `refit` is the host as
+  is when nothing was found. Rescanning (instead of
+  taking every candidate of one scan) removes the strong anomaly's pull on
+  the host before looking for the next.
 
 ## Removals
 

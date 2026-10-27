@@ -28,6 +28,7 @@ from .auto_init import automatic_seeds, best_fit_over_seeds
 from .plot import SingleLensPlotter
 from .singlelens_fit import SingleLensFitResult
 from .parallax_backend import (
+    NESTED_RHO,
     FSPLParallaxFitter,
     PSPLParallaxFitter,
     default_espl_table_path,
@@ -310,6 +311,11 @@ class PSPLFitter:
         return np.asarray(fit.params, dtype=float).reshape(-1).copy()
 
     @staticmethod
+    def nested_seed(pspl_params) -> np.ndarray:
+        """The point of this model that is the PSPL ``(t0, tE, u0)``: itself."""
+        return np.asarray(pspl_params, dtype=float).reshape(-1)[:3].copy()
+
+    @staticmethod
     def _decode(z: np.ndarray) -> np.ndarray:
         value = np.asarray(z, dtype=float)
         return np.asarray(
@@ -389,11 +395,16 @@ class PSPLFitter:
             raise ValueError("PSPL p0 must contain (t0, tE, u0).")
         if not np.all(np.isfinite(q0)) or q0[1] == 0.0:
             raise ValueError("PSPL p0 must be finite and have nonzero tE.")
-        z0 = np.asarray([q0[0], np.log(abs(q0[1])), q0[2]], dtype=float)
+        # Fit t0 relative to the seed: LM's xtol is relative to |x|, so an
+        # absolute t0 (~1e4 d) stopped the fit while u0 was still moving by
+        # ~1e-3 (2371 0011).  Same translation as the FSPL fitter.
+        time_origin = float(q0[0])
+        fit_time = time_np - time_origin
+        z0 = np.asarray([0.0, np.log(abs(q0[1])), q0[2]], dtype=float)
 
         def residual(z):
             q = self._decode(z)
-            magnification = self._magnification(time_np, q)
+            magnification = self._magnification(fit_time, q)
             fs, fb = _solve_fs_fb_numpy(magnification, flux_np, ferr_np)
             if not np.isfinite(fs) or not np.isfinite(fb):
                 return np.full(time_np.size, 1.0e50, dtype=float)
@@ -402,8 +413,8 @@ class PSPLFitter:
 
         def jacobian(z):
             q = self._decode(z)
-            magnification = self._magnification(time_np, q)
-            gradient = _pspl_gradient(time_np, q[0], q[1], q[2])
+            magnification = self._magnification(fit_time, q)
+            gradient = _pspl_gradient(fit_time, q[0], q[1], q[2])
             if np.isfinite(gradient).all():
                 try:
                     value = _profiled_residual_jacobian(
@@ -423,6 +434,7 @@ class PSPLFitter:
             jac=jacobian,
         )
         q = self._decode(np.asarray(result.x, dtype=float))
+        q[0] += time_origin
         return self._make_fit(time_np, flux_np, ferr_np, q, result)
 
     def evaluate_fixed(self, time, flux, ferr, p0, *, mask=None) -> SingleLensFitResult:
@@ -492,6 +504,16 @@ class FSPLFitter:
             [params[0], params[1], params[2], np.log(max(abs(params[3]), 1.0e-12))],
             dtype=float,
         )
+
+    @staticmethod
+    def nested_seed(pspl_params) -> np.ndarray:
+        """The FSPL start that is the PSPL ``(t0, tE, u0)``: ``rho -> 0``.
+
+        ``rho = NESTED_RHO`` is far below any ``u0`` a host fit resolves, so
+        the start reproduces the PSPL magnification and its chi2.
+        """
+        p = np.asarray(pspl_params, dtype=float).reshape(-1)
+        return np.asarray([p[0], p[1], p[2], np.log(NESTED_RHO)], dtype=float)
 
     @staticmethod
     def _decode(z: np.ndarray) -> np.ndarray:

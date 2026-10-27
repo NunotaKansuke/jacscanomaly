@@ -42,8 +42,8 @@ If you are using the package for the first time:
 * use :doc:`method` to understand ``dchi2``, ``score``, and ``n_eff``,
 * use :doc:`configuration` when tuning a survey run,
 * use :doc:`results` when building candidate tables or downstream analysis.
-* use :doc:`planet_features` to classify residual signals into bumps, dips
-  and caustics.
+* use :doc:`planet_features` to classify residual signals into bumps and
+  dips.
 
 .. toctree::
    :maxdepth: 2

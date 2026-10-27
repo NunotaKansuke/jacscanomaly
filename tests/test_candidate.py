@@ -41,3 +41,16 @@ def test_candidates_from_scan_ignores_acceptance():
     assert best == [Candidate.from_t0_teff(12.0, 1.0)]
     assert every[1] == Candidate.from_t0_teff(5.0, 0.2, teff_coeff=2.0)
     assert candidates_from_scan(SimpleNamespace(best=None, scored_candidates=[])) == []
+
+
+def test_intersect_windows_keeps_what_every_set_masks():
+    from jacscanomaly import intersect_windows
+
+    a = [Candidate(0.0, 6.0), Candidate(4.0, 8.0), Candidate(20.0, 21.0)]
+    b = [Candidate(1.0, 5.0), Candidate(7.0, 30.0)]
+
+    got = [(c.t_start, c.t_end) for c in intersect_windows(a, b)]
+
+    assert got == [(1.0, 5.0), (7.0, 8.0), (20.0, 21.0)]
+    assert intersect_windows(a, []) == ()
+    assert [(c.t_start, c.t_end) for c in intersect_windows(a)] == [(0.0, 8.0), (20.0, 21.0)]

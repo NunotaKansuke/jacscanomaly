@@ -96,6 +96,37 @@ def as_candidates(candidates: CandidateLike) -> tuple[Candidate, ...]:
     return values
 
 
+def _merged(windows: CandidateLike) -> list[tuple[float, float]]:
+    spans = sorted((c.t_start, c.t_end) for c in as_candidates(windows))
+    merged: list[list[float]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(a, b) for a, b in merged]
+
+
+def intersect_windows(*window_sets: CandidateLike) -> tuple[Candidate, ...]:
+    """Time spans inside a window of every set (the union of each set, intersected).
+
+    With one window set per model, this is where every model sees an
+    anomaly: the samples no model explains.
+    """
+    if not window_sets:
+        return ()
+    spans = _merged(window_sets[0])
+    for windows in window_sets[1:]:
+        other = _merged(windows)
+        spans = [
+            (max(a, c), min(b, d))
+            for a, b in spans
+            for c, d in other
+            if max(a, c) <= min(b, d)
+        ]
+    return tuple(Candidate(a, b) for a, b in spans)
+
+
 def candidates_from_scan(
     result,
     *,

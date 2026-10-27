@@ -14,25 +14,29 @@ not change them.
 
 Test, for a fit ``fit0``
 ------------------------
-1. core = samples where ``fit0``'s event is detectable,
-   ``(model - min(model)) / ferr > 1``.
-2. Refit with the core excluded (the fitter's automatic init) -> ``rest``.
-   ``dchi2 = chi2(fit0) - chi2(rest)`` on the samples outside the core is how
-   much better another event explains everything except ``fit0``'s.
-3. Shrink the exclusion to the anomaly itself: alternate
-   ``signal_mask(host, Candidate(core time range))`` and the masked refit from
-   ``rest``. Each step does not increase ``J = chi2_kept + penalty * n_masked``.
-4. Relock when ``dchi2 >= min_dchi2`` and the anomaly is short against the
-   host, ``span(mask) <= max_span * |tE u0|_host``.
+Two hypotheses, each "one single-lens event + one masked anomaly segment",
+scored by ``J = chi2_kept + penalty * n_masked``:
+
+* H0, ``fit0`` is the host: the anomaly may be anywhere.
+* H1, ``fit0`` sits on the anomaly: the anomaly is inside ``fit0``'s core,
+  the samples where its event is detectable,
+  ``(model - min(model)) / ferr > 1``, and the host is another event, the
+  fit with the core excluded (the fitter's automatic init).
+
+Each is minimised from its start by alternating ``signal_mask(fit, window)``
+and the masked refit; each step does not increase ``J``. Relock when
+``J1 <= J0`` (equal when both starts reach the same host) and the H1 host
+is seen by the samples it keeps (:func:`~jacscanomaly.host_detected`):
+when the mask covers the event, the "host" is a fit to the baseline.
 
 Assumptions
 -----------
-* A planetary anomaly is much shorter than its host event (``max_span``).
-  This rejects events whose whole light curve is anomalous: there the
-  anomalous part stays a large fraction of any refit event.
-* The event width is ``|tE u0|``, not ``tE``: a spike fit can reach
-  ``tE ~ 1e3`` d with ``u0 ~ 1e-5``. The fit parameters must start with
-  ``(t0, tE, u0)``, as in every single-lens fitter here.
+* Masking a sample frees one parameter (``penalty = 2``, AIC), the same
+  price :func:`~jacscanomaly.signal_mask` uses. Both hypotheses have the
+  same parameters otherwise, so no other term enters.
+* One contiguous anomaly segment per hypothesis.
+* The fit parameters must start with ``(t0, tE, u0)``, as in every
+  single-lens fitter here.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from typing import Optional
 import numpy as np
 
 from .candidate import Candidate
+from .masked_refit import host_detected
 from .signal_mask import signal_mask
 from .singlelens_fit import SingleLensFitResult
 
@@ -52,29 +57,40 @@ class HostRelock:
     """Outcome of :func:`relock_host`.
 
     ``fit`` is the fit to use: the host fit when ``relocked``, else ``fit0``.
-    ``host`` is the masked host refit (``None`` when ``fit0`` has no
-    detectable core). ``mask`` marks the anomaly (``True`` = excluded).
+    ``host`` is the masked host refit under H1 (``None`` when ``fit0`` has no
+    detectable core). ``mask`` marks its anomaly (``True`` = excluded).
+    ``dJ = J0 - J1``; relocked iff ``dJ >= 0``.
     """
 
     relocked: bool
     fit: SingleLensFitResult
     host: Optional[SingleLensFitResult]
     mask: np.ndarray
-    dchi2: float
-    span_ratio: float
+    dJ: float
 
 
-def _width(params) -> float:
-    p = np.asarray(params, dtype=float)
-    return abs(float(p[1] * p[2]))
+def _minimise_j(fitter, fit, mask, window, penalty, n_iter):
+    """Alternate signal_mask and the masked refit from ``(fit, mask)``."""
+    time = np.asarray(fit.time, dtype=float)
+    flux = np.asarray(fit.flux, dtype=float)
+    ferr = np.asarray(fit.ferr, dtype=float)
+    for _ in range(n_iter):
+        new_mask = signal_mask(fit, [window], penalty=penalty).mask
+        if np.array_equal(new_mask, mask) or not new_mask.any():
+            break
+        mask = new_mask
+        try:
+            fit = fitter.fit(time, flux, ferr, fitter.seed_from_fit(fit), mask=mask)
+        except ValueError:  # too few samples kept to refit: J is scored as is
+            break
+    z = np.asarray(fit.residual)[~mask] / ferr[~mask]
+    return fit, mask, float(np.sum(z**2)) + penalty * int(np.count_nonzero(mask))
 
 
 def relock_host(
     fitter,
     fit0: SingleLensFitResult,
     *,
-    min_dchi2: float = 100.0,
-    max_span: float = 0.15,
     penalty: float = 2.0,
     n_iter: int = 4,
 ) -> HostRelock:
@@ -92,26 +108,16 @@ def relock_host(
     model0 = np.asarray(fit0.model_flux, dtype=float)
     core = (model0 - model0.min()) / ferr > 1.0
     if not core.any():
-        return HostRelock(False, fit0, None, core, 0.0, float("inf"))
+        return HostRelock(False, fit0, None, core, float("-inf"))
 
+    _, _, j0 = _minimise_j(fitter, fit0, np.zeros_like(core),
+                           Candidate(time.min(), time.max()), penalty, n_iter)
     rest = fitter.fit(time, flux, ferr, mask=core)
-    keep = ~core
-    chi0 = float(np.sum((np.asarray(fit0.residual)[keep] / ferr[keep]) ** 2))
-    chi1 = float(np.sum((np.asarray(rest.residual)[keep] / ferr[keep]) ** 2))
-
-    window = [Candidate(time[core].min(), time[core].max())]
-    host, mask = rest, core
-    for _ in range(n_iter):
-        new_mask = signal_mask(host, window, penalty=penalty).mask
-        if np.array_equal(new_mask, mask) or not new_mask.any():
-            break
-        mask = new_mask
-        host = fitter.fit(time, flux, ferr, p0=np.asarray(host.params), mask=mask)
-
-    width = _width(host.params)
-    span_ratio = float(np.ptp(time[mask])) / width if width > 0.0 else float("inf")
-    relocked = bool(chi0 - chi1 >= min_dchi2 and span_ratio <= max_span)
-    return HostRelock(relocked, host if relocked else fit0, host, mask, chi0 - chi1, span_ratio)
+    host, mask, j1 = _minimise_j(fitter, rest, core,
+                                 Candidate(time[core].min(), time[core].max()), penalty, n_iter)
+    # H1 needs a host: one the kept samples see (not a fit to the baseline)
+    relocked = j1 <= j0 and host_detected(host, mask)  # equal: same host from both starts
+    return HostRelock(relocked, host if relocked else fit0, host, mask, j0 - j1)
 
 
 __all__ = ["HostRelock", "relock_host"]

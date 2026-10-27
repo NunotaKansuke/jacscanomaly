@@ -21,7 +21,7 @@ def test_fit_on_the_spike_moves_to_the_host_event():
 
     r = relock_host(fitter, fit0)
 
-    assert r.relocked and r.fit is r.host
+    assert r.relocked and r.fit is r.host and r.dJ >= 0
     t0, tE, u0 = np.asarray(r.fit.params)
     assert abs(t0) < 0.2 and abs(tE - 20.0) < 1.0 and abs(abs(u0) - 0.3) < 0.02
     assert np.all(np.abs(time[r.mask] - 1.0) < 0.5)
@@ -34,4 +34,4 @@ def test_fit_on_the_host_event_is_kept():
 
     r = relock_host(fitter, fit0)
 
-    assert not r.relocked and r.fit is fit0
+    assert not r.relocked and r.fit is fit0 and r.dJ < 0

@@ -25,6 +25,10 @@ except ImportError:  # pragma: no cover - optional dependency
     least_squares = None
 
 
+# rho of the start that reproduces a point-source fit (nested_seed).
+NESTED_RHO = 1.0e-4
+
+
 @dataclass(frozen=True)
 class TimeSpec:
     """Explicit time scale and offset used by a native parallax fit."""
@@ -389,6 +393,12 @@ class _ParallaxFitter:
         if self.finite_source and not np.isfinite(raw[3]):
             raise ValueError("native FSPL parallax seeds require finite log_rho")
         return raw
+
+    def nested_seed(self, pspl_params) -> np.ndarray:
+        """The start that is the PSPL ``(t0, tE, u0)``: ``piE = 0`` (and ``rho -> 0``)."""
+        p = np.asarray(pspl_params, dtype=float).reshape(-1)[:3]
+        rho = [np.log(NESTED_RHO)] if self.finite_source else []
+        return np.r_[p, rho, 0.0, 0.0]
 
     @staticmethod
     def seed_from_fit(fit) -> np.ndarray:

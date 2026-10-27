@@ -1,39 +1,23 @@
-"""Bump / dip / caustic classification of residual structure.
+"""Bump / dip classification of residual structure.
 
 :func:`measure_features` measures the residual of a single-lens fit inside
 the windows of :class:`~jacscanomaly.Candidate` objects, or inside the
 signal segments of a :class:`~jacscanomaly.SignalMask`, and classifies the
-structure into three kinds:
+structure into two kinds:
 
-* ``"bump"``    -- a prominent positive excursion,
-* ``"dip"``     -- a closed negative excursion,
-* ``"caustic"`` -- a bump that is significantly left/right asymmetric, the
-  shape a source makes when it crosses or passes close to a caustic.
+* ``"bump"`` -- a prominent positive excursion,
+* ``"dip"``  -- a closed negative excursion.
 
-A caustic is a bump: it replaces the bump in the result, with its asymmetry
-test in :attr:`Feature.caustic`.
+No caustic label: a test against an exactly symmetric bump is rejected by
+any real bump at high S/N, so it labels S/N rather than shape.
 
-Asymmetry test
---------------
-Around each bump the raw z = residual / ferr is fitted by a Lorentzian
-``A / (1 + ((t - tc) / w)**2)`` and by a split Lorentzian whose half-width is
-``w_left`` before ``tc`` and ``w_right`` after it; both carry a local linear
-baseline, and A and the baseline are fitted linearly. The split model adds
-one parameter to a nested symmetric one, so for a symmetric bump
-``delta_chi2 = chi2_sym - chi2_split`` follows chi-square with one degree of
-freedom. A bump is a caustic when ``delta_chi2 >= min_asymmetry_dchi2`` and
-the widths differ by at least ``min_width_ratio``. A fast rise and slow decay
-(``w_left < w_right``) is labelled ``"entry"``, the reverse ``"exit"``; the
-label is a shape description only (a near-caustic passage looks the same).
-
-Assumptions: the bump's shape near its peak is captured by a (split)
-Lorentzian; the noise is independent with the given ``ferr``.
+Assumption: the noise is independent with the given ``ferr``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal, Optional, Sequence
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -43,7 +27,7 @@ from .signal_mask import SignalMask
 
 @dataclass(frozen=True)
 class FeatureConfig:
-    """Controls for extremum measurement and the caustic asymmetry test."""
+    """Controls for extremum measurement."""
 
     smooth_points: int = 7
     # An extremum's lobe (the run where the smoothed residual keeps its sign)
@@ -62,17 +46,8 @@ class FeatureConfig:
     # (bump--dip--bump) are both kept.
     allow_bracketed_dips: bool = True
     bracketed_peak_min_separation: float = 0.05
-    # Caustic = bump whose split-Lorentzian fit beats the symmetric one by
-    # delta_chi2 >= min_asymmetry_dchi2 (chi2_1 under symmetry: 25 = 5 sigma)
-    # with max(w)/min(w) >= min_width_ratio.
-    min_asymmetry_dchi2: float = 25.0
-    min_width_ratio: float = 1.5
-    # Fit window: peak +- max(asymmetry_window_timescales * timescale,
-    # asymmetry_window_cadences * cadence), cut half way to the neighbouring bump or dip.
-    asymmetry_window_timescales: float = 3.0
-    asymmetry_window_cadences: float = 10.0
 
-FeatureKind = Literal["bump", "dip", "caustic"]
+FeatureKind = Literal["bump", "dip"]
 
 
 @dataclass(frozen=True)
@@ -83,8 +58,7 @@ class Feature:
     t_start/t_end its duration at half prominence; snr is
     sum(z) / sqrt(n) over its lobe (the run where the smoothed residual keeps
     its sign), so it also holds for a broad, low-amplitude feature whose
-    point-wise strength is small.  A caustic is measured like a bump and
-    caustic holds its asymmetry test.
+    point-wise strength is small.
     """
 
     kind: FeatureKind
@@ -100,7 +74,6 @@ class Feature:
     magnification_ratio: float
     snr: float = float("nan")
     candidate: Optional[Candidate] = None
-    caustic: Optional["CausticDetail"] = None
 
     def summary_dict(self) -> dict[str, object]:
         row: dict[str, object] = {
@@ -118,41 +91,12 @@ class Feature:
             "snr": float(self.snr),
             "candidate": None if self.candidate is None else self.candidate.label,
         }
-        if self.caustic is not None:
-            row["caustic"] = self.caustic.summary_dict()
         return row
 
 
 @dataclass(frozen=True)
-class CausticDetail:
-    """Asymmetry test of a caustic bump (see the module docstring)."""
-
-    orientation: Literal["entry", "exit"]
-    peak_time: float
-    left_width: float
-    right_width: float
-    delta_chi2: float
-
-    @property
-    def width_ratio(self) -> float:
-        return max(self.left_width, self.right_width) / max(
-            min(self.left_width, self.right_width), 1.0e-12
-        )
-
-    def summary_dict(self) -> dict[str, object]:
-        return {
-            "orientation": self.orientation,
-            "peak_time": float(self.peak_time),
-            "left_width": float(self.left_width),
-            "right_width": float(self.right_width),
-            "width_ratio": float(self.width_ratio),
-            "delta_chi2": float(self.delta_chi2),
-        }
-
-
-@dataclass(frozen=True)
 class FeatureResult:
-    """Time-ordered bumps, dips and caustics of one fit."""
+    """Time-ordered bumps and dips of one fit."""
 
     features: tuple[Feature, ...]
     candidates: tuple[Candidate, ...] = ()
@@ -169,10 +113,6 @@ class FeatureResult:
         return self._of("dip")
 
     @property
-    def caustics(self) -> tuple[Feature, ...]:
-        return self._of("caustic")
-
-    @property
     def strongest(self) -> Optional[Feature]:
         return max(self.features, key=lambda feature: feature.strength, default=None)
 
@@ -181,7 +121,6 @@ class FeatureResult:
         row: dict[str, object] = {
             "n_bumps": len(self.bumps),
             "n_dips": len(self.dips),
-            "n_caustics": len(self.caustics),
             "n_features": len(self.features),
         }
         if strongest is not None:
@@ -208,7 +147,7 @@ class FeatureResult:
 
     def summary_text(self) -> str:
         lines = [
-            f"bumps={len(self.bumps)}, dips={len(self.dips)}, caustics={len(self.caustics)}"
+            f"bumps={len(self.bumps)}, dips={len(self.dips)}"
         ]
         for feature in self.features:
             lines.append(
@@ -217,87 +156,6 @@ class FeatureResult:
                 f"strength={feature.strength:.3g} sigma, snr={feature.snr:.3g}"
             )
         return "\n".join(lines)
-
-
-def _lorentzian_chi2(
-    t: np.ndarray, z: np.ndarray, tc: np.ndarray, w_left: np.ndarray, w_right: np.ndarray
-) -> np.ndarray:
-    """Best chi2 of A * L(t) + b0 + b1 * t (A > 0) for each (tc, w_left, w_right)."""
-    d = t - tc[..., None]
-    shape = 1.0 / (1.0 + (d / np.where(d < 0.0, w_left[..., None], w_right[..., None])) ** 2)
-    x = t - t.mean()
-    basis = np.stack(np.broadcast_arrays(shape, 1.0, x), axis=-1)
-    gram = np.einsum("...ni,...nj->...ij", basis, basis)
-    coef = np.linalg.solve(gram + 1.0e-12 * np.eye(3), np.einsum("...ni,n->...i", basis, z)[..., None])[..., 0]
-    chi2 = np.sum(np.square(z - np.einsum("...ni,...i->...n", basis, coef)), axis=-1)
-    return np.where(coef[..., 0] > 0.0, chi2, np.inf)
-
-
-def _asymmetry_test(t: np.ndarray, z: np.ndarray, cadence: float, half_window: float):
-    """(delta_chi2, tc, w_left, w_right) of split vs symmetric Lorentzian."""
-    peak = float(t[np.argmax(z)])
-    tcs = peak + cadence * np.arange(-3.0, 3.01, 0.25)
-    widths = np.geomspace(0.3 * cadence, max(half_window, 0.6 * cadence), 32)
-    tc, w = np.meshgrid(tcs, widths, indexing="ij")
-    chi2_sym = float(np.min(_lorentzian_chi2(t, z, tc, w, w)))
-    best = (np.inf, peak, np.nan, np.nan)
-    wl, wr = np.meshgrid(widths, widths, indexing="ij")
-    for value in tcs:  # one tc at a time keeps memory at widths**2 * n
-        chi2 = _lorentzian_chi2(t, z, np.full(wl.shape, value), wl, wr)
-        k = np.unravel_index(int(np.argmin(chi2)), chi2.shape)
-        if chi2[k] < best[0]:
-            best = (float(chi2[k]), float(value), float(wl[k]), float(wr[k]))
-    return chi2_sym - best[0], best[1], best[2], best[3]
-
-
-def _caustic_details(
-    time: np.ndarray,
-    z: np.ndarray,
-    bumps: Sequence[Feature],
-    dips: Sequence[Feature],
-    config: FeatureConfig,
-) -> list[Optional[CausticDetail]]:
-    """Per bump: its CausticDetail when it passes the asymmetry test, else None."""
-    dt = np.diff(time)
-    dt = dt[np.isfinite(dt) & (dt > 0.0)]
-    if dt.size == 0:
-        return [None] * len(bumps)
-    cadence = float(np.median(dt))
-    # A neighbouring extremum (bump or dip) bounds the window half way to it,
-    # so the slope into a dip is not read as the bump's own sharp edge.
-    peaks = sorted(float(f.time) for f in (*bumps, *dips))
-    out: list[Optional[CausticDetail]] = []
-    for bump in bumps:
-        tp = float(bump.time)
-        half = max(
-            config.asymmetry_window_timescales * float(bump.timescale),
-            config.asymmetry_window_cadences * cadence,
-        )
-        lo, hi = tp - half, tp + half
-        for other in peaks:
-            if other < tp:
-                lo = max(lo, 0.5 * (other + tp))
-            elif other > tp:
-                hi = min(hi, 0.5 * (other + tp))
-        sel = (time >= lo) & (time <= hi) & np.isfinite(z)
-        if np.count_nonzero(sel) < 8:
-            out.append(None)
-            continue
-        dchi2, tc, wl, wr = _asymmetry_test(time[sel], z[sel], cadence, half)
-        ratio = max(wl, wr) / max(min(wl, wr), 1.0e-12)
-        if dchi2 >= config.min_asymmetry_dchi2 and ratio >= config.min_width_ratio:
-            out.append(
-                CausticDetail(
-                    orientation="entry" if wl < wr else "exit",
-                    peak_time=tc,
-                    left_width=wl,
-                    right_width=wr,
-                    delta_chi2=float(dchi2),
-                )
-            )
-        else:
-            out.append(None)
-    return out
 
 
 @dataclass(frozen=True)
@@ -875,11 +733,6 @@ def measure_features(
 
     bumps = [owner(feature) for feature in bumps]
     dips = [owner(feature) for feature in dips]
-    z = residual / np.maximum(ferr, 1.0e-12)
-    bumps = [
-        feature if detail is None else replace(feature, kind="caustic", caustic=detail)
-        for feature, detail in zip(bumps, _caustic_details(time, z, bumps, dips, config))
-    ]
     features = tuple(sorted((*bumps, *dips), key=lambda f: f.time))
     return FeatureResult(features=features, candidates=values)
 
@@ -889,6 +742,5 @@ __all__ = [
     "FeatureConfig",
     "FeatureKind",
     "FeatureResult",
-    "CausticDetail",
     "measure_features",
 ]

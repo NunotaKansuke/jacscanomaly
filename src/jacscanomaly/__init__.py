@@ -28,11 +28,14 @@ from .template_free import (
     TemplateFreeSearchConfig,
     TemplateFreeSearchResult,
 )
-from .candidate import Candidate, candidates_from_scan
+from .candidate import Candidate, candidates_from_scan, intersect_windows
 from .signal_mask import SignalMask, signal_mask
 from .relock import HostRelock, relock_host
+from .masked_refit import (
+    MaskedRefit, constant_fit, host_detected, masked_refit, window_mask,
+)
+from .anomaly_search import AnomalySearch, search_anomalies
 from .features import (
-    CausticDetail,
     Feature,
     FeatureConfig,
     FeatureResult,
@@ -109,11 +112,18 @@ __all__ = [
     "SingleLensFitResult",
     "Candidate",
     "candidates_from_scan",
+    "intersect_windows",
     "SignalMask",
     "signal_mask",
     "HostRelock",
     "relock_host",
-    "CausticDetail",
+    "MaskedRefit",
+    "window_mask",
+    "masked_refit",
+    "constant_fit",
+    "host_detected",
+    "AnomalySearch",
+    "search_anomalies",
     "Feature",
     "FeatureConfig",
     "FeatureResult",

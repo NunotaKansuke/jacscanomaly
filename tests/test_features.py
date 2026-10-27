@@ -114,7 +114,7 @@ def test_closed_dip_between_bumps_and_summaries():
     assert features.bumps[0].fractional_deviation > 0.0
     assert features.summary_dict()["n_features"] == 3
     assert len(features.feature_dicts()) == 3
-    assert "bumps=2, dips=1, caustics=0" in features.summary_text()
+    assert "bumps=2, dips=1" in features.summary_text()
 
 
 def test_deep_bracketed_dip():
@@ -206,34 +206,16 @@ def _edge(time, center, rise, decay, amplitude):
     return amplitude * np.exp(-0.5 * ((time - center) / width) ** 2)
 
 
-def test_asymmetric_bumps_become_caustics_with_orientation():
+def test_asymmetric_bump_is_a_bump():
+    # asymmetry alone is not a caustic signature (a smooth skewed bump at high
+    # S/N is as asymmetric), so no shape label is given
     rng = np.random.default_rng(1)
     time = np.linspace(8.0, 12.0, 801)
-    residual = (
-        _edge(time, 9.5, 0.02, 0.15, 0.3)
-        + _edge(time, 10.5, 0.15, 0.02, 0.3)
-        + 0.01 * rng.standard_normal(time.size)
-    )
+    residual = _edge(time, 9.5, 0.02, 0.15, 0.3) + 0.01 * rng.standard_normal(time.size)
     candidate = Candidate(9.0, 11.0)
 
     features = measure_features(_fit(time, residual, np.full_like(time, 0.01)), candidate)
 
-    assert [f.kind for f in features.features] == ["caustic", "caustic"]
-    entry, exit_ = features.caustics
-    assert entry.caustic.orientation == "entry" and exit_.caustic.orientation == "exit"
-    assert abs(entry.time - 9.5) < 0.05 and abs(exit_.time - 10.5) < 0.05
-    assert entry.caustic.delta_chi2 >= 25.0 and entry.caustic.width_ratio >= 1.5
-    assert entry.candidate is candidate
-
-
-def test_symmetric_bump_stays_a_bump():
-    rng = np.random.default_rng(2)
-    time = np.linspace(8.0, 12.0, 801)
-    residual = _gauss(time, 10.0, 0.08, 0.3) + 0.01 * rng.standard_normal(time.size)
-
-    features = measure_features(
-        _fit(time, residual, np.full_like(time, 0.01)), Candidate(9.0, 11.0)
-    )
-
     assert [f.kind for f in features.features] == ["bump"]
-    assert features.bumps[0].caustic is None
+    assert abs(features.bumps[0].time - 9.5) < 0.05
+    assert features.bumps[0].candidate is candidate
