@@ -30,6 +30,7 @@ from .template_free import (
 )
 from .candidate import Candidate, candidates_from_scan
 from .signal_mask import SignalMask, signal_mask
+from .relock import HostRelock, relock_host
 from .features import (
     CausticDetail,
     Feature,
@@ -110,6 +111,8 @@ __all__ = [
     "candidates_from_scan",
     "SignalMask",
     "signal_mask",
+    "HostRelock",
+    "relock_host",
     "CausticDetail",
     "Feature",
     "FeatureConfig",

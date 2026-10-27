@@ -245,6 +245,23 @@ test fields; the three unused `dip_bracket_*` fields are dropped.
 `Finder.run` stays the scan entry point (fit + scan + scoring -> `AnomalyResult`),
 unchanged in behaviour. Everything after it moves out.
 
+### 7. `relock_host(fitter, fit0)` (composed layer)
+
+Not a component: a fixed recipe built from `fit(mask=)`, `Candidate` and
+`signal_mask`, for the one case users hit in practice — the automatic fit
+locked onto a short spike instead of its host event (2371 0042,
+RMDC26_306492/306548). It returns `HostRelock(relocked, fit, host, mask,
+dchi2, span_ratio)`; `fit` is `fit0` unless relocked. The test and its
+assumptions (anomaly <= 0.15 x host `|tE u0|`) are in `relock.py`. Usage:
+
+```python
+r = relock_host(finder.fitter, result.fit)
+if r.relocked:
+    result = finder.run(t, f, e, x0=r.fit.params, refit=False)
+```
+
+`refit=False` matters: an unmasked refit slides back onto the spike.
+
 ## Removals
 
 Modules deleted:
