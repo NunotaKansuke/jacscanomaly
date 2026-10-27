@@ -943,24 +943,9 @@ def measure_observed_magnification_fwhm(
     )
 
 
-def interval_mask(
-    time: np.ndarray,
-    scale: ObservedSignalScale,
-    *,
-    padding: float = 0.0,
-) -> np.ndarray:
-    """Return points inside a measured scale interval."""
-    t = np.asarray(time, dtype=float)
-    if not scale.valid or not np.isfinite(scale.t_center) or not np.isfinite(scale.half_width):
-        return np.zeros(t.shape, dtype=bool)
-    left, right = scale.bounds(padding=padding)
-    return (t >= left) & (t <= right)
-
-
 __all__ = [
     "ObservedSignalScale",
     "ResolvedSignalScale",
-    "interval_mask",
     "measure_observed_magnification_fwhm",
     "measure_observed_magnification_scale",
     "measure_observed_signal_scale",

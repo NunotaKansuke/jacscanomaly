@@ -7,7 +7,7 @@ used in a process where JAX is unavailable.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, Optional, Sequence
@@ -460,11 +460,27 @@ class _ParallaxFitter:
         *,
         pspl_params=None,
         observed_scale=None,
+        mask=None,
     ):
-        """Fit parallax, auto-seeding FSPL from the duration grid when needed."""
+        """Fit parallax, auto-seeding FSPL from the duration grid when needed.
+
+        ``mask`` (``True`` = excluded) removes points from the fit; the result
+        is still evaluated on every point.
+        """
         time = np.asarray(time, dtype=float); flux = np.asarray(flux, dtype=float); ferr = np.asarray(ferr, dtype=float)
         if time.ndim != 1 or not (time.shape == flux.shape == ferr.shape) or np.any(ferr <= 0) or not np.all(np.isfinite(time)):
             raise ValueError("time, flux, and ferr must be finite one-dimensional arrays with positive ferr.")
+        from .fitters import _excluded_mask, masked_fit
+
+        excluded = _excluded_mask(mask, time.size, self.parameter_dimension)
+        if excluded is not None:
+            return masked_fit(
+                self,
+                lambda t, f, e: self.fit(
+                    t, f, e, q0, pspl_params=pspl_params, observed_scale=observed_scale
+                ),
+                time, flux, ferr, excluded,
+            )
         if q0 is None:
             seeds = self._automatic_fspl_initial_guesses(
                 time,
@@ -640,8 +656,12 @@ class _ParallaxFitter:
         self._last_fit = fit
         return fit
 
-    def evaluate_fixed(self, time, flux, ferr, q0):
-        """Evaluate a native parallax model without optimizing its parameters."""
+    def evaluate_fixed(self, time, flux, ferr, q0, *, mask=None):
+        """Evaluate a native parallax model without optimizing its parameters.
+
+        With ``mask`` (``True`` = excluded), ``fs``, ``fb`` and ``chi2`` use
+        the kept points only; the model and residual cover every point.
+        """
         time = np.asarray(time, dtype=float)
         flux = np.asarray(flux, dtype=float)
         ferr = np.asarray(ferr, dtype=float)
@@ -661,12 +681,16 @@ class _ParallaxFitter:
             magnification_tol=self.magnification_tol,
             magnification_reltol=self.magnification_reltol,
         )
+        from .fitters import _excluded_mask
+
+        excluded = _excluded_mask(mask, time.size, self.parameter_dimension)
+        keep = slice(None) if excluded is None else ~excluded
         raw = self._raw_seed(np.asarray(q0, dtype=float))
         magnification = evaluator.magnification(raw)
-        fs, fb = _profile_fluxes(magnification, flux, ferr)
+        fs, fb = _profile_fluxes(magnification[keep], flux[keep], ferr[keep])
         model = fs * magnification + fb
         residual = flux - model
-        normalized = residual / ferr
+        normalized = residual[keep] / ferr[keep]
         chi2 = float(np.dot(normalized, normalized))
         params = np.r_[raw[0] - float(self.time_spec.offset), np.exp(raw[1]), raw[2]]
         names = ["t0", "tE", "u0"]
@@ -681,30 +705,27 @@ class _ParallaxFitter:
         from .singlelens_fit import SingleLensFitResult
         return SingleLensFitResult(
             time=time, flux=flux, ferr=ferr, params=params, param_names=tuple(names),
-            chi2=chi2, chi2_dof=chi2 / max(time.size - self.parameter_dimension, 1),
+            chi2=chi2, chi2_dof=chi2 / max(normalized.size - self.parameter_dimension, 1),
             fs=fs, fb=fb, model_flux=model, residual=residual, raw_params=raw,
             parallax_projector=evaluator,
             model_evaluator=None,
             model_kind="fspl_parallax" if self.finite_source else "pspl_parallax",
             optimizer_success=True,
             optimizer_status="fixed_parameters",
+            mask=excluded,
         )
 
-    def fit_fixed_model(self, time, flux, ferr, q0, *, model_kind=None):
+    def fit_fixed_model(self, time, flux, ferr, q0, *, model_kind=None, mask=None):
         """Evaluate fixed nonlinear parameters through the common fitter API."""
         expected = "fspl_parallax" if self.finite_source else "pspl_parallax"
         if model_kind not in {None, expected}:
             raise ValueError(
                 f"{expected} fitter cannot evaluate model_kind={model_kind!r}."
             )
-        return self.evaluate_fixed(time, flux, ferr, q0)
+        return self.evaluate_fixed(time, flux, ferr, q0, mask=mask)
 
 
-def parallax_effect_score(
-    fit,
-    *,
-    exclude_mask: Optional[np.ndarray] = None,
-) -> float:
+def parallax_effect_score(fit) -> float:
     """Score parallax structure remaining in a native-fit residual.
 
     The native evaluator Jacobian already includes the profiled flux solve.
@@ -723,11 +744,6 @@ def parallax_effect_score(
     if jacobian.shape != (residual.size, raw.size) or raw.size < 5:
         raise ValueError("native parallax residual/Jacobian shapes are invalid")
     keep = np.isfinite(residual) & np.all(np.isfinite(jacobian), axis=1)
-    if exclude_mask is not None:
-        excluded = np.asarray(exclude_mask, dtype=bool).reshape(-1)
-        if excluded.size != residual.size:
-            raise ValueError("exclude_mask must match native fit length")
-        keep &= ~excluded
     if np.count_nonzero(keep) <= raw.size + 2:
         return 0.0
     z = residual[keep]
@@ -888,9 +904,69 @@ def default_espl_table_path() -> Optional[str]:
     return str(path) if path.is_file() else None
 
 
+def parallax_fitter_from_config(config, *, finite_source: bool, geometry: str, tref: float):
+    """Build the parallax fitter described by a ``FinderConfig``.
+
+    ``geometry`` is ``"annual"`` or ``"space"``; ``config.tref`` overrides
+    ``tref`` when set.  Space parallax requires ``config.satellite_ephemeris_path``.
+    """
+    convention = str(getattr(config, "parallax_observer_convention", "earth_geocentric_offset"))
+    if convention not in {"earth_geocentric_offset", "heliocentric_observer", "gulls"}:
+        raise ValueError(f"Unsupported parallax_observer_convention={convention!r}.")
+    if config.ra_deg is None or config.dec_deg is None:
+        raise ValueError("parallax fitting requires ra_deg and dec_deg.")
+    time_spec = TimeSpec(
+        scale=str(getattr(config, "parallax_time_scale", "jd")),
+        offset=float(getattr(config, "parallax_time_offset", 0.0)),
+    )
+    extrapolation = str(getattr(config, "parallax_extrapolation", "reject"))
+    earth = getattr(config, "parallax_earth_ephemeris", None)
+    if earth is None:
+        earth = default_earth_ephemeris(time_spec=time_spec)
+    if getattr(earth, "extrapolation", extrapolation) != extrapolation:
+        earth = replace(earth, extrapolation=extrapolation)
+
+    observer = reference = None
+    if geometry == "space":
+        path = getattr(config, "satellite_ephemeris_path", None)
+        if path is None:
+            raise ValueError("space parallax requires satellite_ephemeris_path.")
+        satellite = load_vbm_satellite_ephemeris(path, time_spec=time_spec, extrapolation=extrapolation)
+        if convention == "earth_geocentric_offset":
+            observer = satellite
+        else:
+            observer = getattr(config, "parallax_observer_ephemeris", None)
+            reference = getattr(config, "parallax_reference_ephemeris", None)
+            if observer is None:
+                # RTModel/GULLS satellite tables are Earth-relative perturbations.
+                # Build a complete observer orbit explicitly at the table times.
+                earth_r = np.column_stack([np.interp(satellite.time, earth.time, earth.position_au[:, j]) for j in range(3)])
+                observer = Ephemeris(satellite.time, earth_r + satellite.position_au, origin="explicit_reference", time_spec=time_spec)
+            if reference is None:
+                reference = earth
+    elif geometry != "annual":
+        raise ValueError(f"Unknown parallax geometry {geometry!r}.")
+
+    cls = FSPLParallaxFitter if finite_source else PSPLParallaxFitter
+    return cls(
+        float(config.ra_deg),
+        float(config.dec_deg),
+        float(config.tref if config.tref is not None else tref),
+        geometry=geometry,
+        observer_convention=convention,
+        time_spec=time_spec,
+        earth_ephemeris=earth,
+        satellite_or_observer_ephemeris=observer,
+        reference_ephemeris=reference,
+        maxiter=int(getattr(config, "fitter_maxiter", 1000)),
+        tol=float(getattr(config, "fitter_tol", 1.0e-6)),
+        max_piE=float(config.max_piE),
+    )
+
+
 __all__ = [
     "TimeSpec", "Ephemeris", "ParallaxDiagnostics", "ParallaxEvaluator",
-    "PSPLParallaxFitter", "FSPLParallaxFitter",
+    "PSPLParallaxFitter", "FSPLParallaxFitter", "parallax_fitter_from_config",
     "parse_vbm_satellite_table", "load_vbm_satellite_ephemeris", "load_cartesian_ephemeris", "default_earth_ephemeris", "default_espl_table_path",
     "parallax_effect_score",
 ]

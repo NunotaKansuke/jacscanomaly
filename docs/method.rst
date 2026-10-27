@@ -27,9 +27,8 @@ The high-level pipeline is:
 The following pages document the later stages in detail:
 
 * :doc:`template_free_method` explains the residual-only zero-crossing search.
-* :doc:`signal_extraction_method` explains iterative baseline refinement and
-  signal masking.
-* :doc:`planet_features` explains direct peak and dip measurements.
+* :ref:`post-fit-components` explains signal masking and masked refits.
+* :doc:`planet_features` explains the bump, dip and caustic measurements.
 
 Detection statistic
 -------------------
@@ -183,7 +182,7 @@ What the standard scan does not do
 
 The standard scan does not choose a 2L1S or 1L2S model, fit caustic geometry,
 or estimate a planet mass ratio. It reports local residual candidates.
-:doc:`planet_features` adds direct peak and dip counts, positions,
+:doc:`planet_features` adds direct bump, dip and caustic counts, positions,
 timescales, and strengths.
 
 Method details
@@ -193,4 +192,3 @@ Method details
    :maxdepth: 1
 
    template_free_method
-   signal_extraction_method

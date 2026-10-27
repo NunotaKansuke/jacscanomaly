@@ -17,7 +17,7 @@ evaluators.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Optional
 
@@ -81,6 +81,43 @@ def _fit_arrays(time, flux, ferr) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not np.all(np.isfinite(ferr_np)) or np.any(ferr_np <= 0.0):
         raise ValueError("ferr must be finite and positive.")
     return time_np, flux_np, ferr_np
+
+
+def _excluded_mask(mask, size: int, n_params: int) -> Optional[np.ndarray]:
+    """Validate a fit mask (``True`` = excluded); ``None`` if nothing is excluded."""
+    if mask is None:
+        return None
+    excluded = np.asarray(mask, dtype=bool).reshape(-1)
+    if excluded.size != size:
+        raise ValueError("mask must have the same length as time.")
+    if not excluded.any():
+        return None
+    if np.count_nonzero(~excluded) < n_params + 3:
+        raise ValueError("mask leaves too few points to fit the model.")
+    return excluded
+
+
+def masked_fit(fitter, fit_subset, time, flux, ferr, excluded: np.ndarray):
+    """Fit the kept points, then evaluate the solution on every point.
+
+    ``fit_subset(time, flux, ferr)`` runs the fitter's ordinary (unmasked)
+    fit on the kept points.  The returned result is the fixed-parameter
+    evaluation on the full arrays with ``fs``/``fb``/``chi2`` solved on the
+    kept points, carrying the subset fit's optimizer status.
+    """
+    keep = ~excluded
+    subset = fit_subset(time[keep], flux[keep], ferr[keep])
+    full = fitter.evaluate_fixed(
+        time, flux, ferr, fitter.seed_from_fit(subset), mask=excluded
+    )
+    full = replace(
+        full,
+        optimizer_success=subset.optimizer_success,
+        optimizer_status=subset.optimizer_status,
+        diagnostics=subset.diagnostics,
+    )
+    fitter._last_fit = full
+    return full
 
 
 def _pspl_magnification(time: np.ndarray, t0: float, tE: float, u0: float) -> np.ndarray:
@@ -290,14 +327,16 @@ class PSPLFitter:
         ferr: np.ndarray,
         q: np.ndarray,
         result,
+        excluded: Optional[np.ndarray] = None,
     ) -> SingleLensFitResult:
         magnification = self._magnification(time, q)
-        fs, fb = _solve_fs_fb_numpy(magnification, flux, ferr)
+        keep = slice(None) if excluded is None else ~excluded
+        fs, fb = _solve_fs_fb_numpy(magnification[keep], flux[keep], ferr[keep])
         if not np.isfinite(fs) or not np.isfinite(fb):
             raise RuntimeError("PSPL profiled flux solve is singular.")
         model = fs * magnification + fb
         residual = flux - model
-        normalized = residual / ferr
+        normalized = residual[keep] / ferr[keep]
         chi2 = float(np.dot(normalized, normalized))
         fit = SingleLensFitResult(
             time=time,
@@ -306,7 +345,7 @@ class PSPLFitter:
             params=jnp.asarray(q),
             param_names=("t0", "tE", "u0"),
             chi2=jnp.asarray(chi2),
-            chi2_dof=jnp.asarray(chi2 / max(time.size - 3, 1)),
+            chi2_dof=jnp.asarray(chi2 / max(normalized.size - 3, 1)),
             fs=jnp.asarray(fs),
             fb=jnp.asarray(fb),
             model_flux=jnp.asarray(model),
@@ -314,16 +353,28 @@ class PSPLFitter:
             model_kind="pspl",
             optimizer_success=bool(result.success),
             optimizer_status=_optimizer_status(result, maxiter=self.maxiter),
+            mask=excluded,
         )
         self._last_fit = fit
         return fit
 
-    def fit(self, time, flux, ferr, p0=None, *, pspl_params=None) -> SingleLensFitResult:
+    def fit(
+        self, time, flux, ferr, p0=None, *, pspl_params=None, mask=None
+    ) -> SingleLensFitResult:
         """Fit PSPL, using the shared automatic multistart when ``p0`` is absent.
 
         ``pspl_params`` (only its ``t0``) roughly locates the brightening.
+        ``mask`` (``True`` = excluded) removes points from the fit; the result
+        is still evaluated on every point.
         """
         time_np, flux_np, ferr_np = _fit_arrays(time, flux, ferr)
+        excluded = _excluded_mask(mask, time_np.size, 3)
+        if excluded is not None:
+            return masked_fit(
+                self,
+                lambda t, f, e: self.fit(t, f, e, p0, pspl_params=pspl_params),
+                time_np, flux_np, ferr_np, excluded,
+            )
         if p0 is None:
             seeds = automatic_seeds(
                 time_np, flux_np, ferr_np, finite_source=False, pspl_params=pspl_params
@@ -374,8 +425,9 @@ class PSPLFitter:
         q = self._decode(np.asarray(result.x, dtype=float))
         return self._make_fit(time_np, flux_np, ferr_np, q, result)
 
-    def evaluate_fixed(self, time, flux, ferr, p0) -> SingleLensFitResult:
+    def evaluate_fixed(self, time, flux, ferr, p0, *, mask=None) -> SingleLensFitResult:
         time_np, flux_np, ferr_np = _fit_arrays(time, flux, ferr)
+        excluded = _excluded_mask(mask, time_np.size, 3)
         q = np.asarray(p0, dtype=float).reshape(-1)
         if q.size != 3 or not np.all(np.isfinite(q)) or q[1] == 0.0:
             raise ValueError("PSPL fixed parameters must contain finite (t0, tE, u0).")
@@ -391,13 +443,14 @@ class PSPLFitter:
                 nfev=0,
                 message="fixed_parameters",
             ),
+            excluded,
         )
 
-    def fit_fixed_model(self, time, flux, ferr, p0, *, model_kind=None):
+    def fit_fixed_model(self, time, flux, ferr, p0, *, model_kind=None, mask=None):
         """Evaluate fixed nonlinear parameters through the common fitter API."""
         if model_kind not in {None, "pspl"}:
             raise ValueError(f"PSPLFitter cannot evaluate model_kind={model_kind!r}.")
-        return self.evaluate_fixed(time, flux, ferr, p0)
+        return self.evaluate_fixed(time, flux, ferr, p0, mask=mask)
 
     def plot_lc(self, **kwargs):
         if self._last_fit is None:
@@ -472,14 +525,16 @@ class FSPLFitter:
         ferr: np.ndarray,
         q: np.ndarray,
         result,
+        excluded: Optional[np.ndarray] = None,
     ) -> SingleLensFitResult:
         magnification = self._magnification(time, q)
-        fs, fb = _solve_fs_fb_numpy(magnification, flux, ferr)
+        keep = slice(None) if excluded is None else ~excluded
+        fs, fb = _solve_fs_fb_numpy(magnification[keep], flux[keep], ferr[keep])
         if not np.isfinite(fs) or not np.isfinite(fb):
             raise RuntimeError("FSPL profiled flux solve is singular.")
         model = fs * magnification + fb
         residual = flux - model
-        normalized = residual / ferr
+        normalized = residual[keep] / ferr[keep]
         chi2 = float(np.dot(normalized, normalized))
         params = np.asarray([q[0], q[1], q[2], np.exp(np.clip(q[3], -50.0, 10.0))])
         fit = SingleLensFitResult(
@@ -489,7 +544,7 @@ class FSPLFitter:
             params=jnp.asarray(params),
             param_names=("t0", "tE", "u0", "rho"),
             chi2=jnp.asarray(chi2),
-            chi2_dof=jnp.asarray(chi2 / max(time.size - 4, 1)),
+            chi2_dof=jnp.asarray(chi2 / max(normalized.size - 4, 1)),
             fs=jnp.asarray(fs),
             fb=jnp.asarray(fb),
             model_flux=jnp.asarray(model),
@@ -503,15 +558,16 @@ class FSPLFitter:
             optimizer_status=_optimizer_status(
                 result, maxiter=self.maxiter, detail="compiled_magnification"
             ),
+            mask=excluded,
         )
         self._last_fit = fit
         return fit
 
-    def fit_fixed_model(self, time, flux, ferr, p0, *, model_kind=None):
+    def fit_fixed_model(self, time, flux, ferr, p0, *, model_kind=None, mask=None):
         """Evaluate fixed nonlinear parameters through the common fitter API."""
         if model_kind not in {None, "fspl"}:
             raise ValueError(f"FSPLFitter cannot evaluate model_kind={model_kind!r}.")
-        return self.evaluate_fixed(time, flux, ferr, p0)
+        return self.evaluate_fixed(time, flux, ferr, p0, mask=mask)
 
     def _fit_from_seed(
         self,
@@ -639,9 +695,23 @@ class FSPLFitter:
         *,
         pspl_params=None,
         observed_scale=None,
+        mask=None,
     ) -> SingleLensFitResult:
-        """Fit FSPL, using the observed-duration seed grid when ``p0`` is absent."""
+        """Fit FSPL, using the observed-duration seed grid when ``p0`` is absent.
+
+        ``mask`` (``True`` = excluded) removes points from the fit; the result
+        is still evaluated on every point.
+        """
         time_np, flux_np, ferr_np = _fit_arrays(time, flux, ferr)
+        excluded = _excluded_mask(mask, time_np.size, 4)
+        if excluded is not None:
+            return masked_fit(
+                self,
+                lambda t, f, e: self.fit(
+                    t, f, e, p0, pspl_params=pspl_params, observed_scale=observed_scale
+                ),
+                time_np, flux_np, ferr_np, excluded,
+            )
         if p0 is None:
             seeds = self._automatic_initial_guesses(
                 time_np,
@@ -659,8 +729,9 @@ class FSPLFitter:
             return best_fit
         return self._fit_from_seed(time_np, flux_np, ferr_np, p0)
 
-    def evaluate_fixed(self, time, flux, ferr, p0) -> SingleLensFitResult:
+    def evaluate_fixed(self, time, flux, ferr, p0, *, mask=None) -> SingleLensFitResult:
         time_np, flux_np, ferr_np = _fit_arrays(time, flux, ferr)
+        excluded = _excluded_mask(mask, time_np.size, 4)
         q = np.asarray(p0, dtype=float).reshape(-1)
         if q.size != 4 or not np.all(np.isfinite(q)) or q[1] == 0.0:
             raise ValueError("FSPL fixed parameters must contain finite (t0, tE, u0, logrho).")
@@ -676,6 +747,7 @@ class FSPLFitter:
                 nfev=0,
                 message="fixed_parameters",
             ),
+            excluded,
         )
         return fit
 

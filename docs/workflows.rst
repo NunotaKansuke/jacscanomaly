@@ -18,18 +18,14 @@ Workflow map
    then run the same local-template scan. Use this when an external PSPL fit
    should not be optimized again.
 
-``Finder.run_template_free(..., fit=fit)``
-   Scan residuals of an existing ``SingleLensFitResult`` with zero-crossing
-   windows instead of the standard templates. No baseline fit is performed.
-
 ``TemplateFreeScanner().run(time, residual, ferr)``
    Run the zero-crossing search on residuals supplied by another pipeline.
    This has no dependency on ``Finder`` or a single-lens fit.
 
-``PlanetSignalExtractor(finder).run(...)``
-   Iteratively refine a baseline while separating strong residual signal,
-   measure its prominent peaks and dips. Use this after
-   detection or for targeted event analysis.
+``signal_mask`` / ``fitter.fit(..., mask=...)`` / ``measure_features``
+   Post-fit components: mask the signal inside candidate windows, refit the
+   baseline without it, and classify the residual into bumps, dips and
+   caustics. Each runs on its own; see :ref:`post-fit-components`.
 
 Standard template scan
 ----------------------
@@ -84,25 +80,7 @@ The template-free scanner identifies high-absolute-z residual segments and joins
 nearby zero-crossing windows. It is useful when a bell-like local template is
 too restrictive or when another pipeline already supplied residuals.
 
-With an existing fit:
-
-.. code-block:: python
-
-   from jacscanomaly import TemplateFreeSearchConfig
-
-   search = finder.run_template_free(
-       time,
-       flux,
-       ferr,
-       fit=existing_fit,
-       config=TemplateFreeSearchConfig(
-           seed_z_threshold=5.0,
-           candidate_chi2_threshold=150.0,
-       ),
-   )
-   print(search.best)
-
-With externally computed residuals:
+Pass the residuals of any fit (``fit.residual``) or of another pipeline:
 
 .. code-block:: python
 
@@ -116,54 +94,76 @@ Each ``TemplateFreeCandidate`` reports its time span, total and reduced
 chi-square, maximum absolute z-score, and the strongest seed point. This mode
 does not infer or alter a baseline model.
 
-Signal extraction and peak/dip measurements
---------------------------------------------
+.. _post-fit-components:
 
-For the complete model-selection and anomaly workflow, prefer the high-level
-API:
+Post-fit components
+-------------------
+
+Everything after the single-lens fit is a set of independent components. They
+are linked only by the information passed between them: a fit result (data,
+model and residual) and a list of :class:`jacscanomaly.Candidate` windows.
+No component calls another one, and none of them reads a scan result.
 
 .. code-block:: python
 
-   from jacscanomaly import Finder
+   from jacscanomaly import (
+       Candidate, Finder, PSPLFitter, candidates_from_scan,
+       measure_features, signal_mask,
+   )
 
-   result = Finder().run_anomaly_pipeline(time, flux, ferr)
+   fitter = PSPLFitter()
+   fit = fitter.fit(time, flux, ferr)
 
-   print(result.has_anomaly_candidate)
-   print(result.best_anomaly_candidate)
-   print(result.canonical_detection.summary_dict())
-   for record in result.detection_records:
-       print(record.stage, record.detected, record.fit_adopted)
-   for candidate in result.anomaly_candidates:
-       print(candidate["rank"], candidate["t_center"], candidate["max_abs_z"])
-   print(result.adopted_fit.model_kind)
+   scan = Finder().run(time, flux, ferr)          # optional
+   cands = candidates_from_scan(scan, which="best")
+   # or, without a scan (e.g. a window the scan rejected):
+   # cands = [Candidate(t_start=9.0, t_end=11.0)]
 
-``result.anomaly_candidates`` is the normal reporting interface: a ranked
-list of dictionaries with the location, interval, timescale, strength,
-provenance, and adopted model. Overlapping final-residual features and
-template-free windows are merged, with feature timing/sign and template-free
-chi-square statistics retained in one row. ``best_anomaly_candidate`` is the
-first row or ``None``. The deliberately cautious name
-``has_anomaly_candidate`` means that a false value is not a proof that no
-physical anomaly exists.
+   sm = signal_mask(fit, cands)                    # True = signal point
+   fit2 = fitter.fit(time, flux, ferr, p0=fit.params, mask=sm.mask)
+   feats = measure_features(fit2, cands)           # bumps / dips / caustics
 
-``result.canonical_detection`` is the one discovery decision: a separate
-``PlanetScanDecision`` from the frozen residual scan after model selection.
-``result.final_detection`` is retained as a compatibility alias. Earlier
-decisions are preserved in ``result.detection_records`` with stages
-``pre_physical`` and, when fallback ran, ``post_physical``. Those records are
-history/provenance; only the record marked ``canonical`` is the public final
-discovery decision. ``fit_adopted`` tells whether the baseline associated with
-an earlier scan survived model selection, so a post-physical detection can be
-real without its continuation fit being adopted.
+   print(feats.summary_text())
 
-``result.features`` and ``result.anomaly_candidates`` are characterization and
-reporting layers and must not be used to rewrite the canonical detection.
+``Candidate``
+   A time window ``t_start <= t <= t_end`` plus an optional anchor ``t0``.
+   ``Candidate.from_t0_teff(t0, teff)`` uses the scan support rule
+   ``|t - t0| <= 3 |teff|``. ``candidates_from_scan(result, which="all")``
+   converts every scored cluster, accepted by the criteria or not; only the
+   numbers are copied.
 
-``result.fit_exclusion_mask`` contains only points excluded by an accepted
-continuation fit. ``result.finder_support`` is the detection-support region
-used to carry a localized signal through physical routing and final
-characterization. It is an anomaly alert region and must not be used as a fit
-or HTML removal mask.
+``signal_mask(fit, candidates, *, penalty=2.0)``
+   For each candidate window, masks the contiguous residual segment that
+   maximises ``sum(z_i**2 - penalty)`` with ``z = residual / ferr`` and
+   overlaps the window. Masking a point frees one parameter, so this is the
+   mask that minimises ``chi2_kept + penalty * n_masked`` (2 = AIC) at the
+   current fit. A masked refit lowers the same quantity, so alternating the
+   two converges. Returns the union (``SignalMask.mask``), the per-candidate
+   masks and their gains. It never refits.
+
+``fitter.fit(..., mask=...)``
+   Every single-lens fitter accepts ``mask`` (``True`` = excluded). The fit,
+   ``fs``/``fb``, ``chi2`` and ``chi2_dof`` use the kept points only;
+   ``model_flux`` and ``residual`` cover all points, so the excluded signal
+   stays visible in the residual. ``evaluate_fixed`` and ``fit_fixed_model``
+   take the same argument.
+
+``measure_features(fit, candidates)``
+   Classifies the residual inside the candidate windows into ``bump``,
+   ``dip`` and ``caustic`` features; see :doc:`planet_features`.
+
+Iteration (mask, refit, re-mask) is written by the caller, not hidden in a
+configuration object.
+
+.. code-block:: python
+
+   mask = None
+   while True:
+       sm = signal_mask(fit, cands)
+       if mask is not None and (sm.mask == mask).all():
+           break
+       mask = sm.mask
+       fit = fitter.fit(time, flux, ferr, p0=fit.params, mask=mask)
 
 Physical routing and observed time scale
 ----------------------------------------
@@ -179,48 +179,3 @@ from residual/profile support. It is based on a weighted central interval,
 with ``censored=True`` when the signal reaches an observing edge. The scan-grid
 ``teff`` remains an internal proposal coordinate; plots, masks, and physical
 routing use the observed scale when it is measurable.
-
-For a candidate event, use the extractor to prevent the strongest anomaly
-from biasing the single-lens baseline. Then measure extrema in the refined
-residual:
-
-.. code-block:: python
-
-   from jacscanomaly import PlanetSignalConfig, PlanetSignalExtractor
-
-   extractor = PlanetSignalExtractor(
-       finder,
-       PlanetSignalConfig(
-           baseline_mode="beam_interval",
-           seed_min_dchi2=100.0,
-           max_iter=3,
-       ),
-   )
-   signal = extractor.run(time, flux, ferr, x0=x0, refit=False)
-   features = signal.measure_features()
-
-   print(features.summary_text())
-   rows = features.feature_dicts()
-
-This stage returns candidate intervals, a refined baseline, and direct
-measurements of each peak and dip. It does not assign physical caustic labels
-or estimate binary-lens parameters.
-
-The beam fit first accepts a compact anomaly core.  Local trend boundaries
-are then searched with the successive radii in
-``fit_mask_trend_growth_factors``.  Each wider proposal is refitted and must
-improve the accepted continuation without exceeding
-``fit_mask_trend_max_fraction``.  An unstable or over-broad proposal rolls
-back to the last accepted fit and mask; it is never clipped to an arbitrary
-subset of points.  Compactness uses the larger of the pre- and post-refit
-``|tE*u0|`` scales so that a valid proposal cannot reject itself merely by
-shrinking the continuation fit's scale.
-
-For high-throughput first passes, use ``PlanetSignalConfig.fast()``.  It
-performs one beam iteration with one retained interval.  For routing-only
-work, ``PlanetSignalConfig.probe()`` performs the first grid scan without a
-masked fit and exposes its cached seed.  ``run_effect_aware`` uses this probe
-by default, then continues with the full beam search only for a credible seed
-or a physical-effect fallback candidate; that full pass reuses the probe seed
-instead of scanning it again.  Pass ``planet_fast_mode=False`` to always use
-the full beam configuration.

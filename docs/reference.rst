@@ -15,41 +15,10 @@ Finder
 
 .. automethod:: jacscanomaly.Finder.run
 
-.. automethod:: jacscanomaly.Finder.run_anomaly_pipeline
-
-.. automethod:: jacscanomaly.Finder.run_effect_aware
-
-.. automethod:: jacscanomaly.Finder.run_template_free
-
 ``Finder.run`` is the standard template-grid detector. Its returned
 ``AnomalyResult`` stores the baseline fit, residuals, all extracted clusters,
 grid diagnostics, and the selected ``best`` candidate. ``x0`` is an initial
 guess unless ``refit=False``; see :doc:`workflows` for the fixed-baseline mode.
-
-``Finder.run_anomaly_pipeline`` is the complete adopted-model workflow. It
-always performs a frozen final-residual measurement after model selection, so
-feature reporting does not depend on whether a post-physical continuation fit
-accepted an exclusion mask.
-
-The lower-level ``Finder.run_effect_aware`` result exposes
-``pre_physical_detection`` and ``post_physical_detection`` for stage-level
-inspection. The one-line pipeline additionally records those decisions and
-selects its frozen final scan as the canonical decision.
-
-.. autoclass:: jacscanomaly.AnomalyPipelineConfig
-   :no-index:
-
-.. autoclass:: jacscanomaly.AnomalyPipelineResult
-   :no-index:
-
-.. autoclass:: jacscanomaly.AnomalyCandidate
-   :no-index:
-
-``AnomalyPipelineResult.anomaly_candidates`` exposes the typed internal
-``AnomalyCandidate`` rows as JSON-ready dictionaries. The related
-``has_anomaly_candidate`` and ``best_anomaly_candidate`` properties provide
-the common yes/no and strongest-candidate queries without making callers
-combine the feature and template-free result formats themselves.
 
 Template-free residual API
 --------------------------
@@ -67,52 +36,19 @@ configuration controls season splitting, optional sigma-clipped
 renormalization, the high-z seed threshold, zero-crossing-window joining, and
 the candidate chi-square threshold.
 
-Planet signal extraction API
-----------------------------
+Post-fit components
+-------------------
 
-.. autoclass:: jacscanomaly.PlanetSignalExtractor
+See :ref:`post-fit-components` for how they compose.
+
+.. autoclass:: jacscanomaly.Candidate
    :no-index:
 
-.. automethod:: jacscanomaly.PlanetSignalExtractor.run
+.. autofunction:: jacscanomaly.candidates_from_scan
 
-.. autoclass:: jacscanomaly.PlanetSignalResult
-   :no-index:
+.. autofunction:: jacscanomaly.signal_mask
 
-``PlanetScanDecision`` records the scan-only discovery decision separately
-from peak/dip characterization. ``PlanetDetectionRecord`` adds the pipeline
-stage and whether that stage's baseline was adopted. The complete high-level
-result exposes one canonical decision plus the pre/post history through
-``AnomalyPipelineResult.canonical_detection`` and
-``AnomalyPipelineResult.detection_records``.
-
-.. autoclass:: jacscanomaly.PlanetScanDecision
-   :no-index:
-
-.. autoclass:: jacscanomaly.PlanetDetectionRecord
-   :no-index:
-
-.. automethod:: jacscanomaly.PlanetSignalResult.measure_features
-
-.. automethod:: jacscanomaly.PlanetSignalResult.plot_signal
-
-.. autoclass:: jacscanomaly.PlanetSignalConfig
-   :no-index:
-
-The extractor returns both ``initial_fit`` and ``refined_fit``. Use
-``fit_exclusion_mask`` for points actually excluded by the adopted fit;
-``signal_mask`` is retained as a compatibility/provenance field. Use
-``point_weight`` to inspect fit weighting, ``finder_support_array()`` to
-inspect detection support independent of hard exclusions, and
-``accepted_iterations`` to
-audit accepted refinement steps. See :doc:`planet_features` for the three
-baseline modes and their controls.
-
-``timing`` records the extractor wall-clock total, time spent in residual-grid
-scans, and the number of scans.  In effect-aware runs, the default routing
-probe exposes a cached initial seed and a later full beam pass reuses that
-seed rather than repeating the first scan.
-
-.. autoclass:: jacscanomaly.PlanetSignalTiming
+.. autoclass:: jacscanomaly.SignalMask
    :no-index:
 
 FFT initialization API
@@ -129,17 +65,25 @@ FFT initialization API
 The FFT initializer is documented conceptually in :doc:`pspl_fft`; the
 residual-grid FFT backend is documented in :doc:`fft_backend`.
 
-Peak and dip measurement API
-----------------------------
+Feature measurement API
+-----------------------
 
-.. autoclass:: jacscanomaly.PlanetFeatureConfig
+.. autofunction:: jacscanomaly.measure_features
+
+.. autoclass:: jacscanomaly.FeatureConfig
    :no-index:
 
-.. autoclass:: jacscanomaly.PlanetFeatureResult
+.. autoclass:: jacscanomaly.Feature
    :no-index:
 
-.. automethod:: jacscanomaly.PlanetFeatureResult.summary_dict
+.. autoclass:: jacscanomaly.CausticDetail
+   :no-index:
 
-.. automethod:: jacscanomaly.PlanetFeatureResult.feature_dicts
+.. autoclass:: jacscanomaly.FeatureResult
+   :no-index:
 
-.. automethod:: jacscanomaly.PlanetFeatureResult.summary_table
+.. automethod:: jacscanomaly.FeatureResult.summary_dict
+
+.. automethod:: jacscanomaly.FeatureResult.feature_dicts
+
+.. automethod:: jacscanomaly.FeatureResult.summary_table

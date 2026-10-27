@@ -14,14 +14,14 @@ Main workflow
    jacscanomaly.Finder
    jacscanomaly.FinderConfig
    jacscanomaly.CandidateCriteria
-   jacscanomaly.PlanetSignalExtractor
-   jacscanomaly.PlanetSignalConfig
-   jacscanomaly.PlanetSignalResult
-   jacscanomaly.PlanetSignalTiming
-   jacscanomaly.PlanetScanDecision
-   jacscanomaly.PlanetDetectionRecord
-   jacscanomaly.PlanetFeatureConfig
-   jacscanomaly.PlanetFeatureResult
+   jacscanomaly.Candidate
+   jacscanomaly.candidates_from_scan
+   jacscanomaly.signal_mask
+   jacscanomaly.SignalMask
+   jacscanomaly.measure_features
+   jacscanomaly.FeatureConfig
+   jacscanomaly.Feature
+   jacscanomaly.FeatureResult
    jacscanomaly.TemplateFreeScanner
    jacscanomaly.TemplateFreeSearchConfig
    jacscanomaly.TemplateFreeSearchResult
@@ -91,5 +91,7 @@ Module reference
    jacscanomaly.singlelens_fit
    jacscanomaly.singlelens_model
    jacscanomaly.template_free
-   jacscanomaly.planet_signal
+   jacscanomaly.candidate
+   jacscanomaly.signal_mask
+   jacscanomaly.features
    jacscanomaly.plot

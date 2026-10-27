@@ -73,6 +73,5 @@ chosen bridge parameters are too permissive. Reduce ``bridge_floor_points`` or
 ``bridge_fraction`` when separation is more important than sensitivity to
 multi-lobed structures.
 
-Use :class:`jacscanomaly.TemplateFreeScanner` for externally supplied
-residuals, or :meth:`jacscanomaly.Finder.run_template_free` with an existing
-``SingleLensFitResult``.
+Use :class:`jacscanomaly.TemplateFreeScanner` with ``fit.residual`` of any
+``SingleLensFitResult`` or with externally supplied residuals.

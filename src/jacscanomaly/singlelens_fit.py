@@ -42,6 +42,10 @@ class SingleLensFitResult:
     optimizer_success: Optional[bool] = None
     optimizer_status: Optional[str] = None
     diagnostics: Optional[Any] = None
+    # Points excluded from the fit (``True`` = excluded).  ``fs``, ``fb``,
+    # ``chi2`` and ``chi2_dof`` use the kept points only, while ``model_flux``
+    # and ``residual`` cover every point.  ``None`` means all points were used.
+    mask: Optional[np.ndarray] = None
 
 
 __all__ = ["SingleLensFitResult"]

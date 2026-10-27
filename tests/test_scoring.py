@@ -5,6 +5,12 @@ from jacscanomaly.finder import _GridQualityIndex
 from jacscanomaly.models import SeasonSummary
 
 
+def _pick_best(finder, clusters, metrics, *, seasons=None):
+    return finder._best_from_scored_candidates(
+        finder._score_candidates(clusters, metrics, seasons=seasons)
+    )
+
+
 def _metrics(clusters: np.ndarray) -> np.ndarray:
     rows = []
     for t0, teff, dchi2 in clusters:
@@ -43,7 +49,7 @@ def test_quality_criteria_select_after_raw_background_is_built():
         )
     )
 
-    best = finder._pick_best_candidate(
+    best = _pick_best(finder, 
         clusters,
         metrics,
         seasons=[_season(0.0, 20.0, clusters)],
@@ -83,7 +89,7 @@ def test_score_uses_all_seasons_and_nearby_timescales():
         )
     )
 
-    best = finder._pick_best_candidate(clusters, _metrics(clusters), seasons=seasons)
+    best = _pick_best(finder, clusters, _metrics(clusters), seasons=seasons)
 
     assert best is not None
     assert best.n_score_reference == 3
@@ -111,7 +117,7 @@ def test_all_clusters_receive_scores_and_best_keeps_dchi2_selection():
         _metrics(clusters),
         seasons=seasons,
     )
-    best = finder._pick_best_candidate(
+    best = _pick_best(finder, 
         clusters,
         _metrics(clusters),
         seasons=seasons,
@@ -158,7 +164,7 @@ def test_score_adaptively_clips_strong_secondary_cluster():
         )
     )
 
-    best = finder._pick_best_candidate(
+    best = _pick_best(finder, 
         clusters,
         _metrics(clusters),
         seasons=[_season(0.0, 20.0, clusters)],

@@ -76,10 +76,12 @@ result = finder.run(time, flux, ferr)
 
 result.print_summary()
 
-# For the complete adopted-model anomaly workflow:
-# result = finder.run_anomaly_pipeline(time, flux, ferr)
-# print(result.has_anomaly_candidate)
-# print(result.best_anomaly_candidate)
+# Post-fit components (mask the signal, refit, classify bumps/dips/caustics):
+# from jacscanomaly import candidates_from_scan, signal_mask, measure_features
+# cands = candidates_from_scan(result)
+# sm = signal_mask(result.fit, cands)
+# fit2 = finder.fitter.fit(time, flux, ferr, p0=result.fit.params, mask=sm.mask)
+# print(measure_features(fit2, cands).summary_text())
 
 # In notebooks, get a one-row table:
 # display(result.summary_table())
