@@ -43,14 +43,14 @@ def test_candidates_from_scan_ignores_acceptance():
     assert candidates_from_scan(SimpleNamespace(best=None, scored_candidates=[])) == []
 
 
-def test_intersect_windows_keeps_what_every_set_masks():
-    from jacscanomaly import intersect_windows
+def test_agreed_windows_grow_overlapping_windows_to_their_union():
+    from jacscanomaly import agreed_windows
 
-    a = [Candidate(0.0, 6.0), Candidate(4.0, 8.0), Candidate(20.0, 21.0)]
-    b = [Candidate(1.0, 5.0), Candidate(7.0, 30.0)]
+    a = [Candidate(0.0, 6.0), Candidate(20.0, 21.0)]
+    b = [Candidate(1.0, 8.0), Candidate(40.0, 41.0)]
 
-    got = [(c.t_start, c.t_end) for c in intersect_windows(a, b)]
+    ga, gb = agreed_windows(a, b)
 
-    assert got == [(1.0, 5.0), (7.0, 8.0), (20.0, 21.0)]
-    assert intersect_windows(a, []) == ()
-    assert [(c.t_start, c.t_end) for c in intersect_windows(a)] == [(0.0, 8.0), (20.0, 21.0)]
+    assert [(c.t_start, c.t_end) for c in ga] == [(0.0, 8.0), (20.0, 21.0)]
+    assert [(c.t_start, c.t_end) for c in gb] == [(0.0, 8.0), (40.0, 41.0)]
+    assert agreed_windows(a, []) == ((Candidate(0.0, 6.0), Candidate(20.0, 21.0)), ())

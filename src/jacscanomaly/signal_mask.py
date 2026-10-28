@@ -15,8 +15,11 @@ objective
 
 is minimised over masks, for the fit parameters ``theta`` held fixed, by the
 segment that maximises ``sum(z_i^2 - penalty)``. Per candidate, the segment
-is the best one that overlaps the candidate window; it is empty unless both
-the segment and its part inside the window have a positive gain. It does not
+is the best one that overlaps the candidate window (``inside_only``: lies
+inside it); it is empty unless both the segment and its part inside the
+window have a gain above
+``segment_cost``, the price of the segment's own two parameters (its start
+and end; 0 by default). It does not
 cross a data gap longer than the window itself.
 
 A masked refit minimises ``chi2_kept`` with the mask held fixed, so
@@ -59,6 +62,8 @@ def _best_segment(
     *,
     penalty: float,
     max_gap: float,
+    segment_cost: float = 0.0,
+    inside_only: bool = False,
 ) -> tuple[np.ndarray, float]:
     """Maximum-gain segment of ``z**2 - penalty`` that overlaps ``support``."""
     mask = np.zeros(time.shape, dtype=bool)
@@ -69,6 +74,8 @@ def _best_segment(
     breaks = np.flatnonzero(np.diff(time) > max_gap)
     lo = int(breaks[breaks < inside[0]][-1] + 1) if np.any(breaks < inside[0]) else 0
     hi = int(breaks[breaks >= inside[-1]][0]) if np.any(breaks >= inside[-1]) else time.size - 1
+    if inside_only:
+        lo, hi = max(lo, int(inside[0])), min(hi, int(inside[-1]))
     gain = np.square(z[lo : hi + 1]) - float(penalty)
     gain[~np.isfinite(gain)] = -float(penalty)
     n = gain.size
@@ -84,8 +91,8 @@ def _best_segment(
     window = inside[(inside >= lo) & (inside <= hi)] - lo
     best = int(window[np.argmax(through[window])])
     total = float(through[best])
-    if total <= 0.0:
-        return mask, total
+    if total <= segment_cost:
+        return mask, total - segment_cost
     start = best
     while start > 0 and ending[start - 1] > 0.0:
         start -= 1
@@ -94,10 +101,10 @@ def _best_segment(
         end += 1
     # The window must carry evidence of its own; otherwise the segment only
     # reaches through noise to a signal that belongs to another window.
-    if float(np.sum(gain[start : end + 1][support[lo + start : lo + end + 1]])) <= 0.0:
+    if float(np.sum(gain[start : end + 1][support[lo + start : lo + end + 1]])) <= segment_cost:
         return mask, 0.0
     mask[lo + start : lo + end + 1] = True
-    return mask, total
+    return mask, total - segment_cost
 
 
 def signal_mask(
@@ -105,13 +112,18 @@ def signal_mask(
     candidates: CandidateLike,
     *,
     penalty: float = 2.0,
+    segment_cost: float = 0.0,
+    inside_only: bool = False,
 ) -> SignalMask:
     """Mark the anomaly segment of ``fit`` for each candidate window.
 
     ``fit`` is any single-lens fit result (``time``, ``ferr`` and
     ``residual = flux - model_flux`` are used). ``penalty`` is the chi-square
-    cost of excluding one sample (2 = AIC). Each candidate is processed on its
-    own; the union is ``SignalMask.mask``.
+    cost of excluding one sample (2 = AIC); ``segment_cost`` that of placing a
+    segment. ``inside_only`` keeps each segment inside its window (with
+    several windows, a segment past its own would bridge noise to another
+    window's signal). Each candidate is processed on its own; the union is
+    ``SignalMask.mask``.
     """
     if not penalty > 0.0:
         raise ValueError("penalty must be positive")
@@ -127,6 +139,8 @@ def signal_mask(
             candidate.support(time),
             penalty=penalty,
             max_gap=candidate.t_end - candidate.t_start,
+            segment_cost=segment_cost,
+            inside_only=inside_only,
         )
         for candidate in values
     ]

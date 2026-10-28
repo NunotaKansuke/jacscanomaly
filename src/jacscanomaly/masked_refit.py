@@ -1,25 +1,36 @@
-"""Fit a single-lens model with the scan's anomaly windows masked.
+"""Fit a single-lens model with the anomalies in the scan's windows masked.
 
-:func:`masked_refit` refits ``fit`` with every sample inside the candidate
-windows excluded::
+:func:`masked_refit` refits ``fit`` with the anomaly inside each candidate
+window excluded::
 
     m = masked_refit(fitter, fit, candidates)
-    m.fit, m.mask, m.chi2, m.criterion
+    m.fit, m.mask, m.candidates, m.chi2, m.criterion
 
-The mask is the windows themselves, the extent the anomaly scan measured
-with its template (``t0 +- teff_coeff * teff``). It is not re-derived from
-the residual point by point: a per-point test cannot tell the anomaly from
-the host's own misfit around it (a host fitted with the anomaly in it is off
-over the whole peak, and masking that removes what constrains ``u0``), and
-it misses a coherent anomaly whose samples are each weak.
+The windows (``t0 +- teff_coeff * teff`` of a scan candidate) say *where*
+an anomaly is; they are the scan's search region, not its extent. How much
+of each window is masked is decided by the one objective every model is
+compared with,
 
-Models refitted on different windows (what is anomalous depends on the
-model) are compared on all ``n`` samples by
-``criterion = chi2_kept + penalty * n_masked + k ln n``: a masked sample
-costs ``penalty`` (2: one free parameter, AIC, the price
-:func:`~jacscanomaly.signal_mask` and :func:`~jacscanomaly.relock_host` use),
-and ``k`` counts the nonlinear parameters (``fs``/``fb`` are common to every
-model and left out). With the same windows the mask term cancels.
+    J = chi2_kept + penalty * n_masked + segment_cost * n_segments,
+
+a masked sample being one free parameter (its own value) at the AIC price
+``penalty = 2`` (as in :func:`~jacscanomaly.relock_host`), and a masked
+segment costing ``segment_cost = 2 ln n`` for its start and end, located
+among ``n`` samples (BIC). The window was already detected; a sample
+inside it is masked when it is more anomalous than ``z^2 = 2`` on average
+over a segment, and pure noise rarely pays a segment's ``2 ln n``. The mask is the segment inside each window
+that pays for itself (:func:`~jacscanomaly.signal_mask`), alternated
+with the masked refit until it repeats; each step does not increase ``J``.
+Three starts are minimised and the lowest ``J`` is kept: ``fit`` as given,
+the refit with the whole windows masked (a host not pulled by the anomaly),
+and the fitter's automatic start (or the nested PSPL, :func:`masked_refit`). So a host
+misfit around the anomaly is not masked when a host that fits it exists,
+and a weak, broad window over the host peak masks nothing.
+
+Models refitted on different masks (what is anomalous depends on the model)
+are compared on all ``n`` samples by
+``criterion = J + k ln n``, ``k`` counting the nonlinear parameters
+(``fs``/``fb`` are common to every model and left out).
 
 :func:`host_detected` asks whether the kept samples see the host event at
 all: when the mask covers the event, a constant flux explains the kept
@@ -35,6 +46,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .candidate import Candidate, CandidateLike, as_candidates
+from .signal_mask import signal_mask
 from .singlelens_fit import SingleLensFitResult
 
 
@@ -42,9 +54,10 @@ from .singlelens_fit import SingleLensFitResult
 class MaskedRefit:
     """Outcome of :func:`masked_refit`.
 
-    ``fit`` was fitted with ``mask`` excluded (unmasked when no window holds a
-    sample). ``n_fit`` is the number of fits run: 0 when ``fit`` already had
-    that mask.
+    ``fit`` was fitted with ``mask`` excluded (unmasked when nothing is
+    masked). ``candidates`` are the masked segments, one per window that
+    masks anything; ``windows`` the windows searched. ``n_fit`` is the
+    number of fits run.
     """
 
     fit: SingleLensFitResult
@@ -53,6 +66,7 @@ class MaskedRefit:
     chi2: float
     criterion: float
     n_fit: int
+    windows: tuple[Candidate, ...] = ()
 
     @property
     def n_masked(self) -> int:
@@ -79,6 +93,44 @@ def _chi2_kept(fit, mask) -> float:
     return float(np.sum(z[~mask] ** 2))
 
 
+def _minimise_j(fitter, fit, windows, penalty, segment_cost, n_iter):
+    """Alternate signal_mask in ``windows`` and the masked refit from ``fit``.
+
+    Returns ``(J, fit, segments, n_fit)``: ``segments`` are the masks (one
+    per window that masks anything) whose union ``fit`` was fitted under.
+    """
+    time = np.asarray(fit.time, dtype=float)
+    data = (time, np.asarray(fit.flux, dtype=float), np.asarray(fit.ferr, dtype=float))
+    mask = _fit_mask(fit)
+    segments, n_fit = ((mask,) if mask.any() else ()), 0
+    for _ in range(n_iter):
+        new = tuple(m for m in signal_mask(fit, windows, penalty=penalty,
+                                           segment_cost=segment_cost,
+                                           inside_only=True).per_candidate if m.any())
+        new_mask = np.logical_or.reduce(new) if new else np.zeros(time.shape, dtype=bool)
+        if np.array_equal(new_mask, mask):
+            segments = new
+            break
+        try:
+            fit = fitter.fit(*data, fitter.seed_from_fit(fit), mask=new_mask if new else None)
+        except ValueError:  # too few samples kept to refit: J is scored as is
+            break
+        mask, segments, n_fit = new_mask, new, n_fit + 1
+    return _j(fit, mask, segments, penalty, segment_cost), fit, segments, n_fit
+
+
+def _j(fit, mask, segments, penalty, segment_cost) -> float:
+    return _chi2_kept(fit, mask) + penalty * int(np.count_nonzero(mask)) + segment_cost * len(segments)
+
+
+def _as_segments(time, masks) -> tuple[Candidate, ...]:
+    out = []
+    for m in masks:
+        idx = np.flatnonzero(m)
+        out.append(Candidate(float(time[idx[0]]), float(time[idx[-1]])))
+    return tuple(out)
+
+
 def masked_refit(
     fitter,
     fit: SingleLensFitResult,
@@ -86,48 +138,104 @@ def masked_refit(
     *,
     nested=None,
     penalty: float = 2.0,
+    segment_cost: float | None = None,
+    n_iter: int = 4,
 ) -> MaskedRefit:
-    """Refit ``fit`` with the candidate windows masked.
+    """Refit ``fit`` with the anomaly in each candidate window masked.
 
-    ``fitter`` produced ``fit`` (or fits the same model). Two refits run
-    under the mask and the one with the lower ``chi2_kept`` is kept: one
-    continues from ``fitter.seed_from_fit(fit)``; the other leaves the basin
-    ``fit`` may have been pulled into by the samples now masked (e.g. a host
-    locked on the anomaly with ``u0 >> 1``), which a local refit cannot.
+    ``fitter`` produced ``fit`` (or fits the same model). ``penalty`` is the
+    cost of a masked sample, ``segment_cost`` of a masked segment (default
+    ``2 ln n``). From each start the mask and
+    the fit are alternated (see the module doc); the lowest ``J`` is kept.
 
-    That second start is the fitter's own automatic one, or, given
-    ``nested`` (a PSPL fit or its ``(t0, tE, u0)``), the point of this model
-    that is that PSPL (``fitter.nested_seed``: ``rho -> 0``, ``piE = 0``). A
-    model that contains the PSPL fits the kept samples at least as well as
-    the PSPL does there, and the nested start makes the refit reach that,
-    where a start elsewhere can end on a worse local optimum (an FSPL stuck
-    at ``rho ~ u0``). When ``fit`` was already fitted with the same mask it
-    is kept as is, and only the nested start (if given) is fitted against it.
+    Starts: ``fit``; ``fitter.seed_from_fit(fit)`` refitted with the whole
+    windows masked; and either the fitter's automatic start under that mask
+    (it leaves a basin ``fit`` may sit in, e.g. a host locked on the anomaly
+    with ``u0 >> 1``) or, given ``nested`` (a PSPL fit or its
+    ``(t0, tE, u0)``), the point of this model that is that PSPL
+    (``fitter.nested_seed``: ``rho -> 0``, ``piE = 0``) under the PSPL's own
+    mask. A model that contains the PSPL starts there at the PSPL's ``J`` or
+    lower, so it ends no worse than the PSPL.
     """
     time = np.asarray(fit.time, dtype=float)
     values = as_candidates(candidates)
-    mask = window_mask(time, values)
+    full = window_mask(time, values)
+    penalty = float(penalty)
+    segment_cost = 2.0 * np.log(max(time.size, 2)) if segment_cost is None else float(segment_cost)
     data = (time, np.asarray(fit.flux, dtype=float), np.asarray(fit.ferr, dtype=float))
-    kept = mask if mask.any() else None
-    fits = [fit] if np.array_equal(mask, _fit_mask(fit)) else [
-        fitter.fit(*data, fitter.seed_from_fit(fit), mask=kept)
-    ]
+    kept = full if full.any() else None
+    starts, n_fit = [fit], 0
+    if full.any() and not np.array_equal(full, _fit_mask(fit)):
+        starts.append(fitter.fit(*data, fitter.seed_from_fit(fit), mask=kept))
+        n_fit += 1
     if nested is not None:
         params = np.asarray(getattr(nested, "params", nested), dtype=float)
-        fits.append(fitter.fit(*data, fitter.nested_seed(params), mask=kept))
-    elif fits[0] is not fit:
-        fits.append(fitter.fit(*data, mask=kept))
-    n_fit = sum(f is not fit for f in fits)
-    fit = min(fits, key=lambda f: _chi2_kept(f, mask))
+        if hasattr(nested, "params"):  # the PSPL's own mask (none when it masks nothing)
+            under = _fit_mask(nested)
+            under = under if under.any() else None
+        else:
+            under = kept
+        starts.append(fitter.fit(*data, fitter.nested_seed(params), mask=under))
+        n_fit += 1
+    elif len(starts) > 1:
+        starts.append(fitter.fit(*data, mask=kept))
+        n_fit += 1
+    results = []
+    for start in starts:
+        j, f, segments, n = _minimise_j(fitter, start, values, penalty, segment_cost, n_iter)
+        n_fit += n
+        results.append((j, f, segments))
+    j, fit, segments = min(results, key=lambda r: r[0])
+    mask = np.logical_or.reduce(segments) if segments else np.zeros(time.shape, bool)
     chi2 = _chi2_kept(fit, mask)
     k = int(np.asarray(fit.params).size)
     return MaskedRefit(
         fit=fit,
         mask=mask,
+        candidates=_as_segments(time, segments),
+        chi2=chi2,
+        criterion=j + k * np.log(max(mask.size, 1)),
+        n_fit=n_fit,
+        windows=values,
+    )
+
+
+def window_refit(
+    fitter,
+    fit: SingleLensFitResult,
+    windows: CandidateLike,
+    *,
+    nested=None,
+    penalty: float = 2.0,
+    segment_cost: float | None = None,
+) -> MaskedRefit:
+    """Refit ``fit`` with the whole ``windows`` masked (their extent is given).
+
+    Scored as :func:`masked_refit`, each window that masks a sample one
+    segment. Starts: ``fitter.seed_from_fit(fit)`` and, given ``nested``,
+    ``fitter.nested_seed`` of that PSPL; the lower ``chi2_kept`` is kept.
+    """
+    time = np.asarray(fit.time, dtype=float)
+    values = as_candidates(windows)
+    mask = window_mask(time, values)
+    segment_cost = 2.0 * np.log(max(time.size, 2)) if segment_cost is None else float(segment_cost)
+    data = (time, np.asarray(fit.flux, dtype=float), np.asarray(fit.ferr, dtype=float))
+    seeds = [fitter.seed_from_fit(fit)]
+    if nested is not None:
+        seeds.append(fitter.nested_seed(np.asarray(getattr(nested, "params", nested), dtype=float)))
+    fits = [fitter.fit(*data, seed, mask=mask if mask.any() else None) for seed in seeds]
+    best = min(fits, key=lambda f: _chi2_kept(f, mask))
+    n_segments = sum(bool(window_mask(time, [w]).any()) for w in values)
+    chi2 = _chi2_kept(best, mask)
+    k = int(np.asarray(best.params).size)
+    return MaskedRefit(
+        fit=best,
+        mask=mask,
         candidates=values,
         chi2=chi2,
-        criterion=chi2 + penalty * int(np.count_nonzero(mask)) + k * np.log(max(mask.size, 1)),
-        n_fit=n_fit,
+        criterion=chi2 + penalty * int(mask.sum()) + segment_cost * n_segments + k * np.log(max(mask.size, 1)),
+        n_fit=len(fits),
+        windows=values,
     )
 
 
@@ -170,4 +278,4 @@ def host_detected(fit: SingleLensFitResult, mask=None) -> bool:
     return chi2 + p * np.log(n) < float(flat.chi2) + np.log(n)
 
 
-__all__ = ["MaskedRefit", "constant_fit", "host_detected", "masked_refit", "window_mask"]
+__all__ = ["MaskedRefit", "constant_fit", "host_detected", "masked_refit", "window_mask", "window_refit"]

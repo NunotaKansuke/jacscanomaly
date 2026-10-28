@@ -107,24 +107,23 @@ def _merged(windows: CandidateLike) -> list[tuple[float, float]]:
     return [(a, b) for a, b in merged]
 
 
-def intersect_windows(*window_sets: CandidateLike) -> tuple[Candidate, ...]:
-    """Time spans inside a window of every set (the union of each set, intersected).
+def agreed_windows(*window_sets: CandidateLike) -> tuple[tuple[Candidate, ...], ...]:
+    """Each set's windows, grown to the union of every window they overlap.
 
-    With one window set per model, this is where every model sees an
-    anomaly: the samples no model explains.
+    With one set of masked segments per model: where segments of several
+    models overlap, the models see the same anomaly and differ only in its
+    extent, and each gets the union. A window no other set overlaps stays
+    as it is (what is anomalous depends on the model).
     """
-    if not window_sets:
-        return ()
-    spans = _merged(window_sets[0])
-    for windows in window_sets[1:]:
-        other = _merged(windows)
-        spans = [
-            (max(a, c), min(b, d))
-            for a, b in spans
-            for c, d in other
-            if max(a, c) <= min(b, d)
-        ]
-    return tuple(Candidate(a, b) for a, b in spans)
+    spans = _merged([w for windows in window_sets for w in as_candidates(windows)])
+    out = []
+    for windows in window_sets:
+        own = _merged(windows)
+        out.append(tuple(
+            Candidate(a, b) for a, b in spans
+            if any(max(a, c) <= min(b, d) for c, d in own)
+        ))
+    return tuple(out)
 
 
 def candidates_from_scan(

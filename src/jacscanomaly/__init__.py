@@ -28,11 +28,11 @@ from .template_free import (
     TemplateFreeSearchConfig,
     TemplateFreeSearchResult,
 )
-from .candidate import Candidate, candidates_from_scan, intersect_windows
+from .candidate import Candidate, agreed_windows, candidates_from_scan
 from .signal_mask import SignalMask, signal_mask
 from .relock import HostRelock, relock_host
 from .masked_refit import (
-    MaskedRefit, constant_fit, host_detected, masked_refit, window_mask,
+    MaskedRefit, constant_fit, host_detected, masked_refit, window_mask, window_refit,
 )
 from .anomaly_search import AnomalySearch, search_anomalies
 from .features import (
@@ -111,8 +111,8 @@ __all__ = [
     "FSPLParallaxFitter",
     "SingleLensFitResult",
     "Candidate",
+    "agreed_windows",
     "candidates_from_scan",
-    "intersect_windows",
     "SignalMask",
     "signal_mask",
     "HostRelock",
@@ -120,6 +120,7 @@ __all__ = [
     "MaskedRefit",
     "window_mask",
     "masked_refit",
+    "window_refit",
     "constant_fit",
     "host_detected",
     "AnomalySearch",

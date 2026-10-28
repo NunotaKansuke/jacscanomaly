@@ -7,8 +7,9 @@
 
 Round ``i``: scan the samples outside the windows found so far, with the
 host held at its current parameters (``refit=False``); take the scan's best
-candidate; refit the host with every window masked
-(:func:`~jacscanomaly.masked_refit`). Stop when the best candidate is
+candidate; refit the host with the anomaly in every window masked
+(:func:`~jacscanomaly.masked_refit`: the window is where to look, the mask
+is the part of it that pays its price). Stop when the best candidate is
 missing or scores below ``min_score``.
 
 Why rescan instead of taking every candidate of one scan: a strong anomaly
@@ -26,7 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .candidate import Candidate
-from .masked_refit import MaskedRefit, masked_refit
+from .masked_refit import MaskedRefit, masked_refit, window_mask
 
 
 @dataclass(frozen=True)
@@ -83,7 +84,7 @@ def search_anomalies(
         candidates.append(best)
         windows.append(Candidate.from_scan(best))
         refit = masked_refit(finder.fitter, host, windows)
-        keep = ~refit.mask
+        keep = ~window_mask(time, windows)  # searched, masked or not
         scan = finder.run(time[keep], flux[keep], ferr[keep],
                           x0=finder.fitter.seed_from_fit(refit.fit), refit=False, **run_kwargs)
         scans.append(scan)
