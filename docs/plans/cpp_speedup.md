@@ -58,10 +58,12 @@ so timings are +-15 %).
 * The PSPL FFT batch is now mostly pocketfft itself (nfft = 2^18 per row);
   the template and post-processing are ~1/3 of it.
 
-## Next
-
-* Analytic variable-projection Jacobian for the atoms host fit (only the
-  magnification column depends on the host parameters), with dA/dp from
-  the PSPL closed form, the VBM gradient (FSPL) and the parallax evaluator.
-  Replaces the 2-point finite differences (n_p + 1 solves per Jacobian). This
-  changes the optimiser path, so it needs the 30-event comparison again.
+* Variable-projection Jacobian for the atoms host fit, with dA/dp by forward
+  differences of the magnification alone. It matched central differences of
+  the projected residual to 1e-9, but `_fit_host` got slower (12.9 s ->
+  18.7 s on the 4 events). Each Jacobian still costs n_p magnification calls,
+  and the magnification (VBM, parallax), not the linear solve, is the
+  expensive part; least_squares also took more Jacobian evaluations. On 30
+  events J moved by up to 41 in both directions (different local minima in
+  rho / piE), with the same selected model. A gain needs an analytic dA/dp
+  (VBM gradient, parallax evaluator).
