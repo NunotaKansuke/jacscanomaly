@@ -22,10 +22,10 @@ Workflow map
    Run the zero-crossing search on residuals supplied by another pipeline.
    This has no dependency on ``Finder`` or a single-lens fit.
 
-``signal_mask`` / ``fitter.fit(..., mask=...)`` / ``measure_features``
-   Post-fit components: mask the signal inside candidate windows, refit the
-   baseline without it, and classify the residual into bumps and dips.
-   Each runs on its own; see :ref:`post-fit-components`.
+``robust_fit`` / ``measure_features``
+   Post-fit components: fit the host jointly with the anomalies, so they do
+   not pull it, and classify the residual into bumps and dips; see
+   :ref:`post-fit-components`.
 
 Standard template scan
 ----------------------
@@ -99,71 +99,50 @@ does not infer or alter a baseline model.
 Post-fit components
 -------------------
 
-Everything after the single-lens fit is a set of independent components. They
-are linked only by the information passed between them: a fit result (data,
-model and residual) and a list of :class:`jacscanomaly.Candidate` windows.
-No component calls another one, and none of them reads a scan result.
+Everything after the single-lens fit works on a fit result (data, model and
+residual) and :class:`jacscanomaly.Candidate` windows; none of it reads a scan
+result.
 
 .. code-block:: python
 
-   from jacscanomaly import (
-       Candidate, Finder, PSPLFitter, candidates_from_scan,
-       measure_features, signal_mask,
-   )
+   from jacscanomaly import FSPLFitter, Finder, PSPLFitter, robust_fit
 
-   fitter = PSPLFitter()
-   fit = fitter.fit(time, flux, ferr)
+   finder = Finder()
+   scan = finder.run(time, flux, ferr)
+   r = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, finder,
+                  time, flux, ferr, scan.fit.params)
+   best = r.best                     # lowest J over models and starts
+   best.params, best.sigma, best.atoms, best.windows
+   print(best.features.summary_text() if best.features else "no anomaly")
 
-   scan = Finder().run(time, flux, ferr)          # optional
-   cands = candidates_from_scan(scan, which="best")
-   # or, without a scan (e.g. a window the scan rejected):
-   # cands = [Candidate(t_start=9.0, t_end=11.0)]
+``robust_fit(fitters, finder, time, flux, ferr, p_scan)``
+   No sample is masked. The host and the anomalies are fitted together::
 
-   sm = signal_mask(fit, cands)                    # True = signal point
-   fit2 = fitter.fit(time, flux, ferr, p0=fit.params, mask=sm.mask)
-   feats = measure_features(fit2, cands)           # bumps / dips
+      F(t) = fs A(t; p) + fb + sum_k [a_k h(tau_k) + b_k l(tau_k)]
 
-   print(feats.summary_text())
+   ``h``, ``l`` are the scan's two templates, zero outside ``|tau| < 3``
+   ("atoms"). Atoms are added greedily from scans of the residual while each
+   lowers ``chi2`` by more than ``4 ln n`` (BIC), then pruned with the same
+   price. Starts: the scan's PSPL (moved off a short spike by
+   :func:`jacscanomaly.relock_host`), the PSPL result nested into each
+   extended model, and each model's plain fit. Models and starts are compared
+   by ``J = chi2 + (n_host + 2 + 4 n_atoms) ln n``. ``fit_atoms`` is the
+   single-start step; ``AtomConfig`` holds the constants.
 
-``Candidate``
-   A time window ``t_start <= t <= t_end`` plus an optional anchor ``t0``.
-   ``Candidate.from_t0_teff(t0, teff)`` uses the scan support rule
-   ``|t - t0| <= 3 |teff|``. ``candidates_from_scan(result, which="all")``
-   converts every scored cluster, accepted by the criteria or not; only the
-   numbers are copied.
-
-``signal_mask(fit, candidates, *, penalty=2.0)``
-   For each candidate window, masks the contiguous residual segment that
-   maximises ``sum(z_i**2 - penalty)`` with ``z = residual / ferr`` and
-   overlaps the window. Masking a point frees one parameter, so this is the
-   mask that minimises ``chi2_kept + penalty * n_masked`` (2 = AIC) at the
-   current fit. A masked refit lowers the same quantity, so alternating the
-   two converges. Returns the union (``SignalMask.mask``), the per-candidate
-   masks and their gains. It never refits.
+``relock_host(fitter, fit)``
+   Tests whether ``fit`` sits on a short anomaly instead of its host event
+   and returns the host fit when it does.
 
 ``fitter.fit(..., mask=...)``
    Every single-lens fitter accepts ``mask`` (``True`` = excluded). The fit,
    ``fs``/``fb``, ``chi2`` and ``chi2_dof`` use the kept points only;
-   ``model_flux`` and ``residual`` cover all points, so the excluded signal
-   stays visible in the residual. ``evaluate_fixed`` and ``fit_fixed_model``
-   take the same argument.
+   ``model_flux`` and ``residual`` cover all points. ``evaluate_fixed`` and
+   ``fit_fixed_model`` take the same argument.
 
 ``measure_features(fit, candidates)``
    Classifies the residual inside the candidate windows into ``bump``
-   and ``dip`` features; see :doc:`planet_features`.
-
-Iteration (mask, refit, re-mask) is written by the caller, not hidden in a
-configuration object.
-
-.. code-block:: python
-
-   mask = None
-   while True:
-       sm = signal_mask(fit, cands)
-       if mask is not None and (sm.mask == mask).all():
-           break
-       mask = sm.mask
-       fit = fitter.fit(time, flux, ferr, p0=fit.params, mask=mask)
+   and ``dip`` features; see :doc:`planet_features`. ``robust_fit`` measures
+   them on the host with ``fs``, ``fb`` from outside the atom windows.
 
 Physical routing and observed time scale
 ----------------------------------------

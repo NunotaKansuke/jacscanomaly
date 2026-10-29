@@ -25,21 +25,10 @@ Usage
    for feature in feats.features:            # time ordered
        print(feature.kind, feature.time, feature.timescale, feature.strength)
 
-``fit`` is any single-lens fit result; typically the refit with the signal
-masked (see :ref:`post-fit-components`). Extrema are searched on the union of
+``fit`` is any single-lens fit result; typically the host that the anomaly
+does not pull (see :ref:`post-fit-components`). Extrema are searched on the union of
 the candidate windows, and each feature records the first candidate whose
 support contains it (``feature.candidate``).
-
-Pass the :class:`jacscanomaly.SignalMask` instead of the candidates to measure
-each window united with its signal segment, padded by ``smooth_points``
-samples. The segment can reach beyond the window; a feature cut at the window
-edge has no closing floor, so a dip is dropped and a bump's prominence is
-lost:
-
-.. code-block:: python
-
-   sm = signal_mask(fit, cands)          # after the mask/refit loop
-   feats = measure_features(fit, sm)
 
 Detection
 ---------

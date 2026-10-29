@@ -46,9 +46,16 @@ See :ref:`post-fit-components` for how they compose.
 
 .. autofunction:: jacscanomaly.candidates_from_scan
 
-.. autofunction:: jacscanomaly.signal_mask
+.. autofunction:: jacscanomaly.relock_host
 
-.. autoclass:: jacscanomaly.SignalMask
+.. autofunction:: jacscanomaly.robust_fit
+
+.. autofunction:: jacscanomaly.fit_atoms
+
+.. autoclass:: jacscanomaly.AtomConfig
+   :no-index:
+
+.. autoclass:: jacscanomaly.RobustFit
    :no-index:
 
 FFT initialization API

@@ -1,8 +1,7 @@
 """Bump / dip classification of residual structure.
 
 :func:`measure_features` measures the residual of a single-lens fit inside
-the windows of :class:`~jacscanomaly.Candidate` objects, or inside the
-signal segments of a :class:`~jacscanomaly.SignalMask`, and classifies the
+the windows of :class:`~jacscanomaly.Candidate` objects and classifies the
 structure into two kinds:
 
 * ``"bump"`` -- a prominent positive excursion,
@@ -22,7 +21,6 @@ from typing import Literal, Optional
 import numpy as np
 
 from .candidate import Candidate, CandidateLike, as_candidates
-from .signal_mask import SignalMask
 
 
 @dataclass(frozen=True)
@@ -657,30 +655,9 @@ class _ExtremumDetector:
 
 
 
-def _signal_supports(
-    signal: SignalMask, time: np.ndarray, pad: int
-) -> list[np.ndarray]:
-    """Per candidate: its window united with its signal segment, padded.
-
-    The segment ends where the residual is back at the noise level, so a
-    feature that runs to it is closed only once the smoothed residual also
-    is; ``pad`` samples (one smoothing kernel) on each side let it be.
-    """
-    supports = []
-    for candidate, segment in zip(signal.candidates, signal.per_candidate):
-        support = candidate.support(time) | np.asarray(segment, dtype=bool)
-        idx = np.flatnonzero(support)
-        if idx.size and pad > 0:
-            lo, hi = int(idx[0]), int(idx[-1])
-            support[max(lo - pad, 0) : lo] = True
-            support[hi + 1 : hi + 1 + pad] = True
-        supports.append(support)
-    return supports
-
-
 def measure_features(
     fit,
-    signal: SignalMask | CandidateLike,
+    candidates: CandidateLike,
     *,
     config: FeatureConfig = FeatureConfig(),
     require_closed_peaks: bool = False,
@@ -688,28 +665,19 @@ def measure_features(
     """Classify the residual of fit inside the candidate windows.
 
     fit is any single-lens fit result; its time, flux, ferr,
-    model_flux, residual, fs and fb are used.  Typically this
-    is a refit with the signal masked, so the residual holds the anomaly.
+    model_flux, residual, fs and fb are used.  Typically the host
+    is fitted without the anomaly, so the residual holds it.
 
-    signal is either candidates, measured inside their windows, or the
-    :class:`~jacscanomaly.SignalMask` of those candidates, measured inside
-    each window united with its signal segment (padded by
-    ``config.smooth_points`` samples).  The segment can extend beyond the
-    window; measuring only the window would cut a feature at its edge.
-
-    Each feature records the first candidate whose support contains it.
+    Features are measured inside the candidate windows; each records the
+    first candidate whose window contains it.
     """
     time = np.asarray(fit.time, dtype=float).reshape(-1)
     flux = np.asarray(fit.flux, dtype=float).reshape(-1)
     ferr = np.asarray(fit.ferr, dtype=float).reshape(-1)
     residual = np.asarray(fit.residual, dtype=float).reshape(-1)
     model_flux = np.asarray(fit.model_flux, dtype=float).reshape(-1)
-    if isinstance(signal, SignalMask):
-        values = signal.candidates
-        supports = _signal_supports(signal, time, int(config.smooth_points))
-    else:
-        values = as_candidates(signal)
-        supports = [candidate.support(time) for candidate in values]
+    values = as_candidates(candidates)
+    supports = [candidate.support(time) for candidate in values]
     support = np.zeros(time.shape, dtype=bool)
     for candidate_support in supports:
         support |= candidate_support

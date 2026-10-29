@@ -16,8 +16,11 @@ Main workflow
    jacscanomaly.CandidateCriteria
    jacscanomaly.Candidate
    jacscanomaly.candidates_from_scan
-   jacscanomaly.signal_mask
-   jacscanomaly.SignalMask
+   jacscanomaly.relock_host
+   jacscanomaly.robust_fit
+   jacscanomaly.fit_atoms
+   jacscanomaly.AtomConfig
+   jacscanomaly.RobustFit
    jacscanomaly.measure_features
    jacscanomaly.FeatureConfig
    jacscanomaly.Feature
@@ -92,6 +95,7 @@ Module reference
    jacscanomaly.singlelens_model
    jacscanomaly.template_free
    jacscanomaly.candidate
-   jacscanomaly.signal_mask
+   jacscanomaly.relock
+   jacscanomaly.robust
    jacscanomaly.features
    jacscanomaly.plot

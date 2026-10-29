@@ -1,10 +1,10 @@
 """Scan-independent anomaly candidates.
 
 A :class:`Candidate` only says *where* to look: a time window and, optionally,
-an anchor time.  The post-fit components (:func:`~jacscanomaly.signal_mask`,
-:func:`~jacscanomaly.measure_features`) act on candidates and never on a scan
-result, so a candidate written by hand -- including one the scan rejected --
-drives them exactly like one converted from :meth:`Finder.run`.
+an anchor time.  The post-fit components (:func:`~jacscanomaly.measure_features`)
+act on candidates and never on a scan result, so a candidate written by hand --
+including one the scan rejected -- drives them exactly like one converted from
+:meth:`Finder.run`.
 """
 
 from __future__ import annotations
@@ -105,25 +105,6 @@ def _merged(windows: CandidateLike) -> list[tuple[float, float]]:
         else:
             merged.append([start, end])
     return [(a, b) for a, b in merged]
-
-
-def agreed_windows(*window_sets: CandidateLike) -> tuple[tuple[Candidate, ...], ...]:
-    """Each set's windows, grown to the union of every window they overlap.
-
-    With one set of masked segments per model: where segments of several
-    models overlap, the models see the same anomaly and differ only in its
-    extent, and each gets the union. A window no other set overlaps stays
-    as it is (what is anomalous depends on the model).
-    """
-    spans = _merged([w for windows in window_sets for w in as_candidates(windows)])
-    out = []
-    for windows in window_sets:
-        own = _merged(windows)
-        out.append(tuple(
-            Candidate(a, b) for a, b in spans
-            if any(max(a, c) <= min(b, d) for c, d in own)
-        ))
-    return tuple(out)
 
 
 def candidates_from_scan(

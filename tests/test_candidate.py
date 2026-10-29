@@ -42,15 +42,3 @@ def test_candidates_from_scan_ignores_acceptance():
     assert every[1] == Candidate.from_t0_teff(5.0, 0.2, teff_coeff=2.0)
     assert candidates_from_scan(SimpleNamespace(best=None, scored_candidates=[])) == []
 
-
-def test_agreed_windows_grow_overlapping_windows_to_their_union():
-    from jacscanomaly import agreed_windows
-
-    a = [Candidate(0.0, 6.0), Candidate(20.0, 21.0)]
-    b = [Candidate(1.0, 8.0), Candidate(40.0, 41.0)]
-
-    ga, gb = agreed_windows(a, b)
-
-    assert [(c.t_start, c.t_end) for c in ga] == [(0.0, 8.0), (20.0, 21.0)]
-    assert [(c.t_start, c.t_end) for c in gb] == [(0.0, 8.0), (40.0, 41.0)]
-    assert agreed_windows(a, []) == ((Candidate(0.0, 6.0), Candidate(20.0, 21.0)), ())

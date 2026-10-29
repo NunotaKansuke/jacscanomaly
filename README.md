@@ -76,12 +76,11 @@ result = finder.run(time, flux, ferr)
 
 result.print_summary()
 
-# Post-fit components (mask the signal, refit, classify bumps/dips/caustics):
-# from jacscanomaly import candidates_from_scan, signal_mask, measure_features
-# cands = candidates_from_scan(result)
-# sm = signal_mask(result.fit, cands)
-# fit2 = finder.fitter.fit(time, flux, ferr, p0=result.fit.params, mask=sm.mask)
-# print(measure_features(fit2, cands).summary_text())
+# Host fit the anomalies do not pull (host + scan-template "atoms", J selection):
+# from jacscanomaly import FSPLFitter, PSPLFitter, robust_fit
+# r = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, finder,
+#                time, flux, ferr, result.fit.params)
+# r.selected, r.best.params, r.best.atoms, r.best.features
 
 # In notebooks, get a one-row table:
 # display(result.summary_table())

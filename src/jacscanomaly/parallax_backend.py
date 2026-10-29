@@ -666,6 +666,25 @@ class _ParallaxFitter:
         self._last_fit = fit
         return fit
 
+    def magnification_model(self, time):
+        """``p -> A(time; p)`` for seed parameters ``p`` (physical ``tE``, ``log rho``).
+
+        The evaluator is built once for ``time``.
+        """
+        time = np.asarray(time, dtype=float)
+        ones = np.ones_like(time)
+        evaluator = ParallaxEvaluator(
+            time, ones, ones, ra_deg=self.ra_deg, dec_deg=self.dec_deg, tref=self.tref,
+            time_spec=self.time_spec, observer_convention=self.observer_convention,
+            earth_ephemeris=self.earth_ephemeris,
+            satellite_or_observer_ephemeris=self.satellite_or_observer_ephemeris,
+            reference_ephemeris=self.reference_ephemeris, finite_source=self.finite_source,
+            espl_table_path=self.espl_table_path,
+            magnification_tol=self.magnification_tol,
+            magnification_reltol=self.magnification_reltol,
+        )
+        return lambda p: np.asarray(evaluator.magnification(self._raw_seed(p)), dtype=float)
+
     def evaluate_fixed(self, time, flux, ferr, q0, *, mask=None):
         """Evaluate a native parallax model without optimizing its parameters.
 

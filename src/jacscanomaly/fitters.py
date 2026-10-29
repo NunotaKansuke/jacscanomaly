@@ -326,6 +326,11 @@ class PSPLFitter:
     def _magnification(self, time: np.ndarray, q: np.ndarray) -> np.ndarray:
         return _pspl_magnification(time, q[0], q[1], q[2])
 
+    def magnification_model(self, time):
+        """``p -> A(time; p)`` for seed parameters ``p = (t0, tE, u0)``."""
+        time = np.asarray(time, dtype=float)
+        return lambda p: self._magnification(time, np.asarray(p, dtype=float))
+
     def _make_fit(
         self,
         time: np.ndarray,
@@ -527,6 +532,11 @@ class FSPLFitter:
             ],
             dtype=float,
         )
+
+    def magnification_model(self, time):
+        """``p -> A(time; p)`` for seed parameters ``p = (t0, tE, u0, log rho)``."""
+        time = np.asarray(time, dtype=float)
+        return lambda p: self._magnification(time, np.asarray(p, dtype=float))
 
     def _magnification(self, time: np.ndarray, q: np.ndarray) -> np.ndarray:
         t0, tE, u0, logrho = map(float, q)
