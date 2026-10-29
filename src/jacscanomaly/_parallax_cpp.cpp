@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -253,7 +254,24 @@ bool evaluate_internal(EvaluatorObject* self, const std::vector<double>& raw, st
 }
 
 PyObject* evaluator_new(PyTypeObject* type, PyObject*, PyObject*) {
-    return type->tp_alloc(type, 0);
+    PyObject* obj = type->tp_alloc(type, 0);
+    // tp_alloc only zeroes memory: construct the C++ members (not PyObject_HEAD)
+    // so dealloc can destroy them
+    if (obj != nullptr) {
+        auto* self = reinterpret_cast<EvaluatorObject*>(obj);
+        new (&self->trajectory) std::unique_ptr<ParallaxTrajectory>();
+        new (&self->magnification) std::unique_ptr<VbmMagnification>();
+        new (&self->time) std::vector<double>();
+        new (&self->flux) std::vector<double>();
+        new (&self->ferr) std::vector<double>();
+        new (&self->dataset) std::vector<long long>();
+        self->finite_source = false;
+        self->nparam = 0;
+        new (&self->geometry) std::vector<ParallaxTrajectory::SiteGeometry>();
+        new (&self->cached_raw) std::vector<double>();
+        new (&self->cached_magnifications) std::vector<double>();
+    }
+    return obj;
 }
 
 int evaluator_init(EvaluatorObject* self, PyObject* args, PyObject* kwargs) {
@@ -348,7 +366,22 @@ fail:
 }
 
 void evaluator_dealloc(EvaluatorObject* self) {
-    self->magnification.reset(); self->trajectory.reset(); Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
+    PyTypeObject* type = Py_TYPE(self);
+    using Trajectory = std::unique_ptr<ParallaxTrajectory>;
+    using Magnification = std::unique_ptr<VbmMagnification>;
+    using Doubles = std::vector<double>;
+    using Ids = std::vector<long long>;
+    using Geometry = std::vector<ParallaxTrajectory::SiteGeometry>;
+    self->magnification.~Magnification();
+    self->trajectory.~Trajectory();
+    self->time.~Doubles();
+    self->flux.~Doubles();
+    self->ferr.~Doubles();
+    self->dataset.~Ids();
+    self->geometry.~Geometry();
+    self->cached_raw.~Doubles();
+    self->cached_magnifications.~Doubles();
+    type->tp_free(reinterpret_cast<PyObject*>(self));
 }
 
 PyObject* evaluator_trajectory(EvaluatorObject* self, PyObject* args, PyObject* kwargs) {
