@@ -22,10 +22,18 @@ Assumptions
 -----------
 * An atom costs ``k_atom ln n`` (BIC; ``t0, teff, a, b``). Starts and models
   are compared by ``J = chi2 + (n_host + 2 + k_atom n_atoms) ln n``.
-* An atom is at most ``max_teff_fraction`` of the start host's ``tE`` wide, so
-  atoms cannot take over the host -- except an atom centred on the segment
+* An atom is at most ``max_teff_fraction`` of the start host's local
+  timescale ``tE max(1, u(t0))`` wide, so atoms cannot take over the host's
+  curvature; in the wing (``u > 1``) the host varies on ``tE u``, so wider
+  atoms are allowed there. Exempt: an atom centred on the segment
   :func:`~jacscanomaly.relock_host` moved the host off, which that test has
   already shown is not host.
+* The atoms remove at most the host's minor image: ``-atoms <= fs (A - 1) / 2
+  + max_deficit_sigma ferr`` (a planet can at most remove the minor image,
+  ``A_- = (A - 1) / 2``). A host refit that breaks it is not taken (the host
+  stays); a run that still breaks it is ``violates`` and loses to any run
+  that does not. This stops the host from moving its peak onto a spike and
+  cancelling it with a negative atom.
 * The start host is held fixed (``fs, fb`` only) until the first atom is in,
   so a relocked host is not pulled back onto the spike it was moved off; with
   no atom at the end the host is refit.
@@ -41,7 +49,7 @@ from scipy.optimize import least_squares
 
 from . import _cpp_grid
 from .candidate import Candidate, _merged
-from .features import FeatureResult, measure_features
+from .features import FeatureConfig, FeatureResult, measure_features
 from .fitters import FSPLFitter, PSPLFitter, _pspl_magnification
 from .parallax_backend import _ParallaxFitter
 from .relock import HostRelock, relock_host
@@ -57,6 +65,7 @@ class AtomConfig:
     max_teff_fraction: float = 0.25
     max_atoms: int = 15
     k_atom: float = 4.0
+    max_deficit_sigma: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,7 @@ class AtomFit:
     ``chi2_host_only`` is the start host with no atoms (``fs, fb`` fitted).
     ``log`` lists the steps: ``("add", t0, teff, score, chi2)``,
     ``("stop", t0, teff, dchi2)``, ``("drop", t0, teff, dchi2)``.
+    ``violates``: the atoms remove more than the host's minor image.
     """
 
     params: np.ndarray
@@ -85,6 +95,7 @@ class AtomFit:
     chi2: float
     chi2_host_only: float
     log: tuple[tuple, ...]
+    violates: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,7 +103,8 @@ class ModelFit:
     """The lowest-``J`` :class:`AtomFit` of one host model, and what follows from it.
 
     ``fit`` is the host alone, with ``fs, fb`` from the samples outside
-    ``windows`` (the merged atom supports); ``features`` are measured on it.
+    ``windows`` (the merged atom supports). ``features`` characterize every
+    window against the host + atoms of the atom fit (its own ``fs, fb``).
     ``sigma`` are the 1-sigma host parameter errors with fluxes and atom
     amplitudes profiled. ``base`` is the plain fit without atoms.
     """
@@ -190,6 +202,24 @@ def _fit_host(host, flux, ferr, p, atoms, coeff):
     return r.x, coef, float(z @ z)
 
 
+def _deficit_ok(host, ferr, p, coef, atoms, coeff, k):
+    """Whether the atoms remove at most the host's minor image, ``fs (A - 1) / 2``, + ``k ferr``."""
+    if not atoms:
+        return True
+    flux = _atom_flux(host.time, coef, atoms, coeff)
+    bound = 0.5 * coef[0] * (host.magnification(p) - 1.0) + k * ferr
+    return not np.any((flux != 0.0) & (-flux > bound))
+
+
+def _refit(host, flux, ferr, p, atoms, coeff, k):
+    """``_fit_host``, or the host held at ``p`` when the refit breaks the deficit bound."""
+    p1, coef1, chi2_1 = _fit_host(host, flux, ferr, p, atoms, coeff)
+    if _deficit_ok(host, ferr, p1, coef1, atoms, coeff, k):
+        return p1, coef1, chi2_1
+    coef, z = _linear(host, flux, ferr, p, atoms, coeff)
+    return np.asarray(p, dtype=float), coef, float(z @ z)
+
+
 def _atom_flux(time, coef, atoms, coeff):
     out = np.zeros_like(time)
     for i, (t0, teff) in enumerate(atoms):
@@ -222,7 +252,8 @@ def fit_atoms(
     price = config.k_atom * np.log(time.size)
     criteria = finder.config.candidate_criteria
     anomaly = np.zeros(time.size, bool) if anomaly is None else np.asarray(anomaly, bool)
-    max_teff = config.max_teff_fraction * abs(float(p0[1]))
+    t0_host, tE_host, u0_host = (float(x) for x in p0[:3])
+    k = config.max_deficit_sigma
 
     def allowed(candidate) -> bool:
         if float(candidate.score) < config.min_score:
@@ -230,7 +261,8 @@ def fit_atoms(
         if criteria is not None and not criteria.accepts(dchi2=float(candidate.dchi2),
                                                          quality=candidate.quality):
             return False
-        if abs(float(candidate.teff)) <= max_teff:
+        u = np.hypot(u0_host, (float(candidate.t0) - t0_host) / tE_host)
+        if abs(float(candidate.teff)) <= config.max_teff_fraction * abs(tE_host) * max(1.0, u):
             return True
         i = min(int(np.searchsorted(time, float(candidate.t0))), time.size - 1)
         return bool(anomaly[i])
@@ -248,14 +280,14 @@ def fit_atoms(
             break
         best = max(ok, key=lambda c: float(c.dchi2))
         trial = atoms + [(float(best.t0), float(best.teff))]
-        p1, coef1, chi2_1 = _fit_host(host, flux, ferr, p, trial, config.coeff)
+        p1, coef1, chi2_1 = _refit(host, flux, ferr, p, trial, config.coeff, k)
         if chi2 - chi2_1 <= price:
             log.append(("stop", float(best.t0), float(best.teff), chi2 - chi2_1))
             break
         atoms, p, coef, chi2 = trial, p1, coef1, chi2_1
         log.append(("add", float(best.t0), float(best.teff), float(best.score), chi2))
     while atoms:
-        trials = [_fit_host(host, flux, ferr, p, atoms[:i] + atoms[i + 1:], config.coeff)
+        trials = [_refit(host, flux, ferr, p, atoms[:i] + atoms[i + 1:], config.coeff, k)
                   for i in range(len(atoms))]
         i = int(np.argmin([r[2] for r in trials]))
         if trials[i][2] - chi2 >= price:
@@ -269,7 +301,8 @@ def fit_atoms(
         params=np.asarray(p, dtype=float), fs=float(coef[0]), fb=float(coef[1]),
         atoms=tuple(Atom(t0, teff, float(coef[2 + 2 * i]), float(coef[3 + 2 * i]))
                     for i, (t0, teff) in enumerate(atoms)),
-        chi2=chi2, chi2_host_only=chi2_0, log=tuple(log))
+        chi2=chi2, chi2_host_only=chi2_0, log=tuple(log),
+        violates=not _deficit_ok(host, ferr, p, coef, atoms, config.coeff, k))
 
 
 def _sigma(host, flux, ferr, p, atoms, coeff) -> np.ndarray:
@@ -314,7 +347,13 @@ def robust_fit(
     * PSPL: ``p_scan``, relocked by :func:`relock_host` when it sits on a
       short anomaly; every other model: the PSPL result nested
       (``fitter.nested_seed``).
-    * every model: ``base``, the plain fit (``fitter.fit(pspl_params=p_scan)``).
+    * every model: ``base``, the plain fit (``fitter.fit(pspl_params=p_scan)``);
+      when relocked, the fit of the relock's H1 (its anomaly segment masked,
+      located by the relocked host), since the plain fit is the one the relock
+      rejected.
+
+    The start with the lowest ``J`` among those that keep the deficit bound
+    is kept (the lowest overall when none does).
     """
     time, flux, ferr = (np.asarray(x, dtype=float) for x in (time, flux, ferr))
     names = list(fitters)
@@ -331,7 +370,7 @@ def robust_fit(
         fitter = fitters[name]
         host = _Host(fitter, time)
         try:
-            base = fitter.fit(time, flux, ferr, pspl_params=p_scan)
+            base = fitter.fit(time, flux, ferr, pspl_params=p_pspl, mask=anomaly)
         except Exception as exc:  # the model still has its nested start
             base, errors[f"{name}/base"] = None, repr(exc)
         if name == names[0]:
@@ -353,7 +392,7 @@ def robust_fit(
             continue
         J = {key: r.chi2 + (r.params.size + 2 + config.k_atom * len(r.atoms)) * np.log(n)
              for key, r in runs.items()}
-        start = min(J, key=J.get)
+        start = min(J, key=lambda key: (runs[key].violates, J[key]))
         r = runs[start]
         if name == names[0]:
             pspl_best = r.params[:3]
@@ -367,7 +406,12 @@ def robust_fit(
             J_starts={k: float(v) for k, v in J.items()},
             sigma=_sigma(host, flux, ferr, r.params, [(a.t0, a.teff) for a in r.atoms], config.coeff),
             windows=windows, fit=fit,
-            features=measure_features(fit, windows) if windows else None, base=base)
+            features=measure_features(
+                time, flux, ferr, r.fs * host.magnification(r.params) + r.fb,
+                _atom_flux(time, [0.0, 0.0] + [x for a in r.atoms for x in (a.a, a.b)],
+                           [(a.t0, a.teff) for a in r.atoms], config.coeff),
+                windows, config=FeatureConfig(coeff=config.coeff)) if windows else None,
+            base=base)
     if not models:
         raise RuntimeError(f"no host model could be fitted: {errors}")
     selected = min(models, key=lambda k: models[k].J)
