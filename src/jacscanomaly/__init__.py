@@ -34,6 +34,7 @@ from .robust import (
     Atom, AtomConfig, AtomFit, ModelFit, RobustFit, atom_basis, atom_windows, fit_atoms, robust_fit,
 )
 from .features import (
+    Crossing,
     Feature,
     FeatureConfig,
     FeatureResult,
@@ -121,6 +122,7 @@ __all__ = [
     "atom_windows",
     "fit_atoms",
     "robust_fit",
+    "Crossing",
     "Feature",
     "FeatureConfig",
     "FeatureResult",
