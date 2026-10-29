@@ -451,7 +451,7 @@ PyObject* evaluator_magnification(EvaluatorObject* self, PyObject* args, PyObjec
     static const char* kwlist[] = {"raw_params", nullptr};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", const_cast<char**>(kwlist), &raw_obj)) return nullptr;
     std::vector<double> raw; if (!parse_raw(self, raw_obj, raw)) return nullptr;
-    try { double t0,tE,u0,rho,piEN,piEE; unpack_raw(self,raw,t0,tE,u0,rho,piEN,piEE); std::vector<double> values; values.reserve(self->time.size()); for(double t:self->time) values.push_back((*self->magnification)(self->trajectory->at(t,t0,tE,u0,piEN,piEE).u,rho)); return make_array(values); }
+    try { double t0,tE,u0,rho,piEN,piEE; unpack_raw(self,raw,t0,tE,u0,rho,piEN,piEE); std::vector<double> values; values.reserve(self->time.size()); const double peak_time=self->trajectory->source_peak_time(t0); for(const auto& geometry:self->geometry) values.push_back((*self->magnification)(self->trajectory->at(geometry,peak_time,tE,u0,piEN,piEE).u,rho)); return make_array(values); }
     catch(const std::exception& exc){PyErr_SetString(PyExc_ValueError,exc.what());return nullptr;}
 }
 

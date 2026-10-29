@@ -39,6 +39,7 @@ from typing import Mapping, Optional
 import numpy as np
 from scipy.optimize import least_squares
 
+from . import _cpp_grid
 from .candidate import Candidate, _merged
 from .features import FeatureResult, measure_features
 from .fitters import FSPLFitter, PSPLFitter, _pspl_magnification
@@ -167,7 +168,13 @@ class _Host:
 
 def _linear(host, flux, ferr, p, atoms, coeff):
     """Linear coefficients (fs, fb, a_1, b_1, ...) and the normalised residual."""
-    cols = [host.magnification(p), np.ones_like(host.time)]
+    magnification = host.magnification(p)
+    out = _cpp_grid.atoms_linear(magnification, host.time, flux, ferr,
+                                 np.asarray(atoms, dtype=float).reshape(-1, 2), coeff)
+    if out is not None:
+        return out
+    # numerically singular normal equations: minimum-norm SVD solution
+    cols = [magnification, np.ones_like(host.time)]
     for t0, teff in atoms:
         cols += atom_basis(host.time, t0, teff, coeff)
     design = np.vstack(cols).T / ferr[:, None]

@@ -46,9 +46,9 @@ def _compile_and_link_args() -> tuple[list[str], list[str]]:
         # or on a particular macOS deployment target.  Local source builds
         # keep OpenMP enabled unless this switch is set explicitly.
         if os.environ.get("JACSCANOMALY_DISABLE_OPENMP", "").lower() in {"1", "true", "yes"}:
-            return ["-O3", "-std=c++17"], []
-        return ["-O3", "-std=c++17", "-Xpreprocessor", "-fopenmp"], ["-lomp"]
-    return ["-O3", "-std=c++17", "-fopenmp"], ["-fopenmp"]
+            return ["-O3", "-std=c++17", "-fno-math-errno"], []
+        return ["-O3", "-std=c++17", "-fno-math-errno", "-Xpreprocessor", "-fopenmp"], ["-lomp"]
+    return ["-O3", "-std=c++17", "-fno-math-errno", "-fopenmp"], ["-fopenmp"]
 
 
 class build_ext(_build_ext):

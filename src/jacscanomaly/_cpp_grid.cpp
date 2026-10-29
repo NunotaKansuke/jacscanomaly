@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 #ifdef _OPENMP
@@ -456,6 +457,182 @@ PyObject* unimodal_mask(PyObject*, PyObject* args, PyObject* kwargs) {
     return reinterpret_cast<PyObject*>(out);
 }
 
+struct GridIO {
+    const double* time;
+    const double* flux;
+    const double* weight;
+    npy_intp n;
+    const double* t0_grid;
+    const double* teff_grid;
+    double teff_coeff;
+    double sigma2;
+    int min_pts;
+    double* dchi2;
+    std::int32_t* nwin;
+    std::int32_t* ncontrib;
+    double* neff;
+    double* peak;
+    double* rho1;
+    std::int32_t* longest;
+};
+
+constexpr npy_intp kGridChunk = 256;
+
+// Grid points [g_begin, g_end). Both template shapes are evaluated once per
+// window sample into the caller's buffers. Cloned for AVX2: the dispatch is
+// paid once per chunk.
+__attribute__((target_clones("avx2", "default")))
+void grid_chunk(const GridIO& io, npy_intp g_begin, npy_intp g_end,
+                std::vector<double>& basis0, std::vector<double>& basis1) {
+    const double* time = io.time;
+    const double* flux = io.flux;
+    const double* weight = io.weight;
+    const npy_intp n = io.n;
+    const double teff_coeff = io.teff_coeff, sigma2 = io.sigma2;
+    const int min_pts = io.min_pts;
+    double* dchi2 = io.dchi2;
+    std::int32_t* nwin = io.nwin;
+    std::int32_t* ncontrib = io.ncontrib;
+    double* neff = io.neff;
+    double* peak = io.peak;
+    double* rho1 = io.rho1;
+    std::int32_t* longest = io.longest;
+    for (npy_intp g = g_begin; g < g_end; ++g) {
+        const double t0 = io.t0_grid[g];
+        const double teff = io.teff_grid[g];
+        const double lo = t0 - teff_coeff * teff;
+        const double hi = t0 + teff_coeff * teff;
+        const double* begin = time;
+        const double* end = time + n;
+        const npy_intp start = static_cast<npy_intp>(std::upper_bound(begin, end, lo) - begin);
+        const npy_intp stop = std::max(start, static_cast<npy_intp>(std::lower_bound(begin, end, hi) - begin));
+        const int count = static_cast<int>(stop - start);
+        const double* tw = time + start;
+        const double* yw = flux + start;
+        const double* ww = weight + start;
+
+        dchi2[g] = 0.0;
+        nwin[g] = 0;
+        ncontrib[g] = 0;
+        neff[g] = 0.0;
+        peak[g] = 0.0;
+        rho1[g] = 0.0;
+        longest[g] = 0;
+        if (count < min_pts) {
+            continue;
+        }
+
+        if (basis0.size() < static_cast<size_t>(count)) {
+            basis0.resize(static_cast<size_t>(count));
+            basis1.resize(static_cast<size_t>(count));
+        }
+        double* x0 = basis0.data();
+        double* x1 = basis1.data();
+        // No reduction here, so this loop vectorises (with -fno-math-errno).
+        for (int i = 0; i < count; ++i) {
+            const double u = (tw[i] - t0) / teff;
+            const double q = 1.0 + u * u;
+            x0[i] = 1.0 / std::sqrt(q);
+            x1[i] = (q + 2.0) / std::sqrt(q * (q + 4.0));
+        }
+        double sw = 0.0, sy = 0.0, sx0 = 0.0, sx1 = 0.0;
+        for (int i = 0; i < count; ++i) {
+            const double w = ww[i];
+            sw += w;
+            sy += w * yw[i];
+            sx0 += w * x0[i];
+            sx1 += w * x1[i];
+        }
+        if (!(sw > 0.0)) {
+            continue;
+        }
+
+        const double mu = sy / sw;
+        const double xm0 = sx0 / sw, xm1 = sx1 / sw;
+        double chi2_flat = 0.0, wxx0 = 0.0, wxy0 = 0.0, wxx1 = 0.0, wxy1 = 0.0;
+        for (int i = 0; i < count; ++i) {
+            const double w = ww[i];
+            const double r = yw[i] - mu;
+            chi2_flat += r * r * w;
+            const double c0 = x0[i] - xm0, c1 = x1[i] - xm1;
+            wxx0 += w * c0 * c0;
+            wxy0 += w * c0 * r;
+            wxx1 += w * c1 * c1;
+            wxy1 += w * c1 * r;
+        }
+        const bool valid0 = wxx0 > 0.0, valid1 = wxx1 > 0.0;
+        if (!valid0 && !valid1) {
+            continue;
+        }
+        const double a0 = valid0 ? wxy0 / wxx0 : 0.0, b0 = mu - a0 * xm0;
+        const double a1 = valid1 ? wxy1 / wxx1 : 0.0, b1 = mu - a1 * xm1;
+        double chi2_0 = 0.0, chi2_1 = 0.0;
+        for (int i = 0; i < count; ++i) {
+            const double r0 = yw[i] - (a0 * x0[i] + b0);
+            const double r1 = yw[i] - (a1 * x1[i] + b1);
+            chi2_0 += r0 * r0 * ww[i];
+            chi2_1 += r1 * r1 * ww[i];
+        }
+        const bool choose0 = valid0 && (!valid1 || chi2_0 < chi2_1);
+        const double* x = choose0 ? x0 : x1;
+        const double fa = choose0 ? a0 : a1, fb = choose0 ? b0 : b1;
+        const double delta = chi2_flat - (choose0 ? chi2_0 : chi2_1);
+
+        double sum_u = 0.0;
+        double sum_u2 = 0.0;
+        double max_u = 0.0;
+        double sum_diff = 0.0;
+        int contrib_count = 0;
+        int current_run = 0;
+        int longest_run = 0;
+        // The per-sample improvement is reused by the lag-1 pass; x0 is
+        // free once the chosen template has been read.
+        double* diffs = choose0 ? x1 : x0;
+        for (int i = 0; i < count; ++i) {
+            const double r_flat = yw[i] - mu;
+            const double r_anom = yw[i] - (fa * x[i] + fb);
+            const double diff = r_flat * r_flat - r_anom * r_anom;
+            diffs[i] = diff;
+            const double improvement = std::max(diff, 0.0);
+            sum_diff += diff;
+            sum_u += improvement;
+            sum_u2 += improvement * improvement;
+            max_u = std::max(max_u, improvement);
+            if (improvement > sigma2) {
+                ++contrib_count;
+                ++current_run;
+                longest_run = std::max(longest_run, current_run);
+            } else {
+                current_run = 0;
+            }
+        }
+
+        const double mean_diff = sum_diff / static_cast<double>(count);
+        double var = 0.0;
+        double cov1 = 0.0;
+        double prev_centered = 0.0;
+        for (int i = 0; i < count; ++i) {
+            const double centered = diffs[i] - mean_diff;
+            var += centered * centered;
+            if (i > 0) {
+                cov1 += prev_centered * centered;
+            }
+            prev_centered = centered;
+        }
+        const int pairs = count - 1;
+        var /= static_cast<double>(count);
+        const double rho = (pairs > 0 && var > 0.0) ? (cov1 / static_cast<double>(pairs)) / var : 0.0;
+
+        dchi2[g] = delta;
+        nwin[g] = count;
+        ncontrib[g] = contrib_count;
+        neff[g] = sum_u2 > 0.0 ? (sum_u * sum_u) / sum_u2 : 0.0;
+        peak[g] = sum_u > 0.0 ? max_u / sum_u : 0.0;
+        rho1[g] = rho;
+        longest[g] = longest_run;
+    }
+}
+
 PyObject* run_grid(PyObject*, PyObject* args, PyObject* kwargs) {
     PyObject* time_obj = nullptr;
     PyObject* flux_obj = nullptr;
@@ -567,124 +744,17 @@ PyObject* run_grid(PyObject*, PyObject* args, PyObject* kwargs) {
         std::int32_t* longest = static_cast<std::int32_t*>(PyArray_DATA(longest_arr));
         const double sigma2 = sigma * sigma;
 
+        const GridIO io{time, flux, weight, n, t0_grid, teff_grid, teff_coeff, sigma2, min_pts,
+                        dchi2, nwin, ncontrib, neff, peak, rho1, longest};
+        const npy_intp n_chunks = (n_grid + kGridChunk - 1) / kGridChunk;
         Py_BEGIN_ALLOW_THREADS
-        #pragma omp parallel for schedule(dynamic, 256)
-        for (npy_intp g = 0; g < n_grid; ++g) {
-            const double t0 = t0_grid[g];
-            const double teff = teff_grid[g];
-            const double lo = t0 - teff_coeff * teff;
-            const double hi = t0 + teff_coeff * teff;
-            const double* begin = time;
-            const double* end = time + n;
-            const Window window{
-                static_cast<npy_intp>(std::upper_bound(begin, end, lo) - begin),
-                static_cast<npy_intp>(std::lower_bound(begin, end, hi) - begin),
-            };
-
-            const int count = window.size();
-            double sw = 0.0;
-            double sy = 0.0;
-            for (npy_intp i = window.start; i < window.end; ++i) {
-                sw += weight[i];
-                sy += weight[i] * flux[i];
-            }
-
-            if (count < min_pts || !(sw > 0.0)) {
-                dchi2[g] = 0.0;
-                nwin[g] = 0;
-                ncontrib[g] = 0;
-                neff[g] = 0.0;
-                peak[g] = 0.0;
-                rho1[g] = 0.0;
-                longest[g] = 0;
-                continue;
-            }
-
-            const double mu = sy / sw;
-            double chi2_flat = 0.0;
-            for (npy_intp i = window.start; i < window.end; ++i) {
-                const double r = flux[i] - mu;
-                chi2_flat += r * r * weight[i];
-            }
-
-            Fit fit0 = fit_weighted_line(calc_a0, t0, teff, time, flux, weight, window);
-            Fit fit1 = fit_weighted_line(calc_a1, t0, teff, time, flux, weight, window);
-            const bool choose0 = fit0.valid && (!fit1.valid || fit0.chi2 < fit1.chi2);
-            const Fit fit = choose0 ? fit0 : fit1;
-            if (!fit.valid) {
-                dchi2[g] = 0.0;
-                nwin[g] = 0;
-                ncontrib[g] = 0;
-                neff[g] = 0.0;
-                peak[g] = 0.0;
-                rho1[g] = 0.0;
-                longest[g] = 0;
-                continue;
-            }
-
-            const double delta = chi2_flat - fit.chi2;
-            double sum_u = 0.0;
-            double sum_u2 = 0.0;
-            double max_u = 0.0;
-            double sum_diff = 0.0;
-            int contrib_count = 0;
-            int current_run = 0;
-            int longest_run = 0;
-
-            for (npy_intp i = window.start; i < window.end; ++i) {
-                const double t = time[i];
-                const double r_flat = flux[i] - mu;
-                const double a = choose0 ? calc_a0(t0, teff, t) : calc_a1(t0, teff, t);
-                const double r_anom = flux[i] - (fit.a * a + fit.b);
-                const double norm_flat = r_flat * r_flat;
-                const double norm_anom = r_anom * r_anom;
-                const double diff = norm_flat - norm_anom;
-                const double improvement = std::max(diff, 0.0);
-                sum_diff += diff;
-                sum_u += improvement;
-                sum_u2 += improvement * improvement;
-                max_u = std::max(max_u, improvement);
-                const bool is_contrib = improvement > sigma2;
-                if (is_contrib) {
-                    ++contrib_count;
-                    ++current_run;
-                    longest_run = std::max(longest_run, current_run);
-                } else {
-                    current_run = 0;
-                }
-            }
-
-            const double mean_diff = sum_diff / static_cast<double>(count);
-            double var = 0.0;
-            double cov1 = 0.0;
-            int pairs = 0;
-            bool have_prev = false;
-            double prev_centered = 0.0;
-            for (npy_intp i = window.start; i < window.end; ++i) {
-                const double t = time[i];
-                const double r_flat = flux[i] - mu;
-                const double a = choose0 ? calc_a0(t0, teff, t) : calc_a1(t0, teff, t);
-                const double r_anom = flux[i] - (fit.a * a + fit.b);
-                const double diff = r_flat * r_flat - r_anom * r_anom;
-                const double centered = diff - mean_diff;
-                var += centered * centered;
-                if (have_prev) {
-                    cov1 += prev_centered * centered;
-                    ++pairs;
-                }
-                prev_centered = centered;
-                have_prev = true;
-            }
-            var /= static_cast<double>(count);
-            const double rho = (pairs > 0 && var > 0.0) ? (cov1 / static_cast<double>(pairs)) / var : 0.0;
-
-            dchi2[g] = delta;
-            nwin[g] = count;
-            ncontrib[g] = contrib_count;
-            neff[g] = sum_u2 > 0.0 ? (sum_u * sum_u) / sum_u2 : 0.0;
-            peak[g] = sum_u > 0.0 ? max_u / sum_u : 0.0;
-            rho1[g] = rho;
-            longest[g] = longest_run;
+        #pragma omp parallel
+        {
+        std::vector<double> basis0, basis1;
+        #pragma omp for schedule(dynamic, 1)
+        for (npy_intp c = 0; c < n_chunks; ++c) {
+            grid_chunk(io, c * kGridChunk, std::min(n_grid, (c + 1) * kGridChunk), basis0, basis1);
+        }
         }
         Py_END_ALLOW_THREADS
 
@@ -872,12 +942,29 @@ bool extract_clusters_indexed(const double* t0, const double* teff, const double
     }
     // Highly irregular inputs with one teff per point favor the original scan.
     if (groups.size() > static_cast<std::size_t>(n / 32)) return false;
-    std::vector<npy_intp> priority;
-    priority.reserve(static_cast<std::size_t>(n));
-    for (npy_intp i = 0; i < n; ++i) if (dchi2[i] > -std::numeric_limits<double>::infinity()) priority.push_back(i);
-    std::sort(priority.begin(), priority.end(), [&](npy_intp a, npy_intp b) {
-        return dchi2[a] > dchi2[b] || (dchi2[a] == dchi2[b] && a < b);
-    });
+    // Descending dchi2, ties by index: a stable LSD radix sort on keys that
+    // order like the doubles (+-0 merged), fed in index order.
+    std::vector<std::pair<std::uint64_t, npy_intp>> keyed, scratch;
+    keyed.reserve(static_cast<std::size_t>(n));
+    for (npy_intp i = 0; i < n; ++i) {
+        if (!(dchi2[i] > -std::numeric_limits<double>::infinity())) continue;
+        const double v = dchi2[i] == 0.0 ? 0.0 : dchi2[i];
+        std::uint64_t bits;
+        std::memcpy(&bits, &v, sizeof bits);
+        bits = (bits >> 63) ? ~bits : (bits | (std::uint64_t{1} << 63));
+        keyed.emplace_back(~bits, i);
+    }
+    scratch.resize(keyed.size());
+    for (int shift = 0; shift < 64; shift += 16) {
+        std::vector<std::size_t> offset(65537, 0);
+        for (const auto& kv : keyed) ++offset[((kv.first >> shift) & 0xFFFF) + 1];
+        if (offset[1 + ((keyed.empty() ? 0 : keyed[0].first >> shift) & 0xFFFF)] == keyed.size()) continue;
+        for (std::size_t b = 1; b < offset.size(); ++b) offset[b] += offset[b - 1];
+        for (const auto& kv : keyed) scratch[offset[(kv.first >> shift) & 0xFFFF]++] = kv;
+        keyed.swap(scratch);
+    }
+    std::vector<npy_intp> priority(keyed.size());
+    for (std::size_t i = 0; i < keyed.size(); ++i) priority[i] = keyed[i].second;
     std::vector<npy_intp> next(static_cast<std::size_t>(n + 1));
     for (npy_intp i = 0; i <= n; ++i) next[static_cast<std::size_t>(i)] = i;
     const auto find_next = [&](npy_intp x) {
@@ -1218,6 +1305,213 @@ PyObject* fit_pspl(PyObject*, PyObject* args, PyObject* kwargs) {
     return Py_BuildValue("NdddNN", params_arr, fit.a, fit.b, chi2, model_arr, residual_arr);
 }
 
+// Weighted least squares for the atoms host model
+//     flux = fs A + fb + sum_j (a_j h_j + b_j l_j)
+// with the compact atom templates h, l (zero for |tau| >= coeff).  Atom
+// columns are non-zero only inside their windows, so the normal equations
+// cost O(n + sum of windows).  They are solved by Cholesky on the
+// column-equilibrated Gram matrix and corrected by two refinement steps on
+// the true residual (corrected semi-normal equations).  Returns None when
+// the Gram matrix is numerically singular so the caller can use an SVD.
+PyObject* atoms_linear(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject *mag_obj = nullptr, *time_obj = nullptr, *flux_obj = nullptr, *ferr_obj = nullptr;
+    PyObject* atoms_obj = nullptr;
+    double coeff = 3.0;
+    static const char* kwlist[] = {"magnification", "time", "flux", "ferr", "atoms", "coeff", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOOO|d", const_cast<char**>(kwlist),
+                                     &mag_obj, &time_obj, &flux_obj, &ferr_obj, &atoms_obj, &coeff)) {
+        return nullptr;
+    }
+    PyArrayObject* arrs[5] = {as_double_array(mag_obj), as_double_array(time_obj), as_double_array(flux_obj),
+                              as_double_array(ferr_obj), as_double_array(atoms_obj)};
+    auto release = [&]() { for (auto* a : arrs) Py_XDECREF(a); };
+    for (auto* a : arrs) {
+        if (!a) { release(); return nullptr; }
+    }
+    const npy_intp n = PyArray_SIZE(arrs[0]);
+    const npy_intp n_atom_values = PyArray_SIZE(arrs[4]);
+    if (PyArray_SIZE(arrs[1]) != n || PyArray_SIZE(arrs[2]) != n || PyArray_SIZE(arrs[3]) != n
+        || n_atom_values % 2 != 0) {
+        release();
+        PyErr_SetString(PyExc_ValueError, "magnification, time, flux, ferr must match and atoms be (k, 2)");
+        return nullptr;
+    }
+    const double* mag = static_cast<const double*>(PyArray_DATA(arrs[0]));
+    const double* time = static_cast<const double*>(PyArray_DATA(arrs[1]));
+    const double* flux = static_cast<const double*>(PyArray_DATA(arrs[2]));
+    const double* ferr = static_cast<const double*>(PyArray_DATA(arrs[3]));
+    const double* atoms = static_cast<const double*>(PyArray_DATA(arrs[4]));
+    const int k = static_cast<int>(n_atom_values / 2);
+    const int m = 2 + 2 * k;
+
+    npy_intp dims_c[1] = {m}, dims_r[1] = {n};
+    PyArrayObject* coef_arr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, dims_c, NPY_DOUBLE));
+    PyArrayObject* res_arr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, dims_r, NPY_DOUBLE));
+    if (!coef_arr || !res_arr) {
+        Py_XDECREF(coef_arr);
+        Py_XDECREF(res_arr);
+        release();
+        return nullptr;
+    }
+    double* coef = static_cast<double*>(PyArray_DATA(coef_arr));
+    double* r = static_cast<double*>(PyArray_DATA(res_arr));
+    bool singular = false;
+
+    Py_BEGIN_ALLOW_THREADS
+    // Weighted columns: x0 = A / e, x1 = 1 / e, atoms over [start, stop).
+    std::vector<double> iw(static_cast<size_t>(n)), x0(static_cast<size_t>(n)), y(static_cast<size_t>(n));
+    for (npy_intp i = 0; i < n; ++i) {
+        iw[i] = 1.0 / ferr[i];
+        x0[i] = mag[i] * iw[i];
+        y[i] = flux[i] * iw[i];
+    }
+    std::vector<npy_intp> start(k), stop(k);
+    std::vector<std::vector<double>> hcol(k), lcol(k);
+    const double qe = 1.0 + coeff * coeff;
+    const double h_edge = 1.0 / std::sqrt(qe);
+    const double l_edge = (qe + 2.0) / std::sqrt(qe * (qe + 4.0));
+    for (int j = 0; j < k; ++j) {
+        const double t0 = atoms[2 * j], teff = atoms[2 * j + 1];
+        const double half = coeff * std::abs(teff);
+        npy_intp a = static_cast<npy_intp>(std::lower_bound(time, time + n, t0 - half) - time);
+        npy_intp b = static_cast<npy_intp>(std::upper_bound(time, time + n, t0 + half) - time);
+        while (a < b && !(std::abs((time[a] - t0) / teff) < coeff)) ++a;
+        while (b > a && !(std::abs((time[b - 1] - t0) / teff) < coeff)) --b;
+        start[j] = a;
+        stop[j] = b;
+        hcol[j].resize(static_cast<size_t>(b - a));
+        lcol[j].resize(static_cast<size_t>(b - a));
+        for (npy_intp i = a; i < b; ++i) {
+            const double tau = (time[i] - t0) / teff;
+            const double q = 1.0 + tau * tau;
+            const bool inside = std::abs(tau) < coeff;
+            hcol[j][i - a] = inside ? (1.0 / std::sqrt(q) - h_edge) * iw[i] : 0.0;
+            lcol[j][i - a] = inside ? ((q + 2.0) / std::sqrt(q * (q + 4.0)) - l_edge) * iw[i] : 0.0;
+        }
+    }
+
+    // X^T v for a length-n vector v.
+    auto xt = [&](const double* v, double* out) {
+        double s0 = 0.0, s1 = 0.0;
+        for (npy_intp i = 0; i < n; ++i) {
+            s0 += x0[i] * v[i];
+            s1 += iw[i] * v[i];
+        }
+        out[0] = s0;
+        out[1] = s1;
+        for (int j = 0; j < k; ++j) {
+            double sh = 0.0, sl = 0.0;
+            for (npy_intp i = start[j]; i < stop[j]; ++i) {
+                sh += hcol[j][i - start[j]] * v[i];
+                sl += lcol[j][i - start[j]] * v[i];
+            }
+            out[2 + 2 * j] = sh;
+            out[3 + 2 * j] = sl;
+        }
+    };
+    // r = y - X c
+    auto residual = [&](const double* c) {
+        for (npy_intp i = 0; i < n; ++i) r[i] = y[i] - c[0] * x0[i] - c[1] * iw[i];
+        for (int j = 0; j < k; ++j) {
+            for (npy_intp i = start[j]; i < stop[j]; ++i) {
+                r[i] -= c[2 + 2 * j] * hcol[j][i - start[j]] + c[3 + 2 * j] * lcol[j][i - start[j]];
+            }
+        }
+    };
+
+    // Gram matrix, using the sparsity of the atom columns.
+    std::vector<double> G(static_cast<size_t>(m * m), 0.0);
+    auto g = [&](int a, int b) -> double& { return G[static_cast<size_t>(a * m + b)]; };
+    for (npy_intp i = 0; i < n; ++i) {
+        g(0, 0) += x0[i] * x0[i];
+        g(0, 1) += x0[i] * iw[i];
+        g(1, 1) += iw[i] * iw[i];
+    }
+    for (int j = 0; j < k; ++j) {
+        const int ch = 2 + 2 * j, cl = 3 + 2 * j;
+        for (npy_intp i = start[j]; i < stop[j]; ++i) {
+            const double h = hcol[j][i - start[j]], l = lcol[j][i - start[j]];
+            g(0, ch) += x0[i] * h;
+            g(0, cl) += x0[i] * l;
+            g(1, ch) += iw[i] * h;
+            g(1, cl) += iw[i] * l;
+            g(ch, ch) += h * h;
+            g(ch, cl) += h * l;
+            g(cl, cl) += l * l;
+        }
+        for (int jj = j + 1; jj < k; ++jj) {
+            const npy_intp a = std::max(start[j], start[jj]), b = std::min(stop[j], stop[jj]);
+            const int dh = 2 + 2 * jj, dl = 3 + 2 * jj;
+            for (npy_intp i = a; i < b; ++i) {
+                const double h = hcol[j][i - start[j]], l = lcol[j][i - start[j]];
+                const double h2 = hcol[jj][i - start[jj]], l2 = lcol[jj][i - start[jj]];
+                g(ch, dh) += h * h2;
+                g(ch, dl) += h * l2;
+                g(cl, dh) += l * h2;
+                g(cl, dl) += l * l2;
+            }
+        }
+    }
+    // Equilibrate, then Cholesky (lower triangle) in place.
+    std::vector<double> d(static_cast<size_t>(m));
+    for (int a = 0; a < m && !singular; ++a) {
+        if (!(g(a, a) > 0.0)) singular = true;
+        else d[a] = 1.0 / std::sqrt(g(a, a));
+    }
+    if (!singular) {
+        for (int a = 0; a < m; ++a)
+            for (int b = a; b < m; ++b) g(b, a) = g(a, b) * d[a] * d[b];
+        for (int a = 0; a < m && !singular; ++a) {
+            for (int b = 0; b <= a; ++b) {
+                double v = g(a, b);
+                for (int c = 0; c < b; ++c) v -= g(a, c) * g(b, c);
+                if (a == b) {
+                    if (!(v > 1e-10)) { singular = true; break; }
+                    g(a, a) = std::sqrt(v);
+                } else {
+                    g(a, b) = v / g(b, b);
+                }
+            }
+        }
+    }
+    if (!singular) {
+        // Solve (D G D) z = D rhs, c = D z.
+        auto solve = [&](const double* rhs, double* out) {
+            std::vector<double> z(static_cast<size_t>(m));
+            for (int a = 0; a < m; ++a) {
+                double v = rhs[a] * d[a];
+                for (int c = 0; c < a; ++c) v -= g(a, c) * z[c];
+                z[a] = v / g(a, a);
+            }
+            for (int a = m - 1; a >= 0; --a) {
+                double v = z[a];
+                for (int c = a + 1; c < m; ++c) v -= g(c, a) * z[c];
+                z[a] = v / g(a, a);
+            }
+            for (int a = 0; a < m; ++a) out[a] = z[a] * d[a];
+        };
+        std::vector<double> rhs(static_cast<size_t>(m)), dc(static_cast<size_t>(m));
+        xt(y.data(), rhs.data());
+        solve(rhs.data(), coef);
+        for (int it = 0; it < 2; ++it) {
+            residual(coef);
+            xt(r, rhs.data());
+            solve(rhs.data(), dc.data());
+            for (int a = 0; a < m; ++a) coef[a] += dc[a];
+        }
+        residual(coef);
+    }
+    Py_END_ALLOW_THREADS
+
+    release();
+    if (singular) {
+        Py_DECREF(coef_arr);
+        Py_DECREF(res_arr);
+        Py_RETURN_NONE;
+    }
+    return Py_BuildValue("NN", coef_arr, res_arr);
+}
+
 PyMethodDef methods[] = {
     {
         "score_backgrounds",
@@ -1242,6 +1536,12 @@ PyMethodDef methods[] = {
         reinterpret_cast<PyCFunction>(extract_clusters),
         METH_VARARGS | METH_KEYWORDS,
         "Extract non-overlapping anomaly clusters from a grid result.",
+    },
+    {
+        "atoms_linear",
+        reinterpret_cast<PyCFunction>(atoms_linear),
+        METH_VARARGS | METH_KEYWORDS,
+        "Linear fluxes and normalised residual of the atoms host model (None if singular).",
     },
     {nullptr, nullptr, 0, nullptr},
 };
