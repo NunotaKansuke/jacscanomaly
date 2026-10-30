@@ -36,10 +36,11 @@ fold profile the inner side is fixed at a multiple of ``dt``; the outer side
 also depends on ``L_in / A``. With ``dt`` near the cadence the data alone do
 not resolve the outer side: the widths are those of the fitted profile.
 
-Shape: bump/fold and double/pair are two complexity classes. Within a class
-and from the first class to the second, the richer family is taken only if
-it explains a further ``delta`` of ``dchi2`` *and* at least ``dchi2_min`` in
-chi2 (a caustic edge must be resolved to be claimed); ``"complex"`` if the
+Shape: bump/fold and double/pair are two complexity classes (2 and 4
+nonlinear parameters). Within a class (same parameter count) the fold / pair
+is taken if it fits better by ``dchi2_min`` (a caustic edge must be resolved
+to be claimed); the second class is taken only if it explains a further
+``delta`` of ``dchi2`` *and* at least ``dchi2_min`` in chi2 over the first; ``"complex"`` if the
 chosen family explains less than ``f_min``. Fractions, not tests against an
 exact null: a real anomaly never fits a named shape exactly, and a null test
 would label S/N rather than shape.
@@ -105,15 +106,19 @@ class Feature:
     crossings), ``caustic_exit_entry`` (outside between them), ``complex`` or
     ``none`` (no improvement at all). ``time`` and ``timescale``:
 
-    * bump / dip: ``t0`` and ``teff`` of the atom,
+    * bump / dip: ``t0`` of the atom and the FWHM of its fitted profile (an
+      atom ``a h + b l`` can be flat-topped, so ``teff`` is not its width),
     * fold: ``tc`` and ``dt``,
-    * two atoms: their mid time and separation,
+    * two atoms: the mid time and separation of their peaks (largest ``|r|``
+      of each), which also order them,
     * caustic: ``(t1 + t2) / 2`` and ``t2 - t1``,
     * complex / none: the time of the largest ``|atoms|`` and ``nan``.
 
     ``explained`` maps each family to its fraction of ``dchi2``; ``params``
     holds the chosen family's times (``t1, t2, dt1, dt2`` for a caustic);
-    ``crossings`` the fold crossings in time order (fold: one, caustic: two).
+    ``crossings`` the fold crossings in time order (fold: one, caustic: two);
+    ``spans`` the half-maximum interval of each atom (bump / dip: one, two
+    atoms: two), around the atom's largest ``|r|``.
     """
 
     candidate: Candidate
@@ -125,6 +130,7 @@ class Feature:
     params: Mapping[str, float]
     n_points: int
     crossings: tuple[Crossing, ...] = ()
+    spans: tuple[tuple[float, float], ...] = ()
 
     @property
     def t_start(self) -> float:
@@ -142,6 +148,7 @@ class Feature:
             **{f"f_{k}": v for k, v in self.explained.items()},
             **dict(self.params),
             "crossings": [c.summary_dict() for c in self.crossings],
+            "spans": [list(x) for x in self.spans],
         }
 
 
@@ -347,6 +354,15 @@ def _crossing(tc, dt, inward, amp, level_out, level_in, n=4001) -> Crossing:
                     float(left), float(right), float(dt))
 
 
+def _half_max(t, y) -> tuple[float, float]:
+    """Interval around the largest ``|y|`` where ``|y|`` stays above half of it."""
+    i = int(np.argmax(np.abs(y)))
+    above = np.abs(y) >= 0.5 * abs(y[i])
+    lo = i - (np.flatnonzero(~above[:i + 1][::-1])[:1].tolist() or [i + 1])[0] + 1
+    hi = i + (np.flatnonzero(~above[i:])[:1].tolist() or [above.size - i])[0] - 1
+    return float(t[lo]), float(t[hi])
+
+
 def _sign_kind(y) -> str:
     return "bump" if y[int(np.argmax(np.abs(y)))] > 0 else "dip"
 
@@ -368,29 +384,36 @@ def _characterize(candidate, t, r, w, m, config) -> Feature:
            "double": "double", "pair": best("caustic_entry_exit", "caustic_exit_entry")}
     frac = {k: (float(gain[v] / ref) if np.isfinite(gain[v]) else np.nan) for k, v in cls.items()}
 
-    def richer(k, j):
-        return gain[cls[k]] >= gain[cls[j]] + max(config.delta * ref, config.dchi2_min)
+    def beats(k, j, margin):
+        return gain[cls[k]] >= gain[cls[j]] + margin
 
-    shape = "fold" if richer("fold", "bump") else "bump"
-    two = "pair" if richer("pair", "double") else "double"
-    if np.isfinite(gain[cls[two]]) and richer(two, shape):
+    # same parameter count within a class: an edge only has to be resolved
+    shape = "fold" if beats("fold", "bump", config.dchi2_min) else "bump"
+    two = "pair" if beats("pair", "double", config.dchi2_min) else "double"
+    if np.isfinite(gain[cls[two]]) and beats(two, shape, max(config.delta * ref, config.dchi2_min)):
         shape = two
     if not np.isfinite(gain[cls[shape]]) or frac[shape] < config.f_min:
         return Feature(candidate, "complex", peak, np.nan, dchi2, frac, {}, t.size)
 
     _, p, coef = fits[cls[shape]]
+    tt = np.linspace(t[0], t[-1], 20001)
     if shape == "bump":
-        y = coef @ _bump(t, p, config.coeff)
-        return Feature(candidate, _sign_kind(y), float(p[0]), float(np.exp(p[1])), dchi2, frac,
-                       {"t0": float(p[0]), "teff": float(np.exp(p[1]))}, t.size)
+        y = coef @ _bump(tt, p, config.coeff)
+        lo, hi = _half_max(tt, y)
+        return Feature(candidate, _sign_kind(y), float(p[0]), hi - lo, dchi2, frac,
+                       {"t0": float(p[0]), "teff": float(np.exp(p[1]))}, t.size, spans=((lo, hi),))
     if shape == "double":
-        y = [coef[2 * i:2 * i + 2] @ _bump(t, p[2 * i:2 * i + 2], config.coeff) for i in (0, 1)]
-        order = (0, 1) if p[0] <= p[2] else (1, 0)
-        t0s = [float(p[2 * i]) for i in order]
+        y = [coef[2 * i:2 * i + 2] @ _bump(tt, p[2 * i:2 * i + 2], config.coeff) for i in (0, 1)]
+        # an atom can peak off its t0 (a ring), so its peak orders and times it
+        peaks = [float(tt[int(np.argmax(np.abs(yi)))]) for yi in y]
+        order = (0, 1) if peaks[0] <= peaks[1] else (1, 0)
+        tp = [peaks[i] for i in order]
         return Feature(candidate, "+".join(_sign_kind(y[i]) for i in order),
-                       0.5 * (t0s[0] + t0s[1]), t0s[1] - t0s[0], dchi2, frac,
-                       {"t0_1": t0s[0], "teff_1": float(np.exp(p[2 * order[0] + 1])),
-                        "t0_2": t0s[1], "teff_2": float(np.exp(p[2 * order[1] + 1]))}, t.size)
+                       0.5 * (tp[0] + tp[1]), tp[1] - tp[0], dchi2, frac,
+                       {"t0_1": float(p[2 * order[0]]), "teff_1": float(np.exp(p[2 * order[0] + 1])),
+                        "t0_2": float(p[2 * order[1]]), "teff_2": float(np.exp(p[2 * order[1] + 1]))},
+                       t.size,
+                       spans=tuple(_half_max(tt, y[i]) for i in order))
     if shape == "fold":
         s = +1 if cls["fold"] == "fold_entry" else -1
         tc, dt = float(p[0]), float(np.exp(p[1]))

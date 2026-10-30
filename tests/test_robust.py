@@ -5,7 +5,7 @@ from jacscanomaly import (
     robust_fit,
 )
 from jacscanomaly.fitters import _pspl_magnification
-from jacscanomaly.robust import Atom, _deficit_ok, _Host
+from jacscanomaly.robust import Atom
 
 
 def _event(anomalies, *, n=6000, seed=7):
@@ -100,18 +100,3 @@ def test_the_cap_grows_with_u_in_the_wing():
 
     assert any(abs(a.t0 + 26.0) < 1.0 and a.teff > 0.13 * 20.0 for a in r.atoms)
 
-
-def test_atoms_may_not_cancel_the_host_peak():
-    time = np.linspace(-1.0, 1.0, 401)
-    ferr = np.full_like(time, 0.01)
-    host = _Host(PSPLFitter(), time)
-    p = np.array([0.0, 300.0, 1e-4])  # a host peaked on the spike
-    excess = host.magnification(p) - 1.0
-    i = int(np.argmax(excess))
-    atom = [(0.0, 0.01)]
-    high, low = atom_basis(time, 0.0, 0.01)
-    # an atom removing all of the host's peak, not just its minor image
-    scale = -excess[i] / high[i]
-    assert not _deficit_ok(host, ferr, p, [1.0, 0.0, scale, 0.0], atom, 3.0, 3.0)
-    assert _deficit_ok(host, ferr, p, [1.0, 0.0, 0.4 * scale, 0.0], atom, 3.0, 3.0)
-    assert _deficit_ok(host, ferr, p, [1.0, 0.0, -scale, 0.0], atom, 3.0, 3.0)

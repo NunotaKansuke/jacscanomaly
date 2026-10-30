@@ -88,3 +88,20 @@ The bound is checked on the data times (the atoms only act there).
   Then both PSPL starts end at the honest host (`J` 40492.7), FSPL too;
   parallax ends at `tE ~ 1000, u0 ~ -0.009` with positive spike atoms
   (`J` +17, not selected).
+
+## Regression at 1000 events (fix2) and the change after it
+
+Against the features run, `J` got worse in 78, 404, 485, 522, 697, 724, 932,
+959, 966.
+
+* The deficit bound holds the host at its start whenever a refit would cross
+  it, so the host cannot move to its real place (697: `tE` stays 9.04 where
+  the unbounded fit goes to 1.14). It did nothing for 0042. **Removed**
+  (`max_deficit_sigma`, `violates`, the held-host refit).
+* The relocked masked `base` also applied to high-magnification events, where
+  the relock is True but the relocked host's peak lies inside the masked
+  segment (522, 78): masking the peak loses the host. For parallax the
+  masked base could also blow up (485, 522: `J ~ 4e5-7e5`).
+  Now `base` is the masked H1 fit only when the relocked host's `t0` is
+  **outside** the relock mask (the plain fit sits on a segment the relock
+  rejected, as in 0042); otherwise it stays the plain fit.

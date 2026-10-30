@@ -76,3 +76,16 @@ def test_summary_and_no_windows():
     time = np.linspace(8.0, 12.0, 100)
     empty = measure_features(time, time * 0 + HOST, time * 0 + 0.02, time * 0 + HOST, time * 0, [])
     assert empty.features == () and empty.strongest is None
+
+
+def test_bump_timescale_is_its_width():
+    (f,) = _measure(_gauss(10.0, 0.1, 1.0), Candidate(9.5, 10.5)).features
+    assert f.kind == "bump" and abs(f.timescale - 2.355 * 0.1) < 0.03
+
+
+def test_double_spans_cover_each_atom():
+    two = lambda t: _gauss(9.6, 0.08, 1.0)(t) + _gauss(10.4, 0.08, -0.7)(t)
+    (f,) = _measure(two, Candidate(9.2, 10.8)).features
+    (a1, b1), (a2, b2) = f.spans
+    assert abs(a1 - 9.506) < 0.03 and abs(b1 - 9.694) < 0.03
+    assert abs(a2 - 10.306) < 0.03 and abs(b2 - 10.494) < 0.03
