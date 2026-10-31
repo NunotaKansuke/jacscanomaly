@@ -27,10 +27,17 @@ contiguous run overlapping the window that maximises ``sum(z_i^2 - penalty)``
 (``z`` = residual / ferr); it does not cross a data gap longer than the
 window. Each hypothesis is minimised from its start by alternating that
 segment and the masked refit; each step does not increase ``J``. Relock when
-``J1 <= J0`` (equal when both starts reach the same host) and the H1 host
-is seen by the samples it keeps (it beats a constant flux on them by
+``J1 <= J0`` (equal when both starts reach the same host), or when H0's
+minimisation moved the host's ``t0`` out of ``fit0``'s core and by more than
+``fit0``'s ``tE`` (H0 then left
+``fit0`` for another event, so ``fit0`` itself is no host; the host is then
+the better of H0's and H1's), and the host is seen by the samples it keeps (it beats a constant flux on them by
 ``chi2 + p ln n``): when the mask covers the event, the "host" is a fit to
-the baseline.
+the baseline; and, when its peak falls in a data gap longer than its ``tE``,
+the samples bordering the gap are kept: a segment masked up to a season's
+end otherwise frees the host to peak in the gap, where only the mask lets it
+go (a peak just past the data, the data next to it kept, is constrained by
+them; an anomaly masked on a sampled peak is the usual case).
 
 Assumptions
 -----------
@@ -58,9 +65,9 @@ class HostRelock:
     """Outcome of :func:`relock_host`.
 
     ``fit`` is the fit to use: the host fit when ``relocked``, else ``fit0``.
-    ``host`` is the masked host refit under H1 (``None`` when ``fit0`` has no
-    detectable core). ``mask`` marks its anomaly (``True`` = excluded).
-    ``dJ = J0 - J1``; relocked iff ``dJ >= 0``.
+    ``host`` is the masked host refit under H1, or H0's when H0 left ``fit0``
+    for a better host (``None`` when ``fit0`` has no detectable core).
+    ``mask`` marks its anomaly (``True`` = excluded). ``dJ = J0 - J1``.
     """
 
     relocked: bool
@@ -149,6 +156,19 @@ def _host_detected(fit: SingleLensFitResult, mask: np.ndarray) -> bool:
     return chi2 + p * np.log(n) < flat + np.log(n)
 
 
+def _peak_unmasked(fit: SingleLensFitResult, mask: np.ndarray) -> bool:
+    """Whether a peak in a data gap (longer than ``tE``) has its bordering samples kept."""
+    time = np.asarray(fit.time, dtype=float)
+    t0, tE = float(np.asarray(fit.params)[0]), abs(float(np.asarray(fit.params)[1]))
+    mask = np.asarray(mask, dtype=bool)
+    before, after = np.flatnonzero(time <= t0), np.flatnonzero(time >= t0)
+    near = ([before[np.argmax(time[before])]] if before.size else []) + \
+           ([after[np.argmin(time[after])]] if after.size else [])
+    if len(near) == 2 and time[near[1]] - time[near[0]] <= tE:
+        return True  # the peak is sampled: a masked anomaly on it is the usual case
+    return not mask[near].any()
+
+
 def _minimise_j(fitter, fit, mask, window, penalty, n_iter):
     """Alternate the anomaly segment and the masked refit from ``(fit, mask)``."""
     time = np.asarray(fit.time, dtype=float)
@@ -190,13 +210,21 @@ def relock_host(
     if not core.any():
         return HostRelock(False, fit0, None, core, float("-inf"))
 
-    _, _, j0 = _minimise_j(fitter, fit0, np.zeros_like(core),
-                           Candidate(time.min(), time.max()), penalty, n_iter)
+    host0, mask0, j0 = _minimise_j(fitter, fit0, np.zeros_like(core),
+                                   Candidate(time.min(), time.max()), penalty, n_iter)
+    t0 = float(np.asarray(host0.params)[0])
+    # H0 slid off fit0's event: its t0 left fit0's core and moved more than
+    # fit0's tE (fit0 itself may peak in a gap, outside its core's samples)
+    t00, tE0 = (float(x) for x in np.asarray(fit0.params)[:2])
+    left = (not time[core].min() <= t0 <= time[core].max()) and abs(t0 - t00) > abs(tE0)
     rest = fitter.fit(time, flux, ferr, mask=core)
     host, mask, j1 = _minimise_j(fitter, rest, core,
                                  Candidate(time[core].min(), time[core].max()), penalty, n_iter)
-    # H1 needs a host: one the kept samples see (not a fit to the baseline)
-    relocked = j1 <= j0 and _host_detected(host, mask)  # equal: same host from both starts
+    if left and j0 < j1:  # H0's own host is the better one off fit0
+        host, mask = host0, mask0
+    # the host must be one the kept samples see (not a fit to the baseline)
+    relocked = ((j1 <= j0 or left)  # equal: same host from both starts
+                and _host_detected(host, mask) and _peak_unmasked(host, mask))
     return HostRelock(relocked, host if relocked else fit0, host, mask, j0 - j1)
 
 

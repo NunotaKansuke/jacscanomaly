@@ -15,8 +15,8 @@ With the host held fixed, ``r = flux - host`` in the window is described by
   bump      one atom ``a h + b l``                         t0, teff     2
   fold      ``A G(z) + c H(z)``, ``z = +-(t - tc) / dt``   tc, dt       2
   double    two atoms                                      2 x bump     4
-  pair      two folds, inside (``in``) or outside          t1, dt1,     4-5
-            (``out``) between them, + floor and slope      t2, dt2
+  pair      two folds, inside (``in``) or outside          t1, dt1,     4
+            (``out``) between them, + a linear floor       t2, dt2
             between them
   ========  =============================================  ===========  ======
 
@@ -25,25 +25,58 @@ disk inside the fold (Schneider & Weiss 1987; Albrow et al. 1999; Gaudi &
 Gould 2002); ``dt`` is the time the source radius takes to cross the fold.
 ``in``: entry at ``t1``, exit at ``t2``, the interior above the host.
 ``out``: exit at ``t1``, entry at ``t2``; the outer sides are inside the
-caustic and get their own floor (the host has absorbed part of it).
+caustic, the host's level (0), and the floor between the crossings is below
+it.
 
-Each fold crossing is also described on its own (:class:`Crossing`): the
-time of its peak and the half width at half maximum on each side, measured
-on the fitted family near that crossing, ``y = L_out + (L_in - L_out) H(z) +
-A G(z)``, half maximum taken against the level on that side (``L_out``
-outside the caustic, ``L_in`` the floor inside). With the uniform-source
-fold profile the inner side is fixed at a multiple of ``dt``; the outer side
-also depends on ``L_in / A``. With ``dt`` near the cadence the data alone do
-not resolve the outer side: the widths are those of the fitted profile.
+Signs (named assumption): a fold crossing adds or removes one image pair of
+positive magnification, so its spike amplitude ``A >= 0`` and the level
+inside the caustic is not below the level outside at each crossing: fold
+``c >= 0``; ``in`` floor ``>= 0`` (the host is outside); ``out`` floor between
+the crossings ``<= 0`` (the host is inside). The linear part of fold and pair
+is a non-negative least squares under these signs; bump and double stay free
+(they also describe dips). A crossing is claimed by its spike: a fold or pair
+whose spike term, any one alone (nonlinear parameters held), gains less than
+``dchi2_min`` in chi2 is not fitted (steps alone are a dip or a bump).
+A pair's two crossings must be resolved: each crossing's spike (FWHM)
+is shorter than the time between the two peaks. The straight fold assumes a
+source small against the caustic, so a crossing short against the chord; a
+spike as long as the pair is two folds the data do not separate (a bump or a
+double).
 
-Shape: bump/fold and double/pair are two complexity classes (2 and 4
-nonlinear parameters). Within a class (same parameter count) the fold / pair
-is taken if it fits better by ``dchi2_min`` (a caustic edge must be resolved
-to be claimed); the second class is taken only if it explains a further
-``delta`` of ``dchi2`` *and* at least ``dchi2_min`` in chi2 over the first; ``"complex"`` if the
-chosen family explains less than ``f_min``. Fractions, not tests against an
+A pair crossing's FWHM (for that test, :class:`Crossing`) is measured on the
+fitted family near it, ``y = L_out + (L_in - L_out) H(z) + A G(z)``, half
+maximum against the level on each side.
+
+The fractions are numbers to read, not the decision. Fractions, not tests against an
 exact null: a real anomaly never fits a named shape exactly, and a null test
 would label S/N rather than shape.
+
+Parts: every window is described by the atoms model ``y`` itself, not by its
+atoms (atoms superpose: two overlapping atoms of opposite sign are not two
+features). Its parts are the extrema of ``y``: in each segment where the model
+is seen (``|y| / ferr >= 1``; a pass through the host shorter than a seen run
+next to it does not end the segment; seen by no single sample, the window
+is one segment), the local maxima of ``|y|``, taken from the
+strongest down, each kept if at least half of the nearest one already kept
+(a weaker one next to it is its rebound; one comparable to a kept neighbour
+is kept, 0140; another segment reports its own largest), two of one sign counted as two only when ``|y|``
+between them falls below half of the weaker; each with its FWHM (the run
+where ``y`` keeps its sign above half its extremum, stopped at the lowest
+``|y|`` before a neighbouring part). The model is read on the samples.
+
+Caustic (a number, the label a rough guide): a crossing changes the
+magnification by the anomaly's size within the source crossing time, short
+against the anomaly; a smooth anomaly changes by its size over its own width.
+Per segment, ``S = W / tau`` with the equivalent width
+``W = int |y| dt / max|y|`` and the fastest rise or fall
+``tau = max|y| / max|dy/dt|``; the window's ``sharpness`` is the largest ``S``.
+One smooth single-scale part has ``S ~ 1.5`` at any S/N (atom 1.43, Gaussian
+1.52), two separate ones ``~ 3``; a box of length ``L`` with walls ``d`` has
+``L / d``. ``caustic``: ``sharpness >= sharp_min`` (4, above two smooth
+parts). A data gap (a spacing over 10 x the segment's median) carries no
+area; edges are as steep as the samples show. A lone spike with nothing else
+at its scale is a bump (a cusp approach and a lone crossing are not
+separable by shape).
 
 Assumptions: the host is fixed (a host that absorbed the anomaly is not
 repaired here); straight fold, uniform source, constant velocity across a
@@ -59,7 +92,7 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, nnls
 from scipy.signal import find_peaks
 
 from .candidate import Candidate
@@ -69,9 +102,8 @@ from .candidate import Candidate
 class FeatureConfig:
     """Shape decision and start controls."""
 
-    f_min: float = 0.8
-    delta: float = 0.05
     dchi2_min: float = 25.0
+    sharp_min: float = 4.0       # sharpness of a caustic (two smooth parts: ~3)
     coeff: float = 3.0           # atom support, as in AtomConfig
     n_edges: int = 5             # steepest rises / drops of the atoms tried as fold times
     edge_separation: int = 5     # samples between two edge starts
@@ -98,27 +130,31 @@ class Crossing:
 
 
 @dataclass(frozen=True)
+class Part:
+    """One extremum of the atoms model: its sign, peak time and FWHM."""
+
+    kind: str
+    time: float
+    timescale: float
+
+    def summary_dict(self) -> dict[str, object]:
+        return {"kind": self.kind, "time": self.time, "timescale": self.timescale}
+
+
+@dataclass(frozen=True)
 class Feature:
     """One anomaly window.
 
-    ``kind``: ``bump``, ``dip``, ``fold_entry``, ``fold_exit``, two atoms in
-    time order (``bump+dip``, ...), ``caustic_entry_exit`` (inside between the
-    crossings), ``caustic_exit_entry`` (outside between them), ``complex`` or
-    ``none`` (no improvement at all). ``time`` and ``timescale``:
+    ``kind``: the parts' kinds in time order (``bump``, ``dip``,
+    ``bump+dip``, ...), ``complex`` (no part seen) or ``none`` (no improvement
+    at all). ``time`` and ``timescale``: the strongest part's peak time and
+    FWHM (complex / none: the time of the largest ``|atoms|`` and ``nan``).
 
-    * bump / dip: ``t0`` of the atom and the FWHM of its fitted profile (an
-      atom ``a h + b l`` can be flat-topped, so ``teff`` is not its width),
-    * fold: ``tc`` and ``dt``,
-    * two atoms: the mid time and separation of their peaks (largest ``|r|``
-      of each), which also order them,
-    * caustic: ``(t1 + t2) / 2`` and ``t2 - t1``,
-    * complex / none: the time of the largest ``|atoms|`` and ``nan``.
-
-    ``explained`` maps each family to its fraction of ``dchi2``; ``params``
-    holds the chosen family's times (``t1, t2, dt1, dt2`` for a caustic);
-    ``crossings`` the fold crossings in time order (fold: one, caustic: two);
-    ``spans`` the half-maximum interval of each atom (bump / dip: one, two
-    atoms: two), around the atom's largest ``|r|``.
+    ``explained`` maps each family to its fraction of ``dchi2``; ``parts`` the
+    extrema of the atoms model, ``spans`` their half-maximum intervals and
+    ``span_kinds`` their signs, in time order; ``sharpness`` the largest edge
+    sharpness ``S`` of its segments and ``caustic`` whether it reaches
+    ``sharp_min``.
     """
 
     candidate: Candidate
@@ -127,10 +163,12 @@ class Feature:
     timescale: float
     dchi2: float
     explained: Mapping[str, float]
-    params: Mapping[str, float]
     n_points: int
-    crossings: tuple[Crossing, ...] = ()
+    sharpness: float = np.nan
+    caustic: bool = False
     spans: tuple[tuple[float, float], ...] = ()
+    span_kinds: tuple[str, ...] = ()
+    parts: tuple[Part, ...] = ()
 
     @property
     def t_start(self) -> float:
@@ -144,11 +182,11 @@ class Feature:
         return {
             "kind": self.kind, "time": self.time, "timescale": self.timescale,
             "dchi2": self.dchi2, "t_start": self.t_start, "t_end": self.t_end,
-            "n_points": self.n_points,
+            "n_points": self.n_points, "sharpness": self.sharpness, "caustic": self.caustic,
             **{f"f_{k}": v for k, v in self.explained.items()},
-            **dict(self.params),
-            "crossings": [c.summary_dict() for c in self.crossings],
             "spans": [list(x) for x in self.spans],
+            "span_kinds": list(self.span_kinds),
+            "parts": [x.summary_dict() for x in self.parts],
         }
 
 
@@ -165,6 +203,7 @@ class FeatureResult:
         return {
             "n_features": len(self.features),
             "kinds": dict(Counter(f.kind for f in self.features)),
+            "n_caustic": sum(f.caustic for f in self.features),
             "dchi2_total": float(sum(f.dchi2 for f in self.features)),
             "strongest": None if s is None else s.summary_dict(),
         }
@@ -175,7 +214,8 @@ class FeatureResult:
     def summary_text(self) -> str:
         if not self.features:
             return "no anomaly windows"
-        return "; ".join(f"{f.kind} t={f.time:.4f} ts={f.timescale:.3g} dchi2={f.dchi2:.0f}"
+        return "; ".join(f"{f.kind}{' (caustic)' if f.caustic else ''} t={f.time:.4f} "
+                         f"ts={f.timescale:.3g} S={f.sharpness:.2g} dchi2={f.dchi2:.0f}"
                          for f in self.features)
 
 
@@ -235,6 +275,9 @@ def _fold(t, p, sign):
     return np.array([_G(z), _H(z)])
 
 
+_FOLD_SIGN = np.array([1, 1])  # A, c >= 0
+
+
 def _pair_times(p):
     """t1, t2, dt1, dt2 of a pair; t2 - t1 >= dt1 + dt2, so the crossings are resolved."""
     dt1, dt2 = np.exp(p[1]), np.exp(p[3])
@@ -242,23 +285,39 @@ def _pair_times(p):
 
 
 def _pair(t, p, orient):
+    """Pair columns; the floor between the crossings is linear, ``e1`` at ``t1`` to ``e2`` at ``t2``.
+
+    ``in``: ``A1, A2, e1, e2``. ``out``: ``A1, A2, g1, g2``, the floor
+    ``-g_k`` below the outer sides (the host, 0).
+    """
     t1, t2, dt1, dt2 = _pair_times(p)
     z1, z2 = (t - t1) / dt1, (t2 - t) / dt2
     box = _H(z1) * _H(z2)
+    l2 = (t - t1) / (t2 - t1)
+    floor = [box * (1.0 - l2), box * l2]
     if orient > 0:
-        cols = [_G(z1) * _H(z2), _G(z2) * _H(z1)]
-    else:
-        cols = [_G(-z1), _G(-z2), 1.0 - box]
-    return np.array(cols + [box, box * (t - 0.5 * (t1 + t2))])
+        return np.array([_G(z1) * _H(z2), _G(z2) * _H(z1)] + floor)
+    return np.array([_G(-z1), _G(-z2), -floor[0], -floor[1]])
 
 
-def _residual(cols, r, w):
+# a fold only adds flux: A >= 0, inside not below outside at each crossing
+_PAIR_SIGN = np.array([1, 1, 1, 1])
+
+
+def _residual(cols, r, w, sign=None):
+    """Weighted linear fit; ``sign[k] = 1`` holds coefficient ``k >= 0``, ``0`` leaves it free."""
     x = cols * w
-    coef, *_ = np.linalg.lstsq(x.T, r * w, rcond=None)
+    if sign is None:
+        coef, *_ = np.linalg.lstsq(x.T, r * w, rcond=None)
+    else:
+        free = np.flatnonzero(sign == 0)
+        c, _ = nnls(np.vstack([x, -x[free]]).T, r * w)
+        coef = c[:x.shape[0]]
+        coef[free] -= c[x.shape[0]:]
     return coef, r * w - x.T @ coef
 
 
-def _fit(t, r, w, cols, starts, lower, upper, keep):
+def _fit(t, r, w, cols, starts, lower, upper, keep, sign=None):
     """Best of the ``keep`` starts with the lowest linear-only chi2, refined."""
     if not starts:
         return None
@@ -266,17 +325,29 @@ def _fit(t, r, w, cols, starts, lower, upper, keep):
     if t.size <= n_par:
         return None
     starts = [np.clip(p, lower + 1e-9, upper - 1e-9) for p in starts]
-    screen = [float(np.sum(_residual(cols(t, p), r, w)[1] ** 2)) for p in starts]
+    screen = [float(np.sum(_residual(cols(t, p), r, w, sign)[1] ** 2)) for p in starts]
     best = None
     for i in np.argsort(screen)[:keep]:
         try:
-            s = least_squares(lambda p: _residual(cols(t, p), r, w)[1], starts[i],
+            s = least_squares(lambda p: _residual(cols(t, p), r, w, sign)[1], starts[i],
                               bounds=(lower, upper), x_scale="jac", max_nfev=200)
         except ValueError:
             continue
         if best is None or 2.0 * s.cost < best[0]:
-            best = (2.0 * s.cost, s.x, _residual(cols(t, s.x), r, w)[0])
+            best = (2.0 * s.cost, s.x, _residual(cols(t, s.x), r, w, sign)[0])
     return best
+
+
+def _spikes_seen(t, r, w, cols, fit, sign, spikes, need):
+    """Whether each spike column of ``fit`` alone gains ``need`` in chi2 (parameters held)."""
+    if fit is None:
+        return False
+    x = cols(t, fit[1])
+    for k in spikes:
+        rest = _residual(np.delete(x, k, axis=0), r, w, np.delete(sign, k))[1]
+        if float(np.sum(rest**2)) - fit[0] < need:
+            return False
+    return True
 
 
 def _edges(t, m, k, sep):
@@ -291,7 +362,11 @@ def _edges(t, m, k, sep):
 
 
 def _families(t, r, w, m, config):
-    """chi2, parameters and coefficients of every family on one window."""
+    """chi2, parameters and coefficients of every family on one window.
+
+    A fold or pair whose spike (one per crossing) gains less than
+    ``dchi2_min`` is not fitted (``None``): a crossing is claimed by its spike.
+    """
     coeff, keep = config.coeff, config.keep_starts
     span = t[-1] - t[0]
     cadence = float(np.median(np.diff(t)))
@@ -317,14 +392,39 @@ def _families(t, r, w, m, config):
     edges = _edges(t, m, config.n_edges, config.edge_separation)
     for name, s in (("fold_entry", +1), ("fold_exit", -1)):
         starts = [np.array([tc, np.log(dt)]) for tc in edges[s] for dt in dts]
-        out[name] = _fit(t, r, w, lambda tt, p, s=s: _fold(tt, p, s), starts, *bound, keep)
+        cols = lambda tt, p, s=s: _fold(tt, p, s)
+        out[name] = _fit(t, r, w, cols, starts, *bound, keep, _FOLD_SIGN)
+        if not _spikes_seen(t, r, w, cols, out[name], _FOLD_SIGN, (0,), config.dchi2_min):
+            out[name] = None
 
     lower, upper = np.array([t[0], lo, lo, lo]), np.array([t[-1], hi, hi, hi])
     for name, o in (("caustic_entry_exit", +1), ("caustic_exit_entry", -1)):
         starts = [np.array([a, np.log(dt), np.log(max(b - a - 2.0 * dt, 1e-4)), np.log(dt)])
                   for a in edges[o] for b in edges[-o] if b > a for dt in dts]
-        out[name] = _fit(t, r, w, lambda tt, p, o=o: _pair(tt, p, o), starts, lower, upper, keep)
+        cols = lambda tt, p, o=o: _pair(tt, p, o)
+        out[name] = _fit(t, r, w, cols, starts, lower, upper, keep, _PAIR_SIGN)
+        if not _spikes_seen(t, r, w, cols, out[name], _PAIR_SIGN, (0, 1), config.dchi2_min):
+            out[name] = None
+        elif not _crossings_resolved(_pair_crossings(name, *out[name][1:])):
+            out[name] = None
     return out
+
+
+def _pair_crossings(name, p, coef) -> tuple[Crossing, Crossing]:
+    """The two crossings of a fitted pair, in time order."""
+    t1, t2, dt1, dt2 = (float(x) for x in _pair_times(p))
+    if name == "caustic_entry_exit":  # outside the caustic: the host (0)
+        return (_crossing(t1, dt1, +1, coef[0], 0.0, coef[2]),
+                _crossing(t2, dt2, -1, coef[1], 0.0, coef[3]))
+    # inside: the outer sides (the host, 0); outside: -g_k between the crossings
+    return (_crossing(t1, dt1, -1, coef[0], -coef[2], 0.0),
+            _crossing(t2, dt2, +1, coef[1], -coef[3], 0.0))
+
+
+def _crossings_resolved(crossings) -> bool:
+    """Whether each crossing's spike (FWHM) is shorter than the time between the two peaks."""
+    a, b = crossings
+    return bool(np.all(np.array([a.fwhm, b.fwhm]) < b.time - a.time))  # nan: not resolved
 
 
 def _crossing(tc, dt, inward, amp, level_out, level_in, n=4001) -> Crossing:
@@ -354,17 +454,75 @@ def _crossing(tc, dt, inward, amp, level_out, level_in, n=4001) -> Crossing:
                     float(left), float(right), float(dt))
 
 
-def _half_max(t, y) -> tuple[float, float]:
-    """Interval around the largest ``|y|`` where ``|y|`` stays above half of it."""
-    i = int(np.argmax(np.abs(y)))
-    above = np.abs(y) >= 0.5 * abs(y[i])
-    lo = i - (np.flatnonzero(~above[:i + 1][::-1])[:1].tolist() or [i + 1])[0] + 1
-    hi = i + (np.flatnonzero(~above[i:])[:1].tolist() or [above.size - i])[0] - 1
-    return float(t[lo]), float(t[hi])
+def _edge(t, a, i, j, level) -> float:
+    """Time where ``a`` crosses ``level`` between samples ``i`` (above) and ``j``."""
+    return float(t[i] + (level - a[i]) * (t[j] - t[i]) / (a[j] - a[i])) if a[j] != a[i] else float(t[j])
 
 
-def _sign_kind(y) -> str:
-    return "bump" if y[int(np.argmax(np.abs(y)))] > 0 else "dip"
+def _segments(t, y, w) -> list[tuple[int, int]]:
+    """Runs where ``|y| w >= 1``, joined across a pass through the host shorter
+    than a run next to it (none seen: the whole window); index bounds."""
+    seen = np.flatnonzero(np.abs(y) * w >= 1.0)
+    runs = [(int(r[0]), int(r[-1])) for r in np.split(seen, np.flatnonzero(np.diff(seen) > 1) + 1) if r.size]
+    segs = runs[:1] or [(0, y.size - 1)]  # seen by no single sample (only all together): one segment
+    for lo, hi in runs[1:]:  # a pass through the host shorter than a run next to it is inside the anomaly
+        plo, phi = segs[-1]
+        if t[lo] - t[phi] < max(t[phi] - t[plo], t[hi] - t[lo]):
+            segs[-1] = (plo, hi)
+        else:
+            segs.append((lo, hi))
+    return segs
+
+
+def _sharpness(t, y, segs) -> float:
+    """Largest ``S = W / tau`` of the segments: equivalent width over the fastest rise or fall."""
+    best = np.nan
+    for lo, hi in segs:
+        tt, a = t[lo:hi + 1], np.abs(y[lo:hi + 1])
+        if tt.size < 2 or a.max() <= 0:
+            continue
+        dt = np.diff(tt)
+        gap = dt > 10.0 * np.median(dt)  # a data gap carries no area
+        width = float(np.sum((0.5 * (a[1:] + a[:-1]) * dt)[~gap])) / a.max()
+        rise = a.max() / float(np.max(np.abs(np.diff(y[lo:hi + 1])) / np.maximum(dt, 1e-12)))
+        best = np.fmax(best, width / rise)
+    return float(best)
+
+
+def _extrema(t, y, segs) -> list[tuple[Part, tuple[float, float], float]]:
+    """Kept extrema of the atoms model ``y``: part, half-maximum interval, ``|y|``; time order.
+
+    In each segment, the local maxima of ``|y|`` from the strongest down, each
+    kept if ``|y| >= 1/2`` of the nearest kept one; two of one sign count as two
+    only when ``|y|`` between them falls below half of the weaker. Widths stop
+    at the window's ends or the lowest ``|y|`` before a neighbouring part.
+    """
+    a, sg = np.abs(y), np.sign(y)
+    out, kept = [], []
+    for lo, hi in segs:
+        aa = a[lo:hi + 1]
+        pk, _ = find_peaks(np.concatenate([[-np.inf], aa, [-np.inf]]))
+        seg = []
+        for i in sorted((int(i) - 1 + lo for i in pk), key=lambda i: -a[i]):  # strongest first
+            near = min(seg, key=lambda k: abs(t[k] - t[i])) if seg else i
+            if a[i] >= 0.5 * a[near] and all(  # weaker than half its kept neighbour: its rebound
+                    sg[i] != sg[k] or a[min(i, k):max(i, k) + 1].min() < 0.5 * a[i] for k in seg):
+                seg.append(i)
+        kept += sorted(seg)
+    for n, i in enumerate(kept):
+        v = y * sg[i]  # the extremum's sign up
+        # stop at the window's end or at the lowest |y| before a neighbouring kept extremum
+        left = 0 if n == 0 else kept[n - 1] + int(np.argmin(a[kept[n - 1]:i + 1]))
+        right = y.size - 1 if n == len(kept) - 1 else i + int(np.argmin(a[i:kept[n + 1] + 1]))
+        h = []
+        for step, stop in ((-1, left), (+1, right)):
+            j = i
+            while j != stop and v[j + step] >= 0.5 * v[i]:
+                j += step
+            h.append(_edge(t, v, j, j + step, 0.5 * v[i]) if j != stop else float(t[j]))
+        out.append((Part("bump" if y[i] > 0 else "dip", float(t[i]), h[1] - h[0]),
+                    (h[0], h[1]), float(a[i])))
+    return out
 
 
 def _characterize(candidate, t, r, w, m, config) -> Feature:
@@ -375,61 +533,22 @@ def _characterize(candidate, t, r, w, m, config) -> Feature:
     ref = dchi2 if dchi2 > 0 else max(max(gain.values()), 0.0)
     peak = float(t[int(np.argmax(np.abs(m)))])
     if ref <= 0:
-        return Feature(candidate, "none", peak, np.nan, dchi2, {}, {}, t.size)
-
-    def best(*names):
-        return max(names, key=lambda k: gain[k])
-
-    cls = {"bump": "bump", "fold": best("fold_entry", "fold_exit"),
-           "double": "double", "pair": best("caustic_entry_exit", "caustic_exit_entry")}
-    frac = {k: (float(gain[v] / ref) if np.isfinite(gain[v]) else np.nan) for k, v in cls.items()}
-
-    def beats(k, j, margin):
-        return gain[cls[k]] >= gain[cls[j]] + margin
-
-    # same parameter count within a class: an edge only has to be resolved
-    shape = "fold" if beats("fold", "bump", config.dchi2_min) else "bump"
-    two = "pair" if beats("pair", "double", config.dchi2_min) else "double"
-    if np.isfinite(gain[cls[two]]) and beats(two, shape, max(config.delta * ref, config.dchi2_min)):
-        shape = two
-    if not np.isfinite(gain[cls[shape]]) or frac[shape] < config.f_min:
-        return Feature(candidate, "complex", peak, np.nan, dchi2, frac, {}, t.size)
-
-    _, p, coef = fits[cls[shape]]
-    tt = np.linspace(t[0], t[-1], 20001)
-    if shape == "bump":
-        y = coef @ _bump(tt, p, config.coeff)
-        lo, hi = _half_max(tt, y)
-        return Feature(candidate, _sign_kind(y), float(p[0]), hi - lo, dchi2, frac,
-                       {"t0": float(p[0]), "teff": float(np.exp(p[1]))}, t.size, spans=((lo, hi),))
-    if shape == "double":
-        y = [coef[2 * i:2 * i + 2] @ _bump(tt, p[2 * i:2 * i + 2], config.coeff) for i in (0, 1)]
-        # an atom can peak off its t0 (a ring), so its peak orders and times it
-        peaks = [float(tt[int(np.argmax(np.abs(yi)))]) for yi in y]
-        order = (0, 1) if peaks[0] <= peaks[1] else (1, 0)
-        tp = [peaks[i] for i in order]
-        return Feature(candidate, "+".join(_sign_kind(y[i]) for i in order),
-                       0.5 * (tp[0] + tp[1]), tp[1] - tp[0], dchi2, frac,
-                       {"t0_1": float(p[2 * order[0]]), "teff_1": float(np.exp(p[2 * order[0] + 1])),
-                        "t0_2": float(p[2 * order[1]]), "teff_2": float(np.exp(p[2 * order[1] + 1]))},
-                       t.size,
-                       spans=tuple(_half_max(tt, y[i]) for i in order))
-    if shape == "fold":
-        s = +1 if cls["fold"] == "fold_entry" else -1
-        tc, dt = float(p[0]), float(np.exp(p[1]))
-        return Feature(candidate, cls["fold"], tc, dt, dchi2, frac, {"tc": tc, "dt": dt}, t.size,
-                       (_crossing(tc, dt, s, coef[0], 0.0, coef[1]),))
-    t1, t2, dt1, dt2 = (float(x) for x in _pair_times(p))
-    mid = 0.5 * (t1 + t2)
-    between = lambda tk: coef[-2] + coef[-1] * (tk - mid)  # box floor and slope
-    if cls["pair"] == "caustic_entry_exit":  # outside the caustic: the host (0)
-        crossings = (_crossing(t1, dt1, +1, coef[0], 0.0, between(t1)),
-                     _crossing(t2, dt2, -1, coef[1], 0.0, between(t2)))
-    else:  # inside: the outer floor (1 - box); outside: between the crossings
-        crossings = (_crossing(t1, dt1, -1, coef[0], between(t1), coef[2]),
-                     _crossing(t2, dt2, +1, coef[1], between(t2), coef[2]))
-    return Feature(candidate, cls["pair"], mid, t2 - t1, dchi2, frac,
-                   {"t1": t1, "t2": t2, "dt1": dt1, "dt2": dt2}, t.size, crossings)
+        return Feature(candidate, "none", peak, np.nan, dchi2, {}, t.size)
+    best = lambda *names: max(gain[k] for k in names)
+    frac = {k: (float(g / ref) if np.isfinite(g) else np.nan) for k, g in
+            (("bump", gain["bump"]), ("fold", best("fold_entry", "fold_exit")),
+             ("double", gain["double"]), ("pair", best("caustic_entry_exit", "caustic_exit_entry")))}
+    segs = _segments(t, m, w)
+    sharp = _sharpness(t, m, segs)
+    caustic = bool(sharp >= config.sharp_min)
+    ext = _extrema(t, m, segs)
+    if not ext:
+        return Feature(candidate, "complex", peak, np.nan, dchi2, frac, t.size, sharp, caustic)
+    parts = tuple(x[0] for x in ext)
+    main = max(ext, key=lambda x: x[2])[0]
+    return Feature(candidate, "+".join(x.kind for x in parts), main.time, main.timescale,
+                   dchi2, frac, t.size, sharp, caustic, spans=tuple(x[1] for x in ext),
+                   span_kinds=tuple(x.kind for x in parts), parts=parts)
 
 
 def measure_features(
@@ -452,11 +571,11 @@ def measure_features(
             r, w, m = (flux - host_flux)[s], 1.0 / ferr[s], atom_flux[s]
             dchi2 = float(np.sum((r * w) ** 2) - np.sum(((r - m) * w) ** 2))
             t = float(time[s][np.argmax(np.abs(m))]) if s.any() else 0.5 * (c.t_start + c.t_end)
-            out.append(Feature(c, "complex", t, np.nan, dchi2, {}, {}, int(s.sum())))
+            out.append(Feature(c, "complex", t, np.nan, dchi2, {}, int(s.sum())))
             continue
         out.append(_characterize(c, time[s], (flux - host_flux)[s], 1.0 / ferr[s],
                                  atom_flux[s], config))
     return FeatureResult(tuple(out))
 
 
-__all__ = ["Crossing", "Feature", "FeatureConfig", "FeatureResult", "measure_features"]
+__all__ = ["Crossing", "Feature", "FeatureConfig", "FeatureResult", "Part", "measure_features"]

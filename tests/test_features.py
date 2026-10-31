@@ -25,7 +25,7 @@ def _pair(t1, t2, dt, a, floor, inside):
         box = _H(z1) * _H(z2)
         if inside:
             return a * (_G(z1) * _H(z2) + _G(z2) * _H(z1)) + floor * box
-        return a * (_G(-z1) + _G(-z2)) + floor * (1.0 - box) - floor * box
+        return a * (_G(-z1) + _G(-z2)) - floor * box
     return signal
 
 
@@ -36,23 +36,31 @@ def test_bump_and_dip():
     assert dip.kind == "dip" and abs(dip.time - 10.0) < 0.02
 
 
-def test_caustic_crossing_pair_inside_between():
+def test_caustic_pair_inside_between_is_sharp():
     (f,) = _measure(_pair(9.6, 10.4, 0.01, 0.3, 0.5, True), Candidate(9.2, 10.8)).features
-    assert f.kind == "caustic_entry_exit"
-    assert abs(f.params["t1"] - 9.6) < 0.01 and abs(f.params["t2"] - 10.4) < 0.01
-    assert abs(f.time - 10.0) < 0.01 and abs(f.timescale - 0.8) < 0.02
+    assert f.caustic and f.sharpness > 10.0
     assert f.explained["pair"] > f.explained["double"] + 0.05
-    entry, exit_ = f.crossings
-    assert (entry.kind, exit_.kind) == ("entry", "exit")
-    # sharp outside, slow 1/sqrt decay inside: entry is narrow on the left
-    assert entry.hwhm_left < entry.hwhm_right and exit_.hwhm_right < exit_.hwhm_left
-    assert abs(entry.time - 9.6) < 0.03 and abs(exit_.time - 10.4) < 0.03
 
 
-def test_caustic_pair_outside_between():
+def test_caustic_pair_outside_between_is_sharp():
     (f,) = _measure(_pair(9.6, 10.4, 0.01, 0.3, 0.5, False), Candidate(9.2, 10.8)).features
-    assert f.kind == "caustic_exit_entry"
-    assert abs(f.params["t1"] - 9.6) < 0.01 and abs(f.params["t2"] - 10.4) < 0.01
+    assert f.caustic and f.sharpness > 10.0
+
+
+def test_smooth_parts_are_not_sharp():
+    # one smooth part ~1.5, two separate ones ~3: both below sharp_min
+    (g,) = _measure(_gauss(10.0, 0.1, 1.0), Candidate(9.0, 11.0)).features
+    assert not g.caustic and abs(g.sharpness - 1.5) < 0.2
+    two = lambda t: _gauss(9.6, 0.08, 1.0)(t) + _gauss(10.4, 0.08, 1.0)(t)
+    (f,) = _measure(two, Candidate(9.2, 10.8)).features
+    assert not f.caustic and f.sharpness < 3.5
+
+
+def test_a_gap_carries_no_area():
+    from jacscanomaly.features import _sharpness
+    t = np.r_[np.arange(0.0, 1.0, 0.01), np.arange(5.0, 6.0, 0.01)]
+    y = np.exp(-0.5 * ((t - 0.5) / 0.1) ** 2) + np.exp(-0.5 * ((t - 5.5) / 0.1) ** 2)
+    assert _sharpness(t, y, [(0, t.size - 1)]) < 3.5  # not the area of a bridge over the gap
 
 
 def test_weak_window_is_kept_and_not_called_a_caustic():
@@ -65,7 +73,7 @@ def test_two_separate_bumps_are_a_double():
     two = lambda t: _gauss(9.6, 0.08, 1.0)(t) + _gauss(10.4, 0.08, -0.7)(t)
     (f,) = _measure(two, Candidate(9.2, 10.8)).features
     assert f.kind == "bump+dip"
-    assert abs(f.params["t0_1"] - 9.6) < 0.02 and abs(f.params["t0_2"] - 10.4) < 0.02
+    assert abs(f.parts[0].time - 9.6) < 0.02 and abs(f.parts[1].time - 10.4) < 0.02
 
 
 def test_summary_and_no_windows():
@@ -89,3 +97,29 @@ def test_double_spans_cover_each_atom():
     (a1, b1), (a2, b2) = f.spans
     assert abs(a1 - 9.506) < 0.03 and abs(b1 - 9.694) < 0.03
     assert abs(a2 - 10.306) < 0.03 and abs(b2 - 10.494) < 0.03
+    (p1, p2) = f.parts
+    assert (p1.kind, p2.kind) == ("bump", "dip")
+    assert abs(p1.time - 9.6) < 0.01 and abs(p2.time - 10.4) < 0.01
+    assert abs(p1.timescale - 2.355 * 0.08) < 0.03 and abs(p2.timescale - 2.355 * 0.08) < 0.03
+
+
+def test_pair_needs_resolved_crossings():
+    from jacscanomaly.features import Crossing, _crossings_resolved
+    a, b = Crossing("exit", 10.0, 1.0, 1.0, 0.5), Crossing("entry", 13.0, 0.3, 0.3, 0.1)
+    assert _crossings_resolved((a, b))
+    wide = Crossing("exit", 10.0, 2.0, 1.5, 0.5)  # FWHM 3.5 > 3.0 between the peaks
+    assert not _crossings_resolved((wide, b))
+    assert not _crossings_resolved((Crossing("exit", 10.0, float("nan"), 1.0, 0.5), b))
+
+
+def test_rebound_next_to_a_strong_bump_is_not_a_part():
+    one = lambda t: _gauss(10.0, 0.1, 1.0)(t) + _gauss(10.25, 0.08, -0.15)(t)
+    (f,) = _measure(one, Candidate(9.4, 10.8)).features
+    assert f.kind == "bump" and abs(f.time - 10.0) < 0.02
+
+
+def test_part_comparable_to_its_kept_neighbour_is_kept():
+    # bump 0.35, dip -0.55, bump 1.0 (0140): the first bump is half the dip next to it
+    sig = lambda t: _gauss(9.6, 0.05, 0.35)(t) + _gauss(9.85, 0.07, -0.55)(t) + _gauss(10.1, 0.05, 1.0)(t)
+    (f,) = _measure(sig, Candidate(9.2, 10.5)).features
+    assert f.kind == "bump+dip+bump"
