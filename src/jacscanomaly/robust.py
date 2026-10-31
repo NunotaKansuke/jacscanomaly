@@ -132,9 +132,12 @@ class ModelFit:
         a = self.atom_fit
         n = int(self.fit.time.size)
         feats = self.features.features if self.features is not None else ()
+        # the fit's own convention (rho, not the seed's log rho); sigma follows
+        params = np.asarray(self.fit.params, float).reshape(-1)[:a.params.size]
+        sigma = np.asarray(self.sigma, float) * np.where(params != a.params, params, 1.0)
         return {
             "param_names": list(self.fit.param_names)[:a.params.size],
-            "params": a.params.tolist(), "sigma": np.asarray(self.sigma, float).tolist(),
+            "params": params.tolist(), "sigma": sigma.tolist(),
             "fs": float(a.fs), "fb": float(a.fb),
             "J": self.J, "start": self.start, "J_starts": dict(self.J_starts),
             "n_points": n, "n_free": int(a.params.size) + 2 + 4 * len(a.atoms),

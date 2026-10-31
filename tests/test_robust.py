@@ -107,6 +107,8 @@ def test_event_json_records_every_model_and_the_anomaly(tmp_path):
     assert len(m["params"]) == len(m["param_names"]) == len(m["sigma"])
     assert sc["models"][r.selected]["chi2"] - m["chi2"] == m["dchi2_atoms"] > 100
     assert m["n_masked"] > 0
+    f_ = at["models"]["fspl"]  # rho itself, not the fit's log rho
+    assert f_["param_names"][3] == "rho" and f_["params"][3] == np.exp(r.models["fspl"].params[3])
     (f,) = m["features"]
     assert f["kind"] == "bump" and abs(f["time"] + 8.0) < 0.05
     assert abs(f["parts"][0]["fwhm"] - 2.3548 * 0.1) < 0.05
