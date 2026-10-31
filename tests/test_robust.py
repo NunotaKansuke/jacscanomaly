@@ -96,13 +96,17 @@ def test_event_json_records_every_model_and_the_anomaly(tmp_path):
 
     rec = write_event_json(tmp_path / "e.json", r, event_id=7)
     assert json.load(open(tmp_path / "e.json")) == rec  # strict JSON: no NaN
-    assert rec["event_id"] == 7 and rec["selected"] == r.selected
-    assert rec["anomaly"]["detected"] and rec["anomaly"]["dchi2"] > 100
-    assert rec["anomaly"]["scan_score"] is None  # no scan given
-    assert [k for k, m in rec["models"].items() if m["selected"]] == [r.selected]
-    m = rec["models"][r.selected]
+    assert rec["event_id"] == 7
+    sc, at = rec["scan"], rec["atoms"]
+    assert sc["anomaly"]["detected"] is None and sc["candidates"] == []  # no scan given
+    assert set(sc["models"]) == {"pspl", "fspl"}
+    assert [k for k, m in sc["models"].items() if m["selected"]] == [sc["selected"]]
+    assert at["selected"] == r.selected
+    assert [k for k, m in at["models"].items() if m["selected"]] == [r.selected]
+    m = at["models"][r.selected]
     assert len(m["params"]) == len(m["param_names"]) == len(m["sigma"])
-    assert m["chi2_base"] > m["chi2"] and m["n_masked"] > 0
+    assert sc["models"][r.selected]["chi2"] - m["chi2"] == m["dchi2_atoms"] > 100
+    assert m["n_masked"] > 0
     (f,) = m["features"]
     assert f["kind"] == "bump" and abs(f["time"] + 8.0) < 0.05
     assert abs(f["parts"][0]["fwhm"] - 2.3548 * 0.1) < 0.05

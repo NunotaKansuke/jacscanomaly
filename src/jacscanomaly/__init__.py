@@ -32,7 +32,7 @@ from .candidate import Candidate, candidates_from_scan
 from .relock import HostRelock, relock_host
 from .robust import (
     Atom, AtomConfig, AtomFit, ModelFit, RobustFit, atom_basis, atom_windows, fit_atoms, robust_fit,
-    write_event_json,
+    scan_anomaly, write_event_json,
 )
 from .features import (
     Crossing,
@@ -123,6 +123,7 @@ __all__ = [
     "atom_windows",
     "fit_atoms",
     "robust_fit",
+    "scan_anomaly",
     "write_event_json",
     "Crossing",
     "Feature",

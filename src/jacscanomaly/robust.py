@@ -139,10 +139,9 @@ class ModelFit:
             "J": self.J, "start": self.start, "J_starts": dict(self.J_starts),
             "n_points": n, "n_free": int(a.params.size) + 2 + 4 * len(a.atoms),
             "chi2": float(a.chi2),
-            "chi2_base": float(self.base.chi2) if self.base is not None else np.nan,
             "chi2_masked": float(self.fit.chi2),
             "n_masked": int(np.count_nonzero(self.fit.mask)) if self.fit.mask is not None else 0,
-            "dchi2": self.dchi2,
+            "dchi2_atoms": self.dchi2,  # chi2 of the scan stage's fit (base) - chi2
             "atoms": [{"t0": x.t0, "teff": x.teff, "a": x.a, "b": x.b} for x in a.atoms],
             "features": [{**{k: v for k, v in f.summary_dict().items() if k != "parts"},
                           "parts": [{"kind": q.kind, "time": q.time, "fwhm": q.timescale}
@@ -163,28 +162,52 @@ class RobustFit:
     def best(self) -> ModelFit:
         return self.models[self.selected]
 
-    def to_dict(self, event_id=None, scan=None) -> dict:
-        """One record of the event; ``scan`` (the Finder's ``AnomalyResult``) adds its best candidate.
+    def to_dict(self, event_id=None, scan=None, score_threshold: float = 10.0) -> dict:
+        """One record of the event, in its two stages.
 
-        ``anomaly.detected``: the selected model keeps an atom (it paid ``k_atom ln n``).
+        ``scan``: the Finder's ``AnomalyResult`` (anomaly = its best candidate
+        scores ``>= score_threshold``) and the plain fit of every model
+        (``base``: the PSPL fit and the FSPL / parallax fallbacks), the one of
+        lowest BIC selected. ``atoms``: the host + atoms fit of every model,
+        the one of lowest ``J`` selected, with its features.
         """
-        best = getattr(scan, "best", None)
+        bases = {k: m.base for k, m in self.models.items() if m.base is not None}
+        bic = {k: _bic(b) for k, b in bases.items()}
+        sel = min(bic, key=bic.get) if bic else None
         return {
             "event_id": event_id,
-            "anomaly": {
-                "detected": bool(self.best.atoms),
-                "dchi2": self.best.dchi2,
-                "scan_score": float(best.score) if best is not None else np.nan,
-                "scan_dchi2": float(best.dchi2) if best is not None else np.nan,
-                "scan_t0": float(best.t0) if best is not None else np.nan,
-                "scan_teff": float(best.teff) if best is not None else np.nan,
+            "scan": {
+                "anomaly": scan_anomaly(scan, score_threshold),
+                "candidates": [{"t0": c.t0, "teff": c.teff, "dchi2": c.dchi2, "score": c.score}
+                               for c in getattr(scan, "scored_candidates", ())
+                               if c.score >= score_threshold],
+                "selected": sel,
+                "models": {k: {"selected": k == sel, **_fit_dict(b), "bic": bic[k]}
+                           for k, b in bases.items()},
             },
-            "selected": self.selected,
-            "relocked": bool(self.relock.relocked),
-            "models": {k: {"selected": k == self.selected, **m.to_dict()}
-                       for k, m in self.models.items()},
+            "atoms": {
+                "selected": self.selected,
+                "relocked": bool(self.relock.relocked),
+                "models": {k: {"selected": k == self.selected, **m.to_dict()}
+                           for k, m in self.models.items()},
+            },
             "errors": dict(self.errors),
         }
+
+
+def _fit_dict(fit: SingleLensFitResult) -> dict:
+    """A plain single-lens fit: parameters, fluxes, chi2 on its kept samples."""
+    params = np.asarray(fit.params, float).reshape(-1)
+    return {"param_names": list(fit.param_names)[:params.size], "params": params.tolist(),
+            "fs": float(fit.fs), "fb": float(fit.fb), "chi2": float(fit.chi2),
+            "n_points": int(fit.time.size),
+            "n_masked": int(np.count_nonzero(fit.mask)) if fit.mask is not None else 0}
+
+
+def _bic(fit: SingleLensFitResult) -> float:
+    """``chi2 + (n_params + 2) ln n`` on the kept samples (``fs, fb`` counted)."""
+    n = int(fit.time.size) - (int(np.count_nonzero(fit.mask)) if fit.mask is not None else 0)
+    return float(fit.chi2) + (np.asarray(fit.params).size + 2) * np.log(n)
 
 
 def atom_basis(time, t0: float, teff: float, coeff: float = 3.0) -> tuple[np.ndarray, np.ndarray]:
@@ -446,6 +469,16 @@ def robust_fit(
     return RobustFit(models=models, selected=selected, relock=relock, errors=errors)
 
 
+def scan_anomaly(scan, score_threshold: float = 10.0) -> dict:
+    """The scan's anomaly decision: its best candidate scores ``>= score_threshold``."""
+    best = getattr(scan, "best", None)
+    get = lambda k: float(getattr(best, k)) if best is not None else np.nan
+    return {"detected": bool(best is not None and best.score >= score_threshold) if scan is not None
+            else None,
+            "score": get("score"), "score_threshold": float(score_threshold),
+            "dchi2": get("dchi2"), "t0": get("t0"), "teff": get("teff")}
+
+
 def _json_safe(x):
     if isinstance(x, dict):
         return {str(k): _json_safe(v) for k, v in x.items()}
@@ -461,15 +494,16 @@ def _json_safe(x):
     return x
 
 
-def write_event_json(path, fits: RobustFit, event_id=None, scan=None) -> dict:
-    """Write ``fits.to_dict(event_id, scan)`` to ``path`` (non-finite numbers as ``null``)."""
+def write_event_json(path, fits: RobustFit, event_id=None, scan=None,
+                     score_threshold: float = 10.0) -> dict:
+    """Write ``fits.to_dict(...)`` to ``path`` (non-finite numbers as ``null``)."""
     import json
 
-    record = _json_safe(fits.to_dict(event_id=event_id, scan=scan))
+    record = _json_safe(fits.to_dict(event_id=event_id, scan=scan, score_threshold=score_threshold))
     with open(path, "w") as fh:
         json.dump(record, fh, indent=1)
     return record
 
 
 __all__ = ["Atom", "AtomConfig", "AtomFit", "ModelFit", "RobustFit", "atom_basis",
-           "atom_windows", "fit_atoms", "robust_fit", "write_event_json"]
+           "atom_windows", "fit_atoms", "robust_fit", "scan_anomaly", "write_event_json"]
