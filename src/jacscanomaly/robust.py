@@ -122,6 +122,33 @@ class ModelFit:
     def atoms(self) -> tuple[Atom, ...]:
         return self.atom_fit.atoms
 
+    @property
+    def dchi2(self) -> float:
+        """``chi2(base) - chi2(host + atoms)``: what the atoms explain (``nan`` without ``base``)."""
+        return float(self.base.chi2) - self.atom_fit.chi2 if self.base is not None else np.nan
+
+    def to_dict(self) -> dict:
+        """JSON-ready record (``nan`` stays ``nan``; :func:`write_event_json` writes ``null``)."""
+        a = self.atom_fit
+        n = int(self.fit.time.size)
+        feats = self.features.features if self.features is not None else ()
+        return {
+            "param_names": list(self.fit.param_names)[:a.params.size],
+            "params": a.params.tolist(), "sigma": np.asarray(self.sigma, float).tolist(),
+            "fs": float(a.fs), "fb": float(a.fb),
+            "J": self.J, "start": self.start, "J_starts": dict(self.J_starts),
+            "n_points": n, "n_free": int(a.params.size) + 2 + 4 * len(a.atoms),
+            "chi2": float(a.chi2),
+            "chi2_base": float(self.base.chi2) if self.base is not None else np.nan,
+            "chi2_masked": float(self.fit.chi2),
+            "n_masked": int(np.count_nonzero(self.fit.mask)) if self.fit.mask is not None else 0,
+            "dchi2": self.dchi2,
+            "atoms": [{"t0": x.t0, "teff": x.teff, "a": x.a, "b": x.b} for x in a.atoms],
+            "features": [{**{k: v for k, v in f.summary_dict().items() if k != "parts"},
+                          "parts": [{"kind": q.kind, "time": q.time, "fwhm": q.timescale}
+                                    for q in f.parts]} for f in feats],
+        }
+
 
 @dataclass(frozen=True)
 class RobustFit:
@@ -135,6 +162,29 @@ class RobustFit:
     @property
     def best(self) -> ModelFit:
         return self.models[self.selected]
+
+    def to_dict(self, event_id=None, scan=None) -> dict:
+        """One record of the event; ``scan`` (the Finder's ``AnomalyResult``) adds its best candidate.
+
+        ``anomaly.detected``: the selected model keeps an atom (it paid ``k_atom ln n``).
+        """
+        best = getattr(scan, "best", None)
+        return {
+            "event_id": event_id,
+            "anomaly": {
+                "detected": bool(self.best.atoms),
+                "dchi2": self.best.dchi2,
+                "scan_score": float(best.score) if best is not None else np.nan,
+                "scan_dchi2": float(best.dchi2) if best is not None else np.nan,
+                "scan_t0": float(best.t0) if best is not None else np.nan,
+                "scan_teff": float(best.teff) if best is not None else np.nan,
+            },
+            "selected": self.selected,
+            "relocked": bool(self.relock.relocked),
+            "models": {k: {"selected": k == self.selected, **m.to_dict()}
+                       for k, m in self.models.items()},
+            "errors": dict(self.errors),
+        }
 
 
 def atom_basis(time, t0: float, teff: float, coeff: float = 3.0) -> tuple[np.ndarray, np.ndarray]:
@@ -396,5 +446,30 @@ def robust_fit(
     return RobustFit(models=models, selected=selected, relock=relock, errors=errors)
 
 
+def _json_safe(x):
+    if isinstance(x, dict):
+        return {str(k): _json_safe(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple, np.ndarray)):
+        return [_json_safe(v) for v in x]
+    if isinstance(x, (bool, np.bool_)):
+        return bool(x)
+    if isinstance(x, (int, np.integer)):
+        return int(x)
+    if isinstance(x, (float, np.floating)) or getattr(x, "shape", None) == ():
+        x = float(x)
+        return x if np.isfinite(x) else None
+    return x
+
+
+def write_event_json(path, fits: RobustFit, event_id=None, scan=None) -> dict:
+    """Write ``fits.to_dict(event_id, scan)`` to ``path`` (non-finite numbers as ``null``)."""
+    import json
+
+    record = _json_safe(fits.to_dict(event_id=event_id, scan=scan))
+    with open(path, "w") as fh:
+        json.dump(record, fh, indent=1)
+    return record
+
+
 __all__ = ["Atom", "AtomConfig", "AtomFit", "ModelFit", "RobustFit", "atom_basis",
-           "atom_windows", "fit_atoms", "robust_fit"]
+           "atom_windows", "fit_atoms", "robust_fit", "write_event_json"]

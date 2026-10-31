@@ -2,7 +2,7 @@ import numpy as np
 
 from jacscanomaly import (
     AtomConfig, FSPLFitter, Finder, FinderConfig, PSPLFitter, atom_basis, atom_windows, fit_atoms,
-    robust_fit,
+    robust_fit, write_event_json,
 )
 from jacscanomaly.fitters import _pspl_magnification
 from jacscanomaly.robust import Atom
@@ -85,6 +85,27 @@ def test_robust_fit_selects_by_J_and_nests_the_extended_model():
     assert best.atoms and len(best.windows) == 1
     assert best.fit.mask is not None and best.fit.mask[np.argmin(np.abs(time + 8.0))]
     assert np.all(np.isfinite(best.sigma))
+
+
+def test_event_json_records_every_model_and_the_anomaly(tmp_path):
+    import json
+
+    time, flux, ferr = _event([(-8.0, 0.3)], n=3000)
+    r = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, _finder(), time, flux, ferr,
+                   [0.0, 20.0, 0.3])
+
+    rec = write_event_json(tmp_path / "e.json", r, event_id=7)
+    assert json.load(open(tmp_path / "e.json")) == rec  # strict JSON: no NaN
+    assert rec["event_id"] == 7 and rec["selected"] == r.selected
+    assert rec["anomaly"]["detected"] and rec["anomaly"]["dchi2"] > 100
+    assert rec["anomaly"]["scan_score"] is None  # no scan given
+    assert [k for k, m in rec["models"].items() if m["selected"]] == [r.selected]
+    m = rec["models"][r.selected]
+    assert len(m["params"]) == len(m["param_names"]) == len(m["sigma"])
+    assert m["chi2_base"] > m["chi2"] and m["n_masked"] > 0
+    (f,) = m["features"]
+    assert f["kind"] == "bump" and abs(f["time"] + 8.0) < 0.05
+    assert abs(f["parts"][0]["fwhm"] - 2.3548 * 0.1) < 0.05
 
 
 def test_the_cap_grows_with_u_in_the_wing():
