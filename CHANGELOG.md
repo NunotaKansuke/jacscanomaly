@@ -27,6 +27,12 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 - Keep `AnomalyResult.best` as the maximum-`dchi2` quality-accepted candidate
   for backward compatibility.
 
+### Fixed
+- FSPL and parallax fits given `pspl_params` also start from the PSPL
+  solution they nest (`nested_seed`). The duration seeds put `rho` above
+  `u0`, and LM could stop at the limb-grazing minimum `rho ~ u0`, ending
+  worse than PSPL.
+
 ---
 
 ## [0.5.3] - 2026-08-03

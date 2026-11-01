@@ -705,8 +705,14 @@ class FSPLFitter:
         pspl_params=None,
         observed_scale=None,
     ) -> tuple[np.ndarray, ...]:
-        """Shared multistart set (duration-grid anchors + degeneracy family)."""
-        return automatic_seeds(
+        """Shared multistart set (duration-grid anchors + degeneracy family).
+
+        With ``pspl_params`` the PSPL solution itself (:meth:`nested_seed`) is
+        one more start: the duration seeds put ``rho`` above ``u0``, from where
+        LM can stop at the limb-grazing minimum ``rho ~ u0`` and end worse than
+        the PSPL it nests.
+        """
+        seeds = automatic_seeds(
             time_np,
             flux_np,
             ferr_np,
@@ -717,6 +723,9 @@ class FSPLFitter:
             magnification_reltol=self.magnification_reltol,
             espl_table_path=self.espl_table_path,
         )
+        if pspl_params is None:
+            return seeds
+        return (*seeds, self.nested_seed(pspl_params))
 
     def fit(
         self,
