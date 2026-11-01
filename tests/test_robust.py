@@ -79,8 +79,8 @@ def test_robust_fit_selects_by_J_and_nests_the_extended_model():
     r = robust_fit(fitters, _finder(), time, flux, ferr, [0.0, 20.0, 0.3])
 
     assert set(r.models) == {"pspl", "fspl"} and not r.relock.relocked
-    assert set(r.models["fspl"].J_starts) <= {"nested", "base"}
-    assert r.selected == min(r.models, key=lambda k: r.models[k].J)
+    assert set(r.models["fspl"].J_starts) <= {"nested", "base", "fixed"}
+    assert r.selected == min(r.models, key=lambda k: r.models[k].rank)
     best = r.best
     assert best.atoms and len(best.windows) == 1
     assert best.fit.mask is not None and best.fit.mask[np.argmin(np.abs(time + 8.0))]
@@ -100,3 +100,18 @@ def test_the_cap_grows_with_u_in_the_wing():
 
     assert any(abs(a.t0 + 26.0) < 1.0 and a.teff > 0.13 * 20.0 for a in r.atoms)
 
+
+
+def test_the_plain_host_is_kept_unless_a_moved_one_wins_by_the_margin():
+    time, flux, ferr = _event([(-8.0, 0.3)], n=3000)
+    finder, fitters = _finder(), {"pspl": PSPLFitter()}
+
+    fixed = fit_atoms(PSPLFitter(), finder, time, flux, ferr, [0.1, 19.0, 0.32], fix_host=True)
+    assert fixed.atoms and np.allclose(fixed.params, [0.1, 19.0, 0.32])
+
+    for margin in (0.0, 1e9):
+        m = robust_fit(fitters, finder, time, flux, ferr, [0.0, 20.0, 0.3],
+                       config=AtomConfig(free_host_margin=margin)).best
+        J = m.J_starts
+        assert m.start == ("fixed" if margin else min(J, key=J.get))
+        assert m.rank == m.J - margin * (m.start == "fixed")

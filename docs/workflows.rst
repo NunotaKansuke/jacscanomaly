@@ -115,7 +115,7 @@ result.
    scan = finder.run(time, flux, ferr)
    r = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, finder,
                   time, flux, ferr, scan.fit.params)
-   best = r.best                     # lowest J over models and starts
+   best = r.best                     # lowest J (rank) over models and starts
    best.params, best.sigma, best.atoms, best.windows
    print(best.features.summary_text() if best.features else "no anomaly")
 
@@ -129,9 +129,12 @@ result.
    lowers ``chi2`` by more than ``4 ln n`` (BIC), then pruned with the same
    price. Starts: the scan's PSPL (moved off a short spike by
    :func:`jacscanomaly.relock_host`), the PSPL result nested into each
-   extended model, and each model's plain fit. Models and starts are compared
-   by ``J = chi2 + (n_host + 2 + 4 n_atoms) ln n``. ``fit_atoms`` is the
-   single-start step; ``AtomConfig`` holds the constants.
+   extended model, each model's plain fit, and that plain fit held fixed
+   (``"fixed"``, atoms only). Models and starts are compared by
+   ``J = chi2 + (n_host + 2 + 4 n_atoms) ln n``; a fit that moved the host
+   must beat ``"fixed"`` by ``AtomConfig.free_host_margin`` (150), a decision
+   rule against a moved host plus one broad atom winning a small ``chi2``.
+   ``fit_atoms`` is the single-start step; ``AtomConfig`` holds the constants.
 
 ``relock_host(fitter, fit)``
    Tests whether ``fit`` sits on a short anomaly instead of its host event

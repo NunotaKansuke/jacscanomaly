@@ -34,6 +34,11 @@ Assumptions
 * The start host is held fixed (``fs, fb`` only) until the first atom is in,
   so a relocked host is not pulled back onto the spike it was moved off; with
   no atom at the end the host is refit.
+* The plain host is kept unless a moved one wins by
+  ``free_host_margin`` in ``J``: the ``h`` template's wings trade off against
+  the host shape, and a small ``chi2`` gain from moving the host is within
+  model mismatch and correlated noise. The margin is a decision rule, not
+  part of the likelihood (set by eye on 23 events).
 """
 
 from __future__ import annotations
@@ -55,13 +60,18 @@ from .singlelens_fit import SingleLensFitResult
 
 @dataclass(frozen=True)
 class AtomConfig:
-    """Atom support (``coeff`` in units of ``teff``), acceptance and price."""
+    """Atom support (``coeff`` in units of ``teff``), acceptance and price.
+
+    ``free_host_margin``: the ``J`` by which a fit that moved the host must beat
+    the plain host with atoms (start ``"fixed"``) to be selected.
+    """
 
     coeff: float = 3.0
     min_score: float = 10.0
     max_teff_fraction: float = 0.25
     max_atoms: int = 15
     k_atom: float = 4.0
+    free_host_margin: float = 150.0
 
 
 @dataclass(frozen=True)
@@ -100,7 +110,9 @@ class ModelFit:
     ``windows`` (the merged atom supports). ``features`` characterize every
     window against the host + atoms of the atom fit (its own ``fs, fb``).
     ``sigma`` are the 1-sigma host parameter errors with fluxes and atom
-    amplitudes profiled. ``base`` is the plain fit without atoms.
+    amplitudes profiled. ``base`` is the plain fit without atoms. ``rank`` is
+    what the selection compares: ``J``, less ``free_host_margin`` for the start
+    ``"fixed"``.
     """
 
     name: str
@@ -113,6 +125,7 @@ class ModelFit:
     fit: SingleLensFitResult
     features: Optional[FeatureResult]
     base: Optional[SingleLensFitResult]
+    rank: float = np.nan
 
     @property
     def params(self) -> np.ndarray:
@@ -219,6 +232,7 @@ def fit_atoms(
     *,
     anomaly: Optional[np.ndarray] = None,
     config: AtomConfig = AtomConfig(),
+    fix_host: bool = False,
     _host: Optional[_Host] = None,
 ) -> AtomFit:
     """Grow and prune atoms on the host model of ``fitter`` from the start ``p0``.
@@ -227,6 +241,7 @@ def fit_atoms(
     atoms minus ``fs (A_host - A_pspl)``, the PSPL-shaped remainder).
     ``anomaly`` (``True`` = anomaly) exempts atoms centred there from the
     ``tE`` cap; pass :attr:`HostRelock.mask` of a relocked host.
+    ``fix_host``: the host stays at ``p0`` (``fs, fb`` and the atoms linear only).
     """
     time, flux, ferr = (np.asarray(x, dtype=float) for x in (time, flux, ferr))
     host = _host or _Host(fitter, time)
@@ -247,6 +262,12 @@ def fit_atoms(
         i = min(int(np.searchsorted(time, float(candidate.t0))), time.size - 1)
         return bool(anomaly[i])
 
+    def refit(p, atoms):
+        if not fix_host:
+            return _fit_host(host, flux, ferr, p, atoms, config.coeff)
+        coef, z = _linear(host, flux, ferr, p, atoms, config.coeff)
+        return p, coef, float(z @ z)
+
     atoms, log = [], []
     p = host.clip(p0)
     coef, z = _linear(host, flux, ferr, p, atoms, config.coeff)
@@ -260,14 +281,14 @@ def fit_atoms(
             break
         best = max(ok, key=lambda c: float(c.dchi2))
         trial = atoms + [(float(best.t0), float(best.teff))]
-        p1, coef1, chi2_1 = _fit_host(host, flux, ferr, p, trial, config.coeff)
+        p1, coef1, chi2_1 = refit(p, trial)
         if chi2 - chi2_1 <= price:
             log.append(("stop", float(best.t0), float(best.teff), chi2 - chi2_1))
             break
         atoms, p, coef, chi2 = trial, p1, coef1, chi2_1
         log.append(("add", float(best.t0), float(best.teff), float(best.score), chi2))
     while atoms:
-        trials = [_fit_host(host, flux, ferr, p, atoms[:i] + atoms[i + 1:], config.coeff)
+        trials = [refit(p, atoms[:i] + atoms[i + 1:])
                   for i in range(len(atoms))]
         i = int(np.argmin([r[2] for r in trials]))
         if trials[i][2] - chi2 >= price:
@@ -276,7 +297,7 @@ def fit_atoms(
         atoms = atoms[:i] + atoms[i + 1:]
         p, coef, chi2 = trials[i]
     if not atoms:
-        p, coef, chi2 = _fit_host(host, flux, ferr, p, atoms, config.coeff)
+        p, coef, chi2 = refit(p, atoms)
     return AtomFit(
         params=np.asarray(p, dtype=float), fs=float(coef[0]), fb=float(coef[1]),
         atoms=tuple(Atom(t0, teff, float(coef[2 + 2 * i]), float(coef[3 + 2 * i]))
@@ -332,8 +353,10 @@ def robust_fit(
       relocked host): the plain fit sits on the segment the relock rejected.
       A relocked host still peaking inside the segment (e.g. a high-
       magnification peak) keeps the plain fit, which needs that peak.
+    * every model: ``fixed``, the host of ``base`` held fixed.
 
-    The start with the lowest ``J`` is kept.
+    The start with the lowest ``J`` is kept, ``fixed`` counted at
+    ``J - config.free_host_margin``; the models are compared the same way.
     """
     time, flux, ferr = (np.asarray(x, dtype=float) for x in (time, flux, ferr))
     names = list(fitters)
@@ -363,19 +386,20 @@ def robust_fit(
         else:  # no PSPL result to nest
             starts = {}
         if base is not None:
-            starts["base"] = fitter.seed_from_fit(base)
+            starts["base"] = starts["fixed"] = fitter.seed_from_fit(base)
         runs = {}
         for key, p0 in starts.items():
             try:
                 runs[key] = fit_atoms(fitter, finder, time, flux, ferr, p0, anomaly=anomaly,
-                                      config=config, _host=host)
+                                      config=config, fix_host=key == "fixed", _host=host)
             except Exception as exc:  # one failed start leaves the others
                 errors[f"{name}/{key}"] = repr(exc)
         if not runs:
             continue
         J = {key: r.chi2 + (r.params.size + 2 + config.k_atom * len(r.atoms)) * np.log(n)
              for key, r in runs.items()}
-        start = min(J, key=J.get)
+        rank = {k: v - config.free_host_margin * (k == "fixed") for k, v in J.items()}
+        start = min(rank, key=rank.get)
         r = runs[start]
         if name == names[0]:
             pspl_best = r.params[:3]
@@ -386,6 +410,7 @@ def robust_fit(
         fit = fitter.evaluate_fixed(time, flux, ferr, r.params, mask=inside if inside.any() else None)
         models[name] = ModelFit(
             name=name, start=start, atom_fit=r, J=float(J[start]),
+            rank=float(rank[start]),
             J_starts={k: float(v) for k, v in J.items()},
             sigma=_sigma(host, flux, ferr, r.params, [(a.t0, a.teff) for a in r.atoms], config.coeff),
             windows=windows, fit=fit,
@@ -397,7 +422,7 @@ def robust_fit(
             base=base)
     if not models:
         raise RuntimeError(f"no host model could be fitted: {errors}")
-    selected = min(models, key=lambda k: models[k].J)
+    selected = min(models, key=lambda k: models[k].rank)
     return RobustFit(models=models, selected=selected, relock=relock, errors=errors)
 
 

@@ -2,7 +2,7 @@ import json
 
 import numpy as np
 
-from jacscanomaly import EventResult, FSPLFitter, LightCurve, PSPLFitter, robust_fit, write_results
+from jacscanomaly import AtomConfig, EventResult, FSPLFitter, LightCurve, PSPLFitter, robust_fit, write_results
 from test_robust import _event, _finder
 
 
@@ -16,7 +16,7 @@ def test_results_record_the_scan_and_both_stages(tmp_path):
     lc = LightCurve(*_event([(-8.0, 0.3)], n=3000), id="2_675_129")
     scan = finder.run(lc.time, lc.flux, lc.ferr, x0=p0, verbose=False)
     fits = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, finder,
-                      lc.time, lc.flux, lc.ferr, p0)
+                      lc.time, lc.flux, lc.ferr, p0, config=AtomConfig(free_host_margin=0.0))
     quiet = LightCurve(*_event([], n=3000, seed=8), id="quiet")
     res = [EventResult(lc, scan, fits),
            EventResult(quiet, finder.run(quiet.time, quiet.flux, quiet.ferr, x0=p0, verbose=False))]
