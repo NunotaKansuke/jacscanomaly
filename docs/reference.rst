@@ -45,17 +45,33 @@ See :ref:`post-fit-components` for how they compose.
    :no-index:
 
 .. autofunction:: jacscanomaly.candidates_from_scan
+   :no-index:
 
 .. autofunction:: jacscanomaly.relock_host
+   :no-index:
 
 .. autofunction:: jacscanomaly.robust_fit
+   :no-index:
 
 .. autofunction:: jacscanomaly.fit_atoms
+   :no-index:
 
 .. autoclass:: jacscanomaly.AtomConfig
    :no-index:
 
 .. autoclass:: jacscanomaly.RobustFit
+   :no-index:
+
+.. autoclass:: jacscanomaly.ModelFit
+   :no-index:
+
+.. autoclass:: jacscanomaly.LightCurve
+   :no-index:
+
+.. autoclass:: jacscanomaly.EventResult
+   :no-index:
+
+.. autofunction:: jacscanomaly.write_results
    :no-index:
 
 FFT initialization API
@@ -76,6 +92,7 @@ Feature measurement API
 -----------------------
 
 .. autofunction:: jacscanomaly.measure_features
+   :no-index:
 
 .. autoclass:: jacscanomaly.FeatureConfig
    :no-index:
@@ -90,4 +107,4 @@ Feature measurement API
 
 .. automethod:: jacscanomaly.FeatureResult.feature_dicts
 
-.. automethod:: jacscanomaly.FeatureResult.summary_table
+.. automethod:: jacscanomaly.FeatureResult.summary_text

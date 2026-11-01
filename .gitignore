@@ -19,3 +19,7 @@ htmlcov/
 
 # local test tools
 test_tool/
+
+# personal notes and scratch plots
+.note/
+plots/

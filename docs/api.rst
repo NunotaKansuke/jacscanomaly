@@ -21,6 +21,10 @@ Main workflow
    jacscanomaly.fit_atoms
    jacscanomaly.AtomConfig
    jacscanomaly.RobustFit
+   jacscanomaly.ModelFit
+   jacscanomaly.LightCurve
+   jacscanomaly.EventResult
+   jacscanomaly.write_results
    jacscanomaly.measure_features
    jacscanomaly.FeatureConfig
    jacscanomaly.Feature
@@ -97,5 +101,6 @@ Module reference
    jacscanomaly.candidate
    jacscanomaly.relock
    jacscanomaly.robust
+   jacscanomaly.event
    jacscanomaly.features
    jacscanomaly.plot

@@ -24,8 +24,12 @@ Workflow map
 
 ``robust_fit`` / ``measure_features``
    Post-fit components: fit the host jointly with the anomalies, so they do
-   not pull it, and classify the residual into bumps and dips; see
-   :ref:`post-fit-components`.
+   not pull it, and describe each anomaly (bump / dip, caustic, time, FWHM);
+   see :ref:`post-fit-components`.
+
+``LightCurve`` / ``EventResult``
+   Run the stages above on one event and get one JSON record of it; see
+   :ref:`event-records`.
 
 Standard template scan
 ----------------------
@@ -139,10 +143,53 @@ result.
    ``model_flux`` and ``residual`` cover all points. ``evaluate_fixed`` and
    ``fit_fixed_model`` take the same argument.
 
-``measure_features(fit, candidates)``
-   Classifies the residual inside the candidate windows into ``bump``
-   and ``dip`` features; see :doc:`planet_features`. ``robust_fit`` measures
-   them on the host with ``fs``, ``fb`` from outside the atom windows.
+``measure_features(time, flux, ferr, host_flux, atom_flux, windows)``
+   Describes each window of a host + atoms fit (kind, parts, caustic,
+   ``dchi2``); see :doc:`planet_features`. ``robust_fit`` runs it for every
+   model.
+
+.. _event-records:
+
+One record per event
+--------------------
+
+The pipeline runs the stages in order on a :class:`jacscanomaly.LightCurve`
+and collects them in an :class:`jacscanomaly.EventResult`. The anomaly is the
+scan's decision (best candidate ``score >= score_threshold``, 10 by default);
+the robust fit describes it and is run only then.
+
+.. code-block:: python
+
+   from jacscanomaly import EventResult, LightCurve, write_results
+
+   lc = LightCurve(time, flux, ferr, id="2_675_129")
+   scan = finder.run(lc.time, lc.flux, lc.ferr, x0=p0)
+   res = EventResult(lc, scan)
+   if res.detected:
+       fits = robust_fit(fitters, finder, lc.time, lc.flux, lc.ferr, scan.fit.params)
+       res = EventResult(lc, scan, fits)
+   write_results("results.json", [res])     # {id: record}, many events in one file
+
+``EventResult.to_dict()``:
+
+.. code-block:: text
+
+   {"anomaly": {"detected", "score", "t0", "teff", "dchi2"},
+    "best_model": {"without_atoms": "pspl", "with_atoms": "pspl" | null},
+    "n_points": 40540,
+    "models": {"pspl": {"param_names": ["t0", "tE", "u0"],
+                        "without_atoms": {"params": [...], "chi2": ...},
+                        "with_atoms": {"params": [...], "chi2": ...,
+                                       "features": [{"kind", "caustic", "t_center",
+                                                     "fwhm", "dchi2"}]}},
+               "fspl": {...}}}
+
+``without_atoms`` is each model's plain fit (no anomaly: the scan's PSPL fit
+only), the best of lowest BIC ``chi2 + (n_params + 2) ln n``; ``with_atoms``
+is the host + atoms fit, the best as ``robust_fit`` selects it. Parameters are
+in the fit's convention (``rho``, not ``log rho``). ``write_results`` writes
+``nan`` as ``null`` and also takes an ``{id: record}`` mapping (records read
+back, to merge per-event files).
 
 Physical routing and observed time scale
 ----------------------------------------

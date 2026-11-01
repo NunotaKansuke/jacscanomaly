@@ -8,6 +8,18 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ## Unreleased
 
+### Added
+- `robust_fit`: the host fitted jointly with the anomalies ("atoms", the
+  scan's templates), so they do not pull it; PSPL, FSPL and parallax hosts,
+  compared by a BIC (`J`).
+- `measure_features`: each anomaly window described by the extrema of the
+  atoms model (bump / dip parts, time, FWHM), the fraction explained by named
+  shape families, and a caustic flag from the edge sharpness.
+- `relock_host`: moves a host fit off a short anomaly it sits on.
+- `LightCurve`, `EventResult`, `write_results`: one JSON record per event
+  (scan decision, best model without and with atoms, every model's
+  parameters, chi2 and features), events without an anomaly included.
+
 ### Changed
 - Score every extracted anomaly cluster against an all-season,
   comparable-timescale background and expose the results through

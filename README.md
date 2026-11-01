@@ -18,6 +18,10 @@ single-lens fitting API.
 * **Unified fitters** for PSPL, FSPL, and their annual/space-parallax forms
 * **Compiled model evaluation** for FSPL magnification and parallax trajectories
 * **JAX model components** for anomaly grids and higher-order diagnostics
+* **Host fit the anomalies do not pull**: host + scan-template "atoms",
+  with each anomaly described as bump / dip / caustic, its time and FWHM
+* **One JSON record per event**: scan decision, best model without and with
+  atoms, every model's parameters and chi2
 * **Candidate quality diagnostics**: effective contributing points,
   peak-contribution fraction, and time-correlation metrics
 * **Built-in visualization**: PSPL fit, residuals, and anomaly scan summary
@@ -76,14 +80,24 @@ result = finder.run(time, flux, ferr)
 
 result.print_summary()
 
-# Host fit the anomalies do not pull (host + scan-template "atoms", J selection):
-# from jacscanomaly import FSPLFitter, PSPLFitter, robust_fit
-# r = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, finder,
-#                time, flux, ferr, result.fit.params)
-# r.selected, r.best.params, r.best.atoms, r.best.features
-
 # In notebooks, get a one-row table:
 # display(result.summary_table())
+```
+
+### Host fit and one record per event
+
+```python
+from jacscanomaly import EventResult, FSPLFitter, LightCurve, PSPLFitter, robust_fit, write_results
+
+lc = LightCurve(time, flux, ferr, id="example")
+scan = finder.run(lc.time, lc.flux, lc.ferr)
+res = EventResult(lc, scan)          # anomaly = best candidate score >= 10
+if res.detected:
+    # host + anomalies fitted jointly, so the anomalies do not pull the host
+    fits = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, finder,
+                      lc.time, lc.flux, lc.ferr, scan.fit.params)
+    res = EventResult(lc, scan, fits)
+write_results("results.json", [res])  # {id: {anomaly, best_model, n_points, models}}
 ```
 
 ---
@@ -115,17 +129,14 @@ Example notebooks are available in `example/`:
 * `template_scan_example.ipynb` for the standard bell-template scan
 * `template_free_example.ipynb` for the template-free residual chi-square scan
 
-For a refined planetary residual, measure its peaks and dips directly:
+Each anomaly of the robust fit is described directly:
 
 ```python
-features = signal.measure_features()
-print(features.n_peaks, features.n_dips)
-for feature in features.features:
-    print(feature.kind, feature.time, feature.timescale, feature.strength)
+for f in fits.best.features.features:
+    print(f.kind, f.caustic, f.time, f.timescale, f.dchi2)  # e.g. "bump+dip", False, ...
 ```
 
-This measurement does not assign a caustic shape or estimate binary-lens
-parameters.
+The description does not estimate binary-lens parameters.
 
 ---
 
@@ -331,6 +342,13 @@ and space geometry through `parallax_geometry`.
 
 JAX remains available for the anomaly-grid and diagnostic modules; it is not a
 second FSPL fitting route.
+
+## Development tools
+
+This package was developed with the help of AI coding assistants: OpenAI
+ChatGPT / Codex and Anthropic Claude (Claude Code).
+
+---
 
 ## Citation
 

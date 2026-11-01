@@ -20,6 +20,9 @@ What it does
 * non-overlapping candidate extraction,
 * candidate support diagnostics such as ``n_eff`` and ``peak_frac``,
 * plotting and summary helpers for scripts, CLIs, and notebooks,
+* a host fit the anomalies do not pull (host + "atoms"), with each anomaly
+  described as bump / dip / caustic, its time and FWHM,
+* one JSON record per event (:class:`jacscanomaly.EventResult`),
 * low-memory C++ backends for large PSPL survey scans.
 
 The high-level entry point is :class:`jacscanomaly.Finder`. A typical workflow
@@ -28,7 +31,9 @@ is:
 1. fit a single-lens baseline model to a light curve,
 2. scan the residuals over local anomaly templates,
 3. extract non-overlapping anomaly candidates,
-4. inspect candidate quality diagnostics such as ``score`` and ``n_eff``.
+4. inspect candidate quality diagnostics such as ``score`` and ``n_eff``,
+5. fit the host jointly with the anomalies and describe them
+   (:func:`jacscanomaly.robust_fit`).
 
 Start here
 ----------
@@ -41,9 +46,9 @@ If you are using the package for the first time:
   and signal-refinement searches,
 * use :doc:`method` to understand ``dchi2``, ``score``, and ``n_eff``,
 * use :doc:`configuration` when tuning a survey run,
-* use :doc:`results` when building candidate tables or downstream analysis.
-* use :doc:`planet_features` to classify residual signals into bumps and
-  dips.
+* use :doc:`results` when building candidate tables or downstream analysis,
+* use :doc:`planet_features` for the anomaly descriptions (bump / dip,
+  caustic).
 
 .. toctree::
    :maxdepth: 2
