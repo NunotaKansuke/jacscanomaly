@@ -34,16 +34,23 @@ Assumptions
 * The start host is held fixed (``fs, fb`` only) until the first atom is in,
   so a relocked host is not pulled back onto the spike it was moved off; with
   no atom at the end the host is refit.
-* The plain host is kept unless a moved one wins by
-  ``free_host_margin`` in ``J``: the ``h`` template's wings trade off against
-  the host shape, and a small ``chi2`` gain from moving the host is within
-  model mismatch and correlated noise. The margin is a decision rule, not
-  part of the likelihood (set by eye on 23 events).
+* The host is what the samples outside the anomalies say. The start
+  ``"fixed"`` holds the host fitted outside the best free start's atom
+  windows, and it is kept unless a moved host wins by ``free_host_margin`` in
+  ``J``: the ``h`` template's wings trade off against the host shape. The
+  default margin is the host's own price, ``n_host ln n``: a free start fits
+  the host to the samples inside the windows too, where the held host has no
+  say, so a moved host must pay for its parameters once more there. The
+  models are then compared by ``J`` alone (the margin is within a model).
+* A host must beat a constant flux on the samples outside its atom windows
+  (the relock's detection test); a start whose host does not is used only
+  when none does, and the model is then flagged ``host_identified = False``.
+* ``fs, fb >= 0``: they are fluxes. The atom amplitudes are free.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Mapping, Optional
 
 import numpy as np
@@ -54,7 +61,7 @@ from .candidate import Candidate, _merged
 from .features import FeatureConfig, FeatureResult, measure_features
 from .fitters import FSPLFitter, PSPLFitter, _pspl_magnification
 from .parallax_backend import _ParallaxFitter
-from .relock import HostRelock, relock_host
+from .relock import HostRelock, _detected, relock_host
 from .singlelens_fit import SingleLensFitResult
 
 
@@ -63,7 +70,8 @@ class AtomConfig:
     """Atom support (``coeff`` in units of ``teff``), acceptance and price.
 
     ``free_host_margin``: the ``J`` by which a fit that moved the host must beat
-    the plain host with atoms (start ``"fixed"``) to be selected.
+    the held host (start ``"fixed"``) to be selected; ``None`` is
+    ``n_host ln n``, the host's own price.
     """
 
     coeff: float = 3.0
@@ -71,7 +79,7 @@ class AtomConfig:
     max_teff_fraction: float = 0.25
     max_atoms: int = 15
     k_atom: float = 4.0
-    free_host_margin: float = 150.0
+    free_host_margin: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -106,13 +114,15 @@ class AtomFit:
 class ModelFit:
     """The lowest-``J`` :class:`AtomFit` of one host model, and what follows from it.
 
-    ``fit`` is the host alone, with ``fs, fb`` from the samples outside
-    ``windows`` (the merged atom supports). ``features`` characterize every
+    ``fit`` is the host alone with the atom fit's ``fs, fb``, the samples
+    inside ``windows`` (the merged atom supports) masked. ``features`` characterize every
     window against the host + atoms of the atom fit (its own ``fs, fb``).
     ``sigma`` are the 1-sigma host parameter errors with fluxes and atom
     amplitudes profiled. ``base`` is the plain fit without atoms. ``rank`` is
-    what the selection compares: ``J``, less ``free_host_margin`` for the start
-    ``"fixed"``.
+    what the start selection compares: ``J``, less the margin for the start
+    ``"fixed"``. ``host_identified``: the host (``fs A + fb``) beats a constant
+    flux on the samples outside ``windows``; ``False`` when no start's host
+    does (the whole light curve is anomalous).
     """
 
     name: str
@@ -126,6 +136,7 @@ class ModelFit:
     features: Optional[FeatureResult]
     base: Optional[SingleLensFitResult]
     rank: float = np.nan
+    host_identified: bool = True
 
     @property
     def params(self) -> np.ndarray:
@@ -191,19 +202,40 @@ class _Host:
 
 
 def _linear(host, flux, ferr, p, atoms, coeff):
-    """Linear coefficients (fs, fb, a_1, b_1, ...) and the normalised residual."""
+    """Linear coefficients (fs, fb, a_1, b_1, ...) and the normalised residual.
+
+    ``fs, fb >= 0`` (fluxes); the atom amplitudes are free. With two bounds
+    the solution is the feasible one of lowest ``chi2`` over the active sets.
+    """
     magnification = host.magnification(p)
     out = _cpp_grid.atoms_linear(magnification, host.time, flux, ferr,
                                  np.asarray(atoms, dtype=float).reshape(-1, 2), coeff)
-    if out is not None:
+    cols = None
+    if out is None:  # numerically singular normal equations: minimum-norm SVD solution
+        cols = _columns(host.time, magnification, atoms, coeff)
+        out = _lstsq(cols, flux, ferr, ())
+    if out[0][0] >= 0.0 and out[0][1] >= 0.0:
         return out
-    # numerically singular normal equations: minimum-norm SVD solution
-    cols = [magnification, np.ones_like(host.time)]
+    cols = cols if cols is not None else _columns(host.time, magnification, atoms, coeff)
+    trials = [_lstsq(cols, flux, ferr, zero) for zero in ((0,), (1,), (0, 1))]
+    feasible = [t for t in trials if t[0][0] >= 0.0 and t[0][1] >= 0.0]
+    return min(feasible, key=lambda t: float(t[1] @ t[1]))
+
+
+def _columns(time, magnification, atoms, coeff):
+    cols = [magnification, np.ones_like(time)]
     for t0, teff in atoms:
-        cols += atom_basis(host.time, t0, teff, coeff)
-    design = np.vstack(cols).T / ferr[:, None]
-    coef, *_ = np.linalg.lstsq(design, flux / ferr, rcond=None)
-    return coef, flux / ferr - design @ coef
+        cols += atom_basis(time, t0, teff, coeff)
+    return np.vstack(cols).T
+
+
+def _lstsq(cols, flux, ferr, zero):
+    """Least squares on ``cols`` with the coefficients ``zero`` held at 0."""
+    free = np.setdiff1d(np.arange(cols.shape[1]), zero)
+    design = cols[:, free] / ferr[:, None]
+    coef = np.zeros(cols.shape[1])
+    coef[free], *_ = np.linalg.lstsq(design, flux / ferr, rcond=None)
+    return coef, flux / ferr - design @ coef[free]
 
 
 def _fit_host(host, flux, ferr, p, atoms, coeff):
@@ -320,6 +352,24 @@ def _sigma(host, flux, ferr, p, atoms, coeff) -> np.ndarray:
         return np.full(len(p), np.nan)
 
 
+def _inside(time, windows) -> np.ndarray:
+    inside = np.zeros(time.size, bool)
+    for w in windows:
+        inside |= (time >= w.t_start) & (time <= w.t_end)
+    return inside
+
+
+def _J(r: AtomFit, n: int, config: AtomConfig) -> float:
+    return r.chi2 + (r.params.size + 2 + config.k_atom * len(r.atoms)) * np.log(n)
+
+
+def _host_seen(host, flux, ferr, r: AtomFit, coeff) -> bool:
+    """Whether the host alone (``fs A + fb``) beats a constant outside the atom windows."""
+    keep = ~_inside(host.time, atom_windows(r.atoms, coeff))
+    residual = flux - (r.fs * host.magnification(r.params) + r.fb)
+    return _detected(flux, ferr, residual, keep, r.params.size + 2)
+
+
 def atom_windows(atoms, coeff: float = 3.0) -> tuple[Candidate, ...]:
     """The atom supports ``|t - t0| <= coeff teff``, overlapping ones merged."""
     return tuple(Candidate(lo, hi) for lo, hi in _merged(
@@ -353,10 +403,14 @@ def robust_fit(
       relocked host): the plain fit sits on the segment the relock rejected.
       A relocked host still peaking inside the segment (e.g. a high-
       magnification peak) keeps the plain fit, which needs that peak.
-    * every model: ``fixed``, the host of ``base`` held fixed.
+    * every model: ``fixed``, the host fitted on the samples outside the atom
+      windows of the best free start (the lowest ``J`` among those whose host
+      is seen outside its windows), held fixed while the atoms are regrown.
 
-    The start with the lowest ``J`` is kept, ``fixed`` counted at
-    ``J - config.free_host_margin``; the models are compared the same way.
+    The start with the lowest ``J`` among those whose host is seen outside its
+    windows is kept (all, when none is), ``fixed`` counted at
+    ``J - config.free_host_margin`` (``n_host ln n`` by default). The models
+    are compared by ``J``, identified hosts first.
     """
     time, flux, ferr = (np.asarray(x, dtype=float) for x in (time, flux, ferr))
     names = list(fitters)
@@ -386,28 +440,51 @@ def robust_fit(
         else:  # no PSPL result to nest
             starts = {}
         if base is not None:
-            starts["base"] = starts["fixed"] = fitter.seed_from_fit(base)
+            starts["base"] = fitter.seed_from_fit(base)
         runs = {}
         for key, p0 in starts.items():
             try:
                 runs[key] = fit_atoms(fitter, finder, time, flux, ferr, p0, anomaly=anomaly,
-                                      config=config, fix_host=key == "fixed", _host=host)
+                                      config=config, _host=host)
             except Exception as exc:  # one failed start leaves the others
                 errors[f"{name}/{key}"] = repr(exc)
         if not runs:
             continue
-        J = {key: r.chi2 + (r.params.size + 2 + config.k_atom * len(r.atoms)) * np.log(n)
-             for key, r in runs.items()}
-        rank = {k: v - config.free_host_margin * (k == "fixed") for k, v in J.items()}
-        start = min(rank, key=rank.get)
+        seen = {k: _host_seen(host, flux, ferr, r, config.coeff) for k, r in runs.items()}
+        J = {k: _J(r, n, config) for k, r in runs.items()}
+        # "fixed": the host the samples outside the best free start's windows give, held
+        free = min(runs, key=lambda k: (not seen[k], J[k]))
+        outside = ~_inside(time, atom_windows(runs[free].atoms, config.coeff))
+        if not outside.all():
+            try:
+                p0 = fitter.seed_from_fit(fitter.fit(time, flux, ferr, runs[free].params,
+                                                     mask=~outside))
+                runs["fixed"] = fit_atoms(fitter, finder, time, flux, ferr, p0, anomaly=anomaly,
+                                          config=config, fix_host=True, _host=host)
+                seen["fixed"] = _host_seen(host, flux, ferr, runs["fixed"], config.coeff)
+                J["fixed"] = _J(runs["fixed"], n, config)
+            except Exception as exc:
+                errors[f"{name}/fixed"] = repr(exc)
+        margin = (config.free_host_margin if config.free_host_margin is not None
+                  else runs[free].params.size * np.log(n))
+        rank = {k: v - margin * (k == "fixed") for k, v in J.items()}
+        # a start whose host the samples outside its windows do not see is not a host
+        identified = any(seen.values())
+        start = min(rank, key=lambda k: (identified and not seen[k], rank[k]))
         r = runs[start]
         if name == names[0]:
             pspl_best = r.params[:3]
         windows = atom_windows(r.atoms, config.coeff)
-        inside = np.zeros(n, bool)
-        for w in windows:
-            inside |= (time >= w.t_start) & (time <= w.t_end)
-        fit = fitter.evaluate_fixed(time, flux, ferr, r.params, mask=inside if inside.any() else None)
+        inside = _inside(time, windows)
+        # windows over (nearly) all samples: nothing outside to score, evaluate on all
+        few = np.count_nonzero(~inside) < r.params.size + 3
+        fit = fitter.evaluate_fixed(time, flux, ferr, r.params,
+                                    mask=None if few or not inside.any() else inside)
+        # the host the atoms sit on: the atom fit's fs, fb, not refit outside the windows
+        model = r.fs * host.magnification(r.params) + r.fb
+        z = ((flux - model) / ferr)[~inside]
+        fit = replace(fit, fs=r.fs, fb=r.fb, model_flux=model, residual=flux - model,
+                      chi2=float(z @ z), chi2_dof=float(z @ z) / max(z.size - r.params.size, 1))
         models[name] = ModelFit(
             name=name, start=start, atom_fit=r, J=float(J[start]),
             rank=float(rank[start]),
@@ -419,10 +496,10 @@ def robust_fit(
                 _atom_flux(time, [0.0, 0.0] + [x for a in r.atoms for x in (a.a, a.b)],
                            [(a.t0, a.teff) for a in r.atoms], config.coeff),
                 windows, config=FeatureConfig(coeff=config.coeff)) if windows else None,
-            base=base)
+            base=base, host_identified=identified)
     if not models:
         raise RuntimeError(f"no host model could be fitted: {errors}")
-    selected = min(models, key=lambda k: models[k].rank)
+    selected = min(models, key=lambda k: (not models[k].host_identified, models[k].J))
     return RobustFit(models=models, selected=selected, relock=relock, errors=errors)
 
 

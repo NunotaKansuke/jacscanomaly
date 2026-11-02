@@ -115,3 +115,35 @@ def test_the_plain_host_is_kept_unless_a_moved_one_wins_by_the_margin():
         J = m.J_starts
         assert m.start == ("fixed" if margin else min(J, key=J.get))
         assert m.rank == m.J - margin * (m.start == "fixed")
+
+
+def test_fs_and_fb_are_not_negative():
+    from jacscanomaly.robust import _Host, _linear
+    time = np.linspace(-30.0, 30.0, 2000)
+    ferr = np.full_like(time, 0.01)
+    flux = 2.0 - 0.5 * _pspl_magnification(time, 0.0, 20.0, 1.0)  # fs < 0 unconstrained
+    coef, z = _linear(_Host(PSPLFitter(), time), flux, ferr, np.array([0.0, 20.0, 1.0]), [], 3.0)
+    assert coef[0] >= 0.0 and coef[1] >= 0.0
+    assert coef[0] == 0.0 and abs(coef[1] - np.mean(flux)) < 1e-6
+
+
+def test_fixed_holds_the_host_of_the_samples_outside_the_windows():
+    time, flux, ferr = _event([(-8.0, 0.3)], n=3000)
+    m = robust_fit({"pspl": PSPLFitter()}, _finder(), time, flux, ferr, [0.0, 20.0, 0.3],
+                   config=AtomConfig(free_host_margin=1e9)).best
+    t0, tE, u0 = m.params
+    assert m.start == "fixed" and m.host_identified
+    assert abs(t0) < 0.05 and abs(tE - 20.0) < 0.5 and abs(u0 - 0.3) < 0.02
+
+
+def test_a_needle_host_under_atoms_is_not_a_host():
+    rng = np.random.default_rng(3)
+    time = np.linspace(-30.0, 30.0, 3000)
+    ferr = np.full_like(time, 0.01)
+    bump = 0.5 * np.exp(-0.5 * (time / 0.3) ** 2) * (1.0 + 0.5 * np.sin(time / 0.05))
+    flux = 1.0 + bump + rng.normal(0.0, 0.01, time.size)
+    # the scan start keeps a needle host (fs ~ 0) and lets the atoms build the
+    # bump: the lowest J, but the samples outside the windows see no host
+    m = robust_fit({"pspl": PSPLFitter()}, _finder(), time, flux, ferr, [0.0, 1000.0, 1e-4]).best
+    assert m.J_starts["scan"] < m.J and m.start != "scan" and m.host_identified
+

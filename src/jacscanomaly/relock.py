@@ -145,15 +145,22 @@ def _host_detected(fit: SingleLensFitResult, mask: np.ndarray) -> bool:
     the nonlinear parameters + ``fs``/``fb`` for the fit and 1 for the
     constant.
     """
-    keep = ~np.asarray(mask, dtype=bool)
+    return _detected(fit.flux, fit.ferr, fit.residual, ~np.asarray(mask, dtype=bool),
+                     int(np.asarray(fit.params).size) + 2)
+
+
+def _detected(flux, ferr, residual, keep, n_params: int) -> bool:
+    """``chi2 + n_params ln n < chi2_flat + ln n`` on the samples ``keep``."""
+    keep = np.asarray(keep, dtype=bool)
+    if not keep.any():  # nothing kept: nothing is seen
+        return False
     n = max(int(np.count_nonzero(keep)), 1)
-    flux = np.asarray(fit.flux, dtype=float)[keep]
-    ferr = np.asarray(fit.ferr, dtype=float)[keep]
-    chi2 = float(np.sum((np.asarray(fit.residual, dtype=float)[keep] / ferr) ** 2))
+    flux = np.asarray(flux, dtype=float)[keep]
+    ferr = np.asarray(ferr, dtype=float)[keep]
+    chi2 = float(np.sum((np.asarray(residual, dtype=float)[keep] / ferr) ** 2))
     w = 1.0 / ferr**2
     flat = float(np.sum(((flux - np.sum(w * flux) / np.sum(w)) / ferr) ** 2))
-    p = int(np.asarray(fit.params).size) + 2
-    return chi2 + p * np.log(n) < flat + np.log(n)
+    return chi2 + n_params * np.log(n) < flat + np.log(n)
 
 
 def _peak_unmasked(fit: SingleLensFitResult, mask: np.ndarray) -> bool:
@@ -220,10 +227,13 @@ def relock_host(
     rest = fitter.fit(time, flux, ferr, mask=core)
     host, mask, j1 = _minimise_j(fitter, rest, core,
                                  Candidate(time[core].min(), time[core].max()), penalty, n_iter)
+    # both starts reach the same anomaly mask: the same host, whatever the
+    # rounding in j0 - j1
+    same = np.array_equal(mask, mask0)
     if left and j0 < j1:  # H0's own host is the better one off fit0
         host, mask = host0, mask0
     # the host must be one the kept samples see (not a fit to the baseline)
-    relocked = ((j1 <= j0 or left)  # equal: same host from both starts
+    relocked = ((j1 <= j0 or left or same)
                 and _host_detected(host, mask) and _peak_unmasked(host, mask))
     return HostRelock(relocked, host if relocked else fit0, host, mask, j0 - j1)
 

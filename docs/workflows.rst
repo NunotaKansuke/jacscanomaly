@@ -129,11 +129,13 @@ result.
    lowers ``chi2`` by more than ``4 ln n`` (BIC), then pruned with the same
    price. Starts: the scan's PSPL (moved off a short spike by
    :func:`jacscanomaly.relock_host`), the PSPL result nested into each
-   extended model, each model's plain fit, and that plain fit held fixed
-   (``"fixed"``, atoms only). Models and starts are compared by
-   ``J = chi2 + (n_host + 2 + 4 n_atoms) ln n``; a fit that moved the host
-   must beat ``"fixed"`` by ``AtomConfig.free_host_margin`` (150), a decision
-   rule against a moved host plus one broad atom winning a small ``chi2``.
+   extended model, each model's plain fit, and the host the samples outside
+   the best free start's atom windows give, held fixed (``"fixed"``, atoms
+   only). Starts are compared by ``J = chi2 + (n_host + 2 + 4 n_atoms) ln n``;
+   a fit that moved the host must beat ``"fixed"`` by
+   ``AtomConfig.free_host_margin`` (default ``n_host ln n``, the host's own
+   price). Models are compared by ``J``; a host must beat a constant outside
+   its windows (``ModelFit.host_identified``).
    ``fit_atoms`` is the single-start step; ``AtomConfig`` holds the constants.
 
 ``relock_host(fitter, fit)``

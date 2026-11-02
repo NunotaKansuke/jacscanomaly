@@ -23,7 +23,7 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 ### Changed
 - `robust_fit` adds a start `"fixed"` (the plain host held fixed, atoms
   only) and keeps it unless a fit that moved the host wins by
-  `AtomConfig.free_host_margin` (150) in `J`. A moved host plus one broad
+  `AtomConfig.free_host_margin` (500) in `J`. A moved host plus one broad
   atom no longer replaces the plain host plus a small atom for a small
   `chi2` gain. `ModelFit.rank` is what the selection compares.
 - Score every extracted anomaly cluster against an all-season,

@@ -17,7 +17,7 @@ correlated noise give, so `J` alone picks it.
 * `robust_fit`: every model with a plain fit (`base`) gets one more start,
   `"fixed"`: `base`, with the host fixed.
 * A start that moves the host is chosen over `"fixed"` only when its `J` is
-  lower by more than `AtomConfig.free_host_margin` (default 150). The
+  lower by more than `AtomConfig.free_host_margin` (default 500). The
   selection uses `J - margin` for `"fixed"`, both between starts and between
   models. `ModelFit.J` stays the plain `J`.
 
@@ -27,6 +27,10 @@ correlated noise give, so `J` alone picks it.
   tolerance for model mismatch and correlated noise. It was set on 23 events
   judged by eye: those preferring the plain host had `dJ` <= 137 and those
   preferring the moved host had `dJ` >= 140 (one borderline case at 140).
-  No single cut separates 137 from 140, so 150 was chosen.
+  No single cut separates 137 from 140, so 150 was chosen first.
+* On the 2371-event set, raising the margin from 150 to 500 changes the
+  selection of 188 events, all to `"fixed"`. Their figures, compared side by
+  side, looked better with the plain host in all but one, an event whose
+  anomaly is too large for a single-lens host either way. The default is 500.
 * `free_host_margin = 0` gives the old selection (`"fixed"` competes as a
   plain start), apart from ties.
