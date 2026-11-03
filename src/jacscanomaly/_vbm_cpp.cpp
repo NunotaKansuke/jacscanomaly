@@ -332,7 +332,7 @@ PyObject* score_finite_source_seeds(
                 || seed[1] == 0.0) {
                 continue;
             }
-            const double rho = jacscanomaly::espl_rho(std::exp(std::max(-50.0, std::min(10.0, seed[3]))));
+            const double rho = jacscanomaly::espl_rho(std::exp(std::max(-50.0, seed[3])));
             const double tE = std::abs(seed[1]);
             double weight_sum = 0.0;
             double weighted_magnification = 0.0;

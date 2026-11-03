@@ -26,6 +26,10 @@ import jax.numpy as jnp
 
 from .auto_init import automatic_seeds, best_fit_over_seeds
 from .magnification import ESPL_MAX_RHO
+
+# log rho is clipped to where the magnification is defined: the upper end is
+# the ESPL table edge, where A is already ~1.
+LOGRHO_MIN, LOGRHO_MAX = -50.0, float(np.log(ESPL_MAX_RHO))
 from .plot import SingleLensPlotter
 from .singlelens_fit import SingleLensFitResult
 from .parallax_backend import (
@@ -543,7 +547,7 @@ class FSPLFitter:
     def _magnification(self, time: np.ndarray, q: np.ndarray) -> np.ndarray:
         t0, tE, u0, logrho = map(float, q)
         u = np.sqrt(((time - t0) / max(abs(tE), 1.0e-12)) ** 2 + u0 * u0)
-        rho = np.exp(np.clip(logrho, -50.0, 10.0))
+        rho = np.exp(np.clip(logrho, LOGRHO_MIN, LOGRHO_MAX))
         return _cpp_fspl_magnification(
             u,
             rho,
@@ -570,7 +574,7 @@ class FSPLFitter:
         residual = flux - model
         normalized = residual[keep] / ferr[keep]
         chi2 = float(np.dot(normalized, normalized))
-        params = np.asarray([q[0], q[1], q[2], np.exp(np.clip(q[3], -50.0, 10.0))])
+        params = np.asarray([q[0], q[1], q[2], np.exp(np.clip(q[3], LOGRHO_MIN, LOGRHO_MAX))])
         fit = SingleLensFitResult(
             time=time,
             flux=flux,
@@ -646,7 +650,7 @@ class FSPLFitter:
             try:
                 t0, tE, u0, logrho = map(float, q)
                 u, du = _trajectory_gradient(fit_time, t0, tE, u0)
-                rho = np.exp(np.clip(logrho, -50.0, 10.0))
+                rho = np.exp(np.clip(logrho, LOGRHO_MIN, LOGRHO_MAX))
                 magnification, dA_du, dA_drho = _cpp_fspl_magnification_gradient(
                     u,
                     rho,
@@ -654,7 +658,7 @@ class FSPLFitter:
                     tol=self.magnification_tol,
                     reltol=self.magnification_reltol,
                 )
-                in_range = -50.0 < logrho < 10.0
+                in_range = LOGRHO_MIN < logrho < LOGRHO_MAX
                 dA_dlogrho = dA_drho * rho if in_range else np.zeros_like(dA_drho)
                 gradient = np.column_stack([dA_du[:, None] * du, dA_dlogrho])
                 value = _profiled_residual_jacobian(
@@ -681,8 +685,8 @@ class FSPLFitter:
 
         result, q, objective = run_once(z0)
         retry_count = 0
-        initial_rho = np.exp(np.clip(q0[3], -50.0, 10.0))
-        fitted_rho = np.exp(np.clip(q[3], -50.0, 10.0))
+        initial_rho = np.exp(np.clip(q0[3], LOGRHO_MIN, LOGRHO_MAX))
+        fitted_rho = np.exp(np.clip(q[3], LOGRHO_MIN, LOGRHO_MAX))
         # A finite-source fit can fall into the nearly-point-source basin when
         # the starting radius is on the large side.  Keep one canonical LM
         # implementation, but retry from a smaller radius when that diagnostic

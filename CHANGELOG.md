@@ -9,9 +9,11 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 ## [Unreleased]
 
 ### Fixed
-- FSPL magnification clamps `rho` at 100, the edge of VBM's ESPL table. A fit
-  that wandered past it read the table out of range and printed
-  `Source too large!` per point, which hung Jupyter kernels.
+- FSPL `log rho` is clipped at `ln 100`, the edge of VBM's ESPL table (was
+  10). From the PSPL start (`rho = 1e-4`) A barely depends on `rho`, so LM's
+  first trial step sent `log rho` to ~1000; VBM then read its table out of
+  range and printed `Source too large!` per point, which hung Jupyter
+  kernels. The C++ magnification also clamps `rho` there.
 
 ### Changed
 - `example/` holds a quickstart notebook and a batch script on the `Event`
