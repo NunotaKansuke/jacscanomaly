@@ -80,7 +80,7 @@ def test_robust_fit_selects_by_J_and_nests_the_extended_model():
 
     assert set(r.models) == {"pspl", "fspl"} and not r.relock.relocked
     assert set(r.models["fspl"].J_starts) <= {"nested", "base", "fixed"}
-    assert r.selected == min(r.models, key=lambda k: r.models[k].rank)
+    assert r.selected == min(r.models, key=lambda k: r.models[k].J)
     best = r.best
     assert best.atoms and len(best.windows) == 1
     assert best.fit.mask is not None and best.fit.mask[np.argmin(np.abs(time + 8.0))]
