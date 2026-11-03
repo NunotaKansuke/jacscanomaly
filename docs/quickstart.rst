@@ -34,7 +34,8 @@ parallax and scan again; what neither explains is fitted with atoms.
    ev = Event(time, flux, ferr, ra_deg=268.4, dec_deg=-29.2, ephemeris="roman.txt")
 
    ev.fit("pspl")
-   if ev.scan().detected:                  # the PSPL host is relocked here if needed
+   pspl_scan = ev.scan()
+   if pspl_scan.detected:
        ev.fit("fspl", start="pspl")
        fspl_scan = ev.scan()
        ev.fit("parallax", start="pspl")
@@ -60,9 +61,6 @@ Rules
 * ``ev.scan(model=None)`` and ``ev.fit_atoms(model=None)`` act on the last
   fit; a model not fitted yet is an error.
 * Refitting a model drops its own scan and atoms; the other models stay.
-* A PSPL scan that detects something checks whether the PSPL sits on the
-  anomaly instead of the event. If so the PSPL fit is replaced, scanned again,
-  and ``scan.relocked`` is ``True``.
 
 Results
 -------

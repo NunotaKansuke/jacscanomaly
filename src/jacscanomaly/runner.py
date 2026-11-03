@@ -16,7 +16,6 @@ from .models import SeasonSummary
 from .seasons import SeasonSplitter
 from .extract import ResultExtractor
 from .anomaly_models import get_chi2_anom_masked, get_chi2_flat_masked
-from .fft_grid import FFTAnomalyGridRunner
 
 try:
     from . import _cpp_grid
@@ -320,7 +319,6 @@ class SeasonGridRunner:
         season, t0_list, scales, steps, t0_flat_np, teff_flat_np = grid
         backend = self.config.grid_backend
         t_grid0 = time.perf_counter()
-        fft_runner = None
         if backend == "cpp":
             if _cpp_grid is None:
                 raise RuntimeError(
@@ -335,28 +333,6 @@ class SeasonGridRunner:
                 min_pts=int(self.config.min_pts_in_window),
             )
             t0_np_out, teff_np_out = t0_flat_np, teff_flat_np
-        elif backend == "fft":
-            if verbose:
-                log.info("  -> grid exec: fft(oversample=%d)", int(self.config.fft_oversample))
-            fft_runner = FFTAnomalyGridRunner(
-                oversample=int(self.config.fft_oversample),
-                max_grid_points=int(self.config.fft_max_grid_points),
-                singular_rtol=float(self.config.fft_singular_rtol),
-            )
-            fft_result = fft_runner.run(
-                time=t, flux=r, weight=w,
-                t0_grids=t0_list, teff_values=scales, t0_steps=steps,
-                teff_coeff=float(self.config.teff_coeff),
-                min_pts=int(self.config.min_pts_in_window),
-            )
-            t0_np_out, teff_np_out = fft_result.t0, fft_result.teff
-            dchi2_np = fft_result.dchi2
-            nwin_np = fft_result.n_window
-            ncontrib_np = np.zeros_like(nwin_np, dtype=np.int32)
-            neff_np = np.zeros_like(dchi2_np, dtype=float)
-            peak_np = np.zeros_like(dchi2_np, dtype=float)
-            rho1_np = np.zeros_like(dchi2_np, dtype=float)
-            longest_np = np.zeros_like(nwin_np, dtype=np.int32)
         elif backend == "jax":
             args = (jnp.asarray(t), jnp.asarray(r), jnp.asarray(w),
                     jnp.asarray(t0_flat_np, dtype=jnp.float64),
@@ -381,7 +357,7 @@ class SeasonGridRunner:
              rho1_np, longest_np) = device_get(out)
         else:
             raise ValueError(
-                f"Unknown grid_backend '{backend}'. Valid options are 'jax', 'cpp', and 'fft'."
+                f"Unknown grid_backend '{backend}'. Valid options are 'cpp' and 'jax'."
             )
         dt_grid = time.perf_counter() - t_grid0
 
@@ -421,42 +397,9 @@ class SeasonGridRunner:
             )
         dt_ext = time.perf_counter() - t_ext0
 
-        dt_refine = 0.0
-        if fft_runner is not None and clusters.size:
-            t_refine0 = time.perf_counter()
-            exact = fft_runner.refine_points(
-                time=t, flux=r, weight=w,
-                t0=clusters[:, 0],
-                teff=clusters[:, 1],
-                sigma=float(self.config.sigma),
-                teff_coeff=float(self.config.teff_coeff),
-                min_pts=int(self.config.min_pts_in_window),
-            )
-            clusters = np.asarray(clusters, dtype=float).copy()
-            clusters[:, 2] = exact.dchi2
-            for cluster_index, (cluster_t0, cluster_teff, _) in enumerate(clusters):
-                distance = np.abs(grid_metrics[:, 0] - cluster_t0) + np.abs(
-                    grid_metrics[:, 1] - cluster_teff
-                )
-                metric_index = int(np.argmin(distance))
-                grid_metrics[metric_index, 2:] = (
-                    exact.dchi2[cluster_index],
-                    exact.n_window[cluster_index],
-                    exact.n_contrib[cluster_index],
-                    exact.n_eff[cluster_index],
-                    exact.peak_frac[cluster_index],
-                    exact.rho1[cluster_index],
-                    exact.longest_run[cluster_index],
-                )
-            dt_refine = time.perf_counter() - t_refine0
-
         if verbose:
-            if fft_runner is not None:
-                log.info("  -> extracted clusters: %d | grid=%.3fs refine=%.3fs extract=%.3fs",
-                         int(clusters.shape[0]), dt_grid, dt_refine, dt_ext)
-            else:
-                log.info("  -> extracted clusters: %d | grid=%.3fs extract=%.3fs",
-                         int(clusters.shape[0]), dt_grid, dt_ext)
+            log.info("  -> extracted clusters: %d | grid=%.3fs extract=%.3fs",
+                     int(clusters.shape[0]), dt_grid, dt_ext)
         return np.asarray(clusters, dtype=float).reshape(-1, 3), grid_metrics
 
     def run(

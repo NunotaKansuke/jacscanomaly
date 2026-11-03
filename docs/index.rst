@@ -14,7 +14,8 @@ one :class:`jacscanomaly.Event`.
 
    ev = Event(time, flux, ferr)
    ev.fit("pspl")
-   if ev.scan().detected:
+   scan = ev.scan()
+   if scan.detected:
        ev.fit_atoms("pspl")
    ev.write_json("event.json")
 

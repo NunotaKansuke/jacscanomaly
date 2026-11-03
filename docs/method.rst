@@ -4,15 +4,17 @@ Method
 Scan
 ----
 
-The residual ``r = flux - model`` of a single-lens fit is split into seasons
-(at gaps longer than ``gap``). In each season, at every trial centre ``t0``
-and timescale ``teff``, the window ``|t - t0| < teff_coeff * teff`` is fitted
-with a constant, and with a constant plus a linear amplitude times one of two
-templates (``Q = 1 + ((t - t0) / teff)^2``):
+The residual of a single-lens fit is split into seasons (at gaps longer than
+``gap``). In each season, at every trial centre :math:`t_0` and timescale
+:math:`t_\mathrm{eff}`, the data in the window
+:math:`|t - t_0| < k\, t_\mathrm{eff}` (:math:`k` = ``teff_coeff``, 3) are
+fitted with a constant, and with a constant plus an amplitude times one of
+two templates,
 
 .. math::
 
-   A_0 = Q^{-1/2}, \qquad A_1 = \frac{Q + 2}{\sqrt{Q (Q + 4)}}.
+   A_0 = Q^{-1/2}, \qquad A_1 = \frac{Q + 2}{\sqrt{Q (Q + 4)}}, \qquad
+   Q = 1 + \left(\frac{t - t_0}{t_\mathrm{eff}}\right)^2.
 
 The better template gives
 
@@ -53,8 +55,8 @@ Atoms
 -----
 
 The host is fitted jointly with "atoms". Each atom is a detection of the
-residual scan, ``a A_0 + b A_1`` cut to zero at
-``|t - t0| = teff_coeff * teff``. Atoms are added one at a time (the largest
+residual scan, :math:`a A_0 + b A_1` cut to zero at
+:math:`|t - t_0| = k\, t_\mathrm{eff}`. Atoms are added one at a time (the largest
 ``dchi2`` first) and dropped again while each lowers
 
 .. math::

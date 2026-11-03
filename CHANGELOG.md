@@ -38,6 +38,10 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 - Documentation cut to the `Event` workflow: installation, quickstart, method
   and API.
 
+### Removed
+- The FFT anomaly-grid backend (`grid_backend="fft"`, `fft_*` settings);
+  the scan runs on `cpp` or `jax`. The PSPL FFT seed search stays.
+
 ### Fixed
 - FSPL and parallax fits given `pspl_params` also start from the PSPL
   solution they nest (`nested_seed`). The duration seeds put `rho` above

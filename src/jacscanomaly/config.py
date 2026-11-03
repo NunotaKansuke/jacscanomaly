@@ -348,24 +348,13 @@ class FinderConfig:
     # 5) Grid execution mode
     # ==================================================
     
-    grid_backend: Literal["jax", "cpp", "fft"] = "cpp"
+    grid_backend: Literal["jax", "cpp"] = "cpp"
     """
     Grid evaluation backend.
 
     - ``"cpp"`` uses the C++ for-loop backend for low-memory survey scans.
     - ``"jax"`` uses the JAX vectorized/chunked implementation.
-    - ``"fft"`` uses an oversampled regular grid and FFT correlations, then
-      exactly re-evaluates extracted representatives on the original data.
     """
-
-    fft_oversample: int = 4
-    """Number of FFT calculation-grid cells per ``t0`` grid interval."""
-
-    fft_max_grid_points: int = 1_000_000
-    """Maximum regular calculation-grid length for one FFT timescale."""
-
-    fft_singular_rtol: float = 1.0e-12
-    """Relative threshold used to reject nearly constant FFT templates."""
 
     # ==================================================
     # 0c) Unified continuous fitter

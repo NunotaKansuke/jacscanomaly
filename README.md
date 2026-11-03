@@ -29,9 +29,10 @@ ev = Event(time, flux, ferr, ra_deg=268.4, dec_deg=-29.2, ephemeris="roman.txt")
 # magnitudes: Event(time, mag, magerr, kind="mag")
 
 ev.fit("pspl")
-if ev.scan().detected:                  # the PSPL host is relocked here if needed
+pspl_scan = ev.scan()                   # the residual of the last fit
+if pspl_scan.detected:
     ev.fit("fspl", start="pspl")
-    fspl_scan = ev.scan()               # the residual of the last fit
+    fspl_scan = ev.scan()
     ev.fit("parallax", start="pspl")
     parallax_scan = ev.scan()
     if fspl_scan.detected and parallax_scan.detected:
