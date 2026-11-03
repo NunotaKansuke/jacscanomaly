@@ -6,6 +6,12 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [1.0.1] - 2026-11-03
+
+### Fixed
+- The LM single-lens fits set `x_scale=1`. scipy 1.16 changed the `lm`
+  default to `"jac"`, which moved FSPL fits to other minima.
+
 ## [1.0.0] - 2026-11-03
 
 ### Added
