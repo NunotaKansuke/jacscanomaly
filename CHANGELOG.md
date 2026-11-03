@@ -6,6 +6,17 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- `plot_anomaly_window` and the `show_anomaly_window` band of `plot_result`
+  are centred on the detected candidate (`t0`, `teff`); they took the
+  event's signal scale and drew a window thousands of days wide.
+
+### Changed
+- The quickstart notebook no longer fits parallax with a made-up sky
+  position; the simulated event has none.
+
 ## [1.0.2] - 2026-11-04
 
 ### Fixed

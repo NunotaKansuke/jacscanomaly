@@ -500,24 +500,9 @@ class AnomalyPlotter:
         if getattr(result, "best", None) is None:
             return None, None
 
-        observed_scale = getattr(result, "observed_signal_scale", None)
-        if observed_scale is None or not observed_scale.valid:
-            observed_scale = measure_observed_signal_scale(
-                np.asarray(result.time, dtype=float),
-                np.asarray(result.residual, dtype=float)
-                / np.maximum(np.asarray(result.ferr, dtype=float), 1.0e-12),
-                source="anomaly_plot_residual",
-            )
-        t0 = (
-            float(observed_scale.t_center)
-            if observed_scale.valid
-            else float(result.best.t0)
-        )
-        width = (
-            float(observed_scale.half_width)
-            if observed_scale.valid
-            else float(result.best.teff)
-        )
+        # The window is the detected candidate's, not the event's signal scale.
+        t0 = float(result.best.t0)
+        width = float(result.best.teff)
         w = teff_coeff * width
 
         # CPU arrays
@@ -674,20 +659,8 @@ class AnomalyPlotter:
         ax.minorticks_on()
 
         if show_anomaly_window and (getattr(result, "best", None) is not None):
-            observed_scale = getattr(result, "observed_signal_scale", None)
-            t0c = (
-                float(observed_scale.t_center)
-                if observed_scale is not None and observed_scale.valid
-                else float(result.best.t0)
-            )
-            w = float(
-                teff_coeff
-                * (
-                    observed_scale.half_width
-                    if observed_scale is not None and observed_scale.valid
-                    else result.best.teff
-                )
-            )
+            t0c = float(result.best.t0)
+            w = float(teff_coeff * result.best.teff)
             ax.axvline(t0c, lw=1)
             ax.axvspan(t0c - w, t0c + w, alpha=0.1)
 
