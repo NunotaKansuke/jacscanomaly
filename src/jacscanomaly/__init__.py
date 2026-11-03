@@ -33,7 +33,7 @@ from .relock import HostRelock, relock_host
 from .robust import (
     Atom, AtomConfig, AtomFit, ModelFit, RobustFit, atom_basis, atom_windows, fit_atoms, robust_fit,
 )
-from .event import EventResult, LightCurve, write_results
+from .output import write_json
 from .features import (
     Crossing,
     Feature,
@@ -123,9 +123,9 @@ __all__ = [
     "atom_windows",
     "fit_atoms",
     "robust_fit",
-    "EventResult",
-    "LightCurve",
-    "write_results",
+    
+    
+    "write_json",
     "Crossing",
     "Feature",
     "FeatureConfig",

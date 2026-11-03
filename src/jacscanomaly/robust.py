@@ -59,6 +59,7 @@ from scipy.optimize import least_squares
 from . import _cpp_grid
 from .candidate import Candidate, _merged
 from .features import FeatureConfig, FeatureResult, measure_features
+from .models import named_params
 from .fitters import FSPLFitter, PSPLFitter, _pspl_magnification
 from .parallax_backend import _ParallaxFitter
 from .relock import HostRelock, _detected, relock_host
@@ -164,6 +165,21 @@ class RobustFit:
     @property
     def best(self) -> ModelFit:
         return self.models[self.selected]
+
+    def to_dict(self) -> dict:
+        """JSON record: the selected model and, per model, the host with and without atoms."""
+        return {"selected": self.selected, "models": {k: _record(m) for k, m in self.models.items()}}
+
+
+def _record(m: ModelFit) -> dict:
+    feats = m.features.features if m.features is not None else ()
+    out = {"params": named_params(m.fit), "chi2": float(m.atom_fit.chi2), "J": float(m.J),
+           "host_identified": bool(m.host_identified),
+           "anomalies": [{"kind": f.kind, "caustic": bool(f.caustic), "t_center": float(f.time),
+                          "fwhm": float(f.timescale), "dchi2": float(f.dchi2)} for f in feats]}
+    if m.base is not None:
+        out["without_atoms"] = {"params": named_params(m.base), "chi2": float(m.base.chi2)}
+    return out
 
 
 def atom_basis(time, t0: float, teff: float, coeff: float = 3.0) -> tuple[np.ndarray, np.ndarray]:

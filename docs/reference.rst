@@ -65,13 +65,7 @@ See :ref:`post-fit-components` for how they compose.
 .. autoclass:: jacscanomaly.ModelFit
    :no-index:
 
-.. autoclass:: jacscanomaly.LightCurve
-   :no-index:
-
-.. autoclass:: jacscanomaly.EventResult
-   :no-index:
-
-.. autofunction:: jacscanomaly.write_results
+.. autofunction:: jacscanomaly.write_json
    :no-index:
 
 FFT initialization API

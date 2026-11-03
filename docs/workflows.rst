@@ -27,9 +27,9 @@ Workflow map
    not pull it, and describe each anomaly (bump / dip, caustic, time, FWHM);
    see :ref:`post-fit-components`.
 
-``LightCurve`` / ``EventResult``
-   Run the stages above on one event and get one JSON record of it; see
-   :ref:`event-records`.
+``Finder.fit_host`` / ``write_json``
+   After ``Finder.run``: the host fit on the same data, and one JSON record;
+   see :ref:`event-records`.
 
 Standard template scan
 ----------------------
@@ -158,43 +158,42 @@ result.
 One record per event
 --------------------
 
-The pipeline runs the stages in order on a :class:`jacscanomaly.LightCurve`
-and collects them in an :class:`jacscanomaly.EventResult`. The anomaly is the
-scan's decision (best candidate ``score >= score_threshold``, 10 by default);
-the robust fit describes it and is run only then.
+The package gives parts; the pipeline writes the branching. One rule lists
+the anomalies: a *detection* is a scan candidate with ``score >=
+FinderConfig.detection_score`` (10 by default) that ``candidate_criteria``
+accepts. ``result.detections`` holds every one, by score; ``result.detected``
+is whether there is any. ``fit_host`` accepts atoms by the same score.
 
 .. code-block:: python
 
-   from jacscanomaly import EventResult, LightCurve, write_results
+   from jacscanomaly import FSPLFitter, write_json
 
-   lc = LightCurve(time, flux, ferr, id="2_675_129")
-   scan = finder.run(lc.time, lc.flux, lc.ferr, x0=p0)
-   res = EventResult(lc, scan)
-   if res.detected:
-       fits = robust_fit(fitters, finder, lc.time, lc.flux, lc.ferr, scan.fit.params)
-       res = EventResult(lc, scan, fits)
-   write_results("results.json", [res])     # {id: record}, many events in one file
+   result = finder.run(time, flux, ferr, x0=p0)
+   record = {"scan": result}
+   if result.detected:
+       record["host"] = finder.fit_host(result, {"fspl": FSPLFitter()})
+   write_json("event.json", record)        # or {id: record, ...} for many events
 
-``EventResult.to_dict()``:
+``fit_host(result, fitters, config=AtomConfig(...))`` is ``robust_fit`` on the
+data ``result`` holds, from its PSPL fit; a PSPL fitter is added first when
+``fitters`` has none. The records:
 
 .. code-block:: text
 
-   {"anomaly": {"detected", "score", "t0", "teff", "dchi2"},
-    "best_model": {"without_atoms": "pspl", "with_atoms": "pspl" | null},
-    "n_points": 40540,
-    "models": {"pspl": {"param_names": ["t0", "tE", "u0"],
-                        "without_atoms": {"params": [...], "chi2": ...},
-                        "with_atoms": {"params": [...], "chi2": ...,
-                                       "features": [{"kind", "caustic", "t_center",
-                                                     "fwhm", "dchi2"}]}},
-               "fspl": {...}}}
+   scan: {"detected": true,
+          "detections": [{"t0", "teff", "dchi2", "score"}, ...],
+          "n_points": 40540,
+          "fit": {"params": {"t0", "tE", "u0"}, "chi2_dof"}}
+   host: {"selected": "pspl",
+          "models": {"pspl": {"params": {...}, "chi2", "J", "host_identified",
+                              "anomalies": [{"kind", "caustic", "t_center",
+                                             "fwhm", "dchi2"}],
+                              "without_atoms": {"params": {...}, "chi2"}},
+                     "fspl": {...}}}
 
-``without_atoms`` is each model's plain fit (no anomaly: the scan's PSPL fit
-only), the best of lowest BIC ``chi2 + (n_params + 2) ln n``; ``with_atoms``
-is the host + atoms fit, the best as ``robust_fit`` selects it. Parameters are
-in the fit's convention (``rho``, not ``log rho``). ``write_results`` writes
-``nan`` as ``null`` and also takes an ``{id: record}`` mapping (records read
-back, to merge per-event files).
+Parameters are named and in the physical convention (``rho``, not
+``log rho``). ``write_json`` takes any nesting of dicts, lists and objects
+with ``to_dict()``, and writes ``nan`` as ``null``.
 
 Physical routing and observed time scale
 ----------------------------------------

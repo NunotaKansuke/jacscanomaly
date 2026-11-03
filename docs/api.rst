@@ -22,9 +22,7 @@ Main workflow
    jacscanomaly.AtomConfig
    jacscanomaly.RobustFit
    jacscanomaly.ModelFit
-   jacscanomaly.LightCurve
-   jacscanomaly.EventResult
-   jacscanomaly.write_results
+   jacscanomaly.write_json
    jacscanomaly.measure_features
    jacscanomaly.FeatureConfig
    jacscanomaly.Feature

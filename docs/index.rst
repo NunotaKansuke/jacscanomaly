@@ -22,7 +22,8 @@ What it does
 * plotting and summary helpers for scripts, CLIs, and notebooks,
 * a host fit the anomalies do not pull (host + "atoms"), with each anomaly
   described as bump / dip / caustic, its time and FWHM,
-* one JSON record per event (:class:`jacscanomaly.EventResult`),
+* every detection above one score, and one JSON record per event
+  (:meth:`jacscanomaly.Finder.fit_host`, :func:`jacscanomaly.write_json`),
 * low-memory C++ backends for large PSPL survey scans.
 
 The high-level entry point is :class:`jacscanomaly.Finder`. A typical workflow

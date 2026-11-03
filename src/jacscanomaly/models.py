@@ -177,6 +177,22 @@ class AnomalyResult:
     best: Optional[BestCandidate]
     observed_signal_scale: Optional[ObservedSignalScale] = None
     scored_candidates: List[ScoredCandidate] = field(default_factory=list)
+    detections: List[ScoredCandidate] = field(default_factory=list)
+
+    @property
+    def detected(self) -> bool:
+        """Whether any candidate is a detection (see :attr:`detections`)."""
+        return bool(self.detections)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """JSON record: every detection, and the single-lens fit."""
+        return {
+            "detected": self.detected,
+            "detections": [{"t0": float(c.t0), "teff": float(c.teff), "dchi2": float(c.dchi2),
+                            "score": float(c.score)} for c in self.detections],
+            "n_points": int(self.time.size),
+            "fit": {"params": named_params(self.fit), "chi2_dof": float(self.chi2_dof)},
+        }
 
     def summary_dict(self) -> Dict[str, Any]:
         """
@@ -280,3 +296,8 @@ class AnomalyResult:
 
     def __str__(self) -> str:
         return self.summary_text()
+
+
+def named_params(fit) -> Dict[str, float]:
+    """``{name: value}`` of a single-lens fit's parameters."""
+    return {str(k): float(v) for k, v in zip(fit.param_names, np.asarray(fit.params, float).reshape(-1))}

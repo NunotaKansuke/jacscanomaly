@@ -510,6 +510,7 @@ class Finder:
             grid_metrics_all=grid_metrics_all,
             best=best_obj,
             scored_candidates=scored_candidates,
+            detections=self._detections(scored_candidates),
             observed_signal_scale=measure_observed_signal_scale(
                 time_np,
                 residual_np / np.maximum(ferr_np, 1.0e-12),
@@ -519,6 +520,34 @@ class Finder:
 
         self._last_result = result
         return result
+
+    def fit_host(self, result: AnomalyResult, fitters=None, *, config=None):
+        """Fit the host with the anomalies as atoms (:func:`~jacscanomaly.robust_fit`).
+
+        ``result`` is this finder's :meth:`run` result; its data and PSPL
+        ``(t0, tE, u0)`` are used. ``fitters`` maps model names to fitters,
+        e.g. ``{"fspl": FSPLFitter()}``; a PSPL is put first when there is
+        none (the relock and the other models' starts need it). The residual
+        scans use this finder's settings with a PSPL host. ``config`` is an
+        :class:`~jacscanomaly.AtomConfig`; by default an atom is accepted by
+        the rule of :attr:`AnomalyResult.detections` (``detection_score``).
+        """
+        from dataclasses import replace
+
+        from .robust import AtomConfig, robust_fit
+
+        fitters = dict(fitters or {})
+        if not any(isinstance(f, PSPLFitter) for f in fitters.values()):
+            fitters = {"pspl": PSPLFitter(maxiter=int(self.config.fitter_maxiter),
+                                          tol=float(self.config.fitter_tol)), **fitters}
+        else:  # the PSPL first
+            k = next(k for k, f in fitters.items() if isinstance(f, PSPLFitter))
+            fitters = {k: fitters[k], **{n: f for n, f in fitters.items() if n != k}}
+        scanner = Finder(replace(self.config, fitter_kind="pspl"))
+        return robust_fit(fitters, scanner, result.time, result.flux, result.ferr,
+                          np.asarray(result.fit.params, dtype=float)[:3],
+                          config=config if config is not None
+                          else AtomConfig(min_score=float(self.config.detection_score)))
 
     def _to_arrays(self, time, flux, ferr, x0, *, data_kind: Literal["flux", "mag"] = "flux"):
         """
@@ -756,6 +785,14 @@ class Finder:
             quality=selected.quality,
             n_score_reference=selected.n_score_reference,
         )
+
+    def _detections(self, scored_candidates: Sequence[ScoredCandidate]) -> list[ScoredCandidate]:
+        """Every candidate the criteria accept with ``score >= detection_score``, by score."""
+        criteria = self.config.candidate_criteria
+        out = [c for c in scored_candidates
+               if float(c.score) >= float(self.config.detection_score)
+               and (criteria is None or criteria.accepts(dchi2=float(c.dchi2), quality=c.quality))]
+        return sorted(out, key=lambda c: -float(c.score))
 
     def _accepted_candidates(
         self,

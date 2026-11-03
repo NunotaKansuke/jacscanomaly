@@ -84,20 +84,19 @@ result.print_summary()
 # display(result.summary_table())
 ```
 
-### Host fit and one record per event
+### After the scan: host fit and JSON
 
 ```python
-from jacscanomaly import EventResult, FSPLFitter, LightCurve, PSPLFitter, robust_fit, write_results
+from jacscanomaly import FSPLFitter, write_json
 
-lc = LightCurve(time, flux, ferr, id="example")
-scan = finder.run(lc.time, lc.flux, lc.ferr)
-res = EventResult(lc, scan)          # anomaly = best candidate score >= 10
-if res.detected:
-    # host + anomalies fitted jointly, so the anomalies do not pull the host
-    fits = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, finder,
-                      lc.time, lc.flux, lc.ferr, scan.fit.params)
-    res = EventResult(lc, scan, fits)
-write_results("results.json", [res])  # {id: {anomaly, best_model, n_points, models}}
+result = finder.run(time, flux, ferr)
+result.detections    # every candidate with score >= config.detection_score (10)
+if result.detected:
+    # host + anomalies fitted jointly, so the anomalies do not pull the host;
+    # PSPL is always fitted, other models are compared with it by J
+    host = finder.fit_host(result, {"fspl": FSPLFitter()})
+    print(host.selected)
+write_json("event.json", {"scan": result, "host": host if result.detected else None})
 ```
 
 ---
