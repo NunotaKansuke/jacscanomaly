@@ -261,8 +261,8 @@ class AnomalyPlotter:
     Conventions
     -----------
     - "pspl": uses PSPL best-fit ``|tE*u0|`` to define center/width
-    - "anomaly": uses the best anomaly candidate for the center and the
-      same resolved event scale for the width
+    - "anomaly": uses the best anomaly candidate (t0, teff) for the center
+      and the width
 
     Notes
     -----
@@ -292,9 +292,11 @@ class AnomalyPlotter:
         center : {"pspl", "anomaly"} (compat: "best")
             Center of the view window.
         width_mode : {"pspl", "anomaly", "custom"} (compat: "best")
-            How to compute window half-width.  The normal scale is
-            ``|tE*u0|``; an observed residual scale is used only when the
-            fitted scale is unresolved.  ``a`` is its multiplier.
+            How to compute window half-width; ``a`` is its multiplier.
+            - "pspl": the event scale ``|tE*u0|``, or the observed residual
+              scale when the fitted scale is unresolved.
+            - "anomaly": the best candidate's teff (the event scale when
+              there is no candidate).
             - "custom": half_width must be provided.
         a : float
             Multiplier for the default half-width rule.
@@ -341,6 +343,8 @@ class AnomalyPlotter:
             if half_width is None:
                 raise ValueError("When width_mode='custom', half_width must be specified.")
             hw = float(half_width)
+        elif width_mode == "anomaly" and getattr(result, "best", None) is not None:
+            hw = float(a) * float(result.best.teff)
         else:  # "pspl"
             resolved = resolve_event_signal_scale(
                 result.fit,
@@ -366,12 +370,7 @@ class AnomalyPlotter:
             if not (xmin <= ano_t0 <= xmax):
                 dist = min(abs(ano_t0 - xmin), abs(ano_t0 - xmax))
                 if dist <= 2.0 * hw:
-                    buf = max(
-                        float(resolved.half_width)
-                        if width_mode != "custom" and resolved.valid
-                        else 5.0,
-                        5.0,
-                    )
+                    buf = max(5.0 * float(best.teff), 5.0)
                     if ano_t0 < xmin:
                         xmin = ano_t0 - buf
                     else:
@@ -493,7 +492,7 @@ class AnomalyPlotter:
         ONLY inside the chi2 evaluation window.
 
         - Data: residual vs time (optionally errorbar)
-        - Model lines are drawn only within the observed signal-scale window.
+        - Model lines are drawn only within |t - t0| <= teff_coeff * teff
 
         Returns (fig, ax).
         """

@@ -6,12 +6,14 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
-## [Unreleased]
+## [1.0.3] - 2026-11-04
 
 ### Fixed
 - `plot_anomaly_window` and the `show_anomaly_window` band of `plot_result`
   are centred on the detected candidate (`t0`, `teff`); they took the
   event's signal scale and drew a window thousands of days wide.
+- `width_mode="anomaly"` sizes the plot window by the candidate's `teff`
+  again; it had fallen back to the event scale.
 
 ### Changed
 - The quickstart notebook no longer fits parallax with a made-up sky
