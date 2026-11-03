@@ -478,10 +478,16 @@ struct GridIO {
 
 constexpr npy_intp kGridChunk = 256;
 
+#if defined(__GNUC__) && defined(__x86_64__) && !defined(__APPLE__)
+#define JAC_AVX2_CLONES __attribute__((target_clones("avx2", "default")))
+#else
+#define JAC_AVX2_CLONES
+#endif
+
 // Grid points [g_begin, g_end). Both template shapes are evaluated once per
 // window sample into the caller's buffers. Cloned for AVX2: the dispatch is
 // paid once per chunk.
-__attribute__((target_clones("avx2", "default")))
+JAC_AVX2_CLONES
 void grid_chunk(const GridIO& io, npy_intp g_begin, npy_intp g_end,
                 std::vector<double>& basis0, std::vector<double>& basis1) {
     const double* time = io.time;
