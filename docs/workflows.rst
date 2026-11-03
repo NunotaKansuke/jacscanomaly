@@ -27,9 +27,9 @@ Workflow map
    not pull it, and describe each anomaly (bump / dip, caustic, time, FWHM);
    see :ref:`post-fit-components`.
 
-``Finder.fit_host`` / ``write_json``
-   After ``Finder.run``: the host fit on the same data, and one JSON record;
-   see :ref:`event-records`.
+``Event`` / ``write_json``
+   One light curve: ``fit``, ``scan``, ``fit_atoms`` in the order the
+   analysis reads, and one JSON record; see :ref:`event-records`.
 
 Standard template scan
 ----------------------
@@ -158,42 +158,41 @@ result.
 One record per event
 --------------------
 
-The package gives parts; the pipeline writes the branching. One rule lists
-the anomalies: a *detection* is a scan candidate with ``score >=
+A *detection* is a scan candidate with ``score >=
 FinderConfig.detection_score`` (10 by default) that ``candidate_criteria``
-accepts. ``result.detections`` holds every one, by score; ``result.detected``
-is whether there is any. ``fit_host`` accepts atoms by the same score.
+accepts. ``scan.detections`` holds every one, by score; ``scan.detected`` is
+whether there is any. ``fit_atoms`` accepts atoms by the same score.
 
 .. code-block:: python
 
-   from jacscanomaly import FSPLFitter, write_json
+   from jacscanomaly import Event
 
-   result = finder.run(time, flux, ferr, x0=p0)
-   record = {"scan": result}
-   if result.detected:
-       record["host"] = finder.fit_host(result, {"fspl": FSPLFitter()})
-   write_json("event.json", record)        # or {id: record, ...} for many events
+   ev = Event(time, flux, ferr)
+   ev.fit("pspl")
+   if ev.scan().detected:
+       ev.fit("fspl", start="pspl")
+       if ev.scan().detected:
+           ev.fit_atoms("fspl")
+   ev.write_json("event.json")        # write_json(path, {id: ev, ...}) for many
 
-``fit_host(result, fitters, config=AtomConfig(...))`` is ``robust_fit`` on the
-data ``result`` holds, from its PSPL fit; a PSPL fitter is added first when
-``fitters`` has none. The records:
+The record holds every step that was run:
 
 .. code-block:: text
 
-   scan: {"detected": true,
-          "detections": [{"t0", "teff", "dchi2", "score"}, ...],
-          "n_points": 40540,
-          "fit": {"params": {"t0", "tE", "u0"}, "chi2_dof"}}
-   host: {"selected": "pspl",
-          "models": {"pspl": {"params": {...}, "chi2", "J", "host_identified",
-                              "anomalies": [{"kind", "caustic", "t_center",
-                                             "fwhm", "dchi2"}],
-                              "without_atoms": {"params": {...}, "chi2"}},
-                     "fspl": {...}}}
+   {"n_points": 40540, "kind": "flux",
+    "fits":  {"pspl": {"params": {"t0", "tE", "u0"}, "fs", "fb", "chi2", "J"},
+              "fspl": {...}},
+    "scans": {"pspl": {"detected": true, "relocked": false,
+                       "detections": [{"t0", "teff", "dchi2", "score"}, ...]},
+              "fspl": {...}},
+    "atoms": {"fspl": {"params": {...}, "fs", "fb", "chi2", "J", "host_identified",
+                       "n_atoms", "dchi2",
+                       "anomalies": [{"kind", "caustic", "t_center", "fwhm", "dchi2"}]}}}
 
 Parameters are named and in the physical convention (``rho``, not
-``log rho``). ``write_json`` takes any nesting of dicts, lists and objects
-with ``to_dict()``, and writes ``nan`` as ``null``.
+``log rho``); ``fs``, ``fb`` are on the input flux scale. ``write_json`` takes
+any nesting of dicts, lists and objects with ``to_dict()``, and writes
+``nan`` as ``null``.
 
 Physical routing and observed time scale
 ----------------------------------------

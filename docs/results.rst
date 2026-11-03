@@ -1,11 +1,17 @@
 Results
 =======
 
-The main output of :meth:`jacscanomaly.Finder.run` is
-:class:`jacscanomaly.AnomalyResult`.
+An :class:`jacscanomaly.Event` keeps its results by model name:
+``ev.fits`` (:class:`jacscanomaly.Fit`), ``ev.scans``
+(:class:`jacscanomaly.Scan`) and ``ev.atoms`` (:class:`jacscanomaly.Atoms`).
+``ev.summary()`` gives one row per model (a ``pandas.DataFrame`` when pandas
+is installed, else ``list[dict]``).
 
-Summary methods
----------------
+The rest of this page is the earlier API: :meth:`jacscanomaly.Finder.run`
+returns an :class:`jacscanomaly.AnomalyResult`.
+
+Summary methods of ``AnomalyResult``
+------------------------------------
 
 ``AnomalyResult`` provides CLI-friendly and notebook-friendly summaries:
 

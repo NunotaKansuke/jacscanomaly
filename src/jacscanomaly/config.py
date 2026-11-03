@@ -340,8 +340,8 @@ class FinderConfig:
     detection_score: float = 10.0
     """
     Score from which a candidate (accepted by ``candidate_criteria``) is a
-    detection: :attr:`AnomalyResult.detections` lists every one, and the
-    host fit (:meth:`Finder.fit_host`) accepts atoms by the same rule.
+    detection: :attr:`Scan.detections` lists every one, and
+    :meth:`Event.fit_atoms` accepts atoms by the same rule.
     """
 
     # ==================================================

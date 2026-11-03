@@ -392,6 +392,71 @@ def atom_windows(atoms, coeff: float = 3.0) -> tuple[Candidate, ...]:
         [Candidate(a.t0 - coeff * abs(a.teff), a.t0 + coeff * abs(a.teff)) for a in atoms]))
 
 
+def _fit_model(name, fitter, finder, time, flux, ferr, starts, base, anomaly, config, errors,
+               *, _host=None) -> Optional[ModelFit]:
+    """Atoms from every start, plus ``"fixed"``; the lowest-``J`` start of one model.
+
+    ``base`` is the model's plain fit (``None``: none); failed starts are put
+    in ``errors``. ``None`` when no start could be fitted.
+    """
+    n = time.size
+    host = _host or _Host(fitter, time)
+    runs = {}
+    for key, p0 in starts.items():
+        try:
+            runs[key] = fit_atoms(fitter, finder, time, flux, ferr, p0, anomaly=anomaly,
+                                  config=config, _host=host)
+        except Exception as exc:  # one failed start leaves the others
+            errors[f"{name}/{key}"] = repr(exc)
+    if not runs:
+        return None
+    seen = {k: _host_seen(host, flux, ferr, r, config.coeff) for k, r in runs.items()}
+    J = {k: _J(r, n, config) for k, r in runs.items()}
+    # "fixed": the host the samples outside the best free start's windows give, held
+    free = min(runs, key=lambda k: (not seen[k], J[k]))
+    outside = ~_inside(time, atom_windows(runs[free].atoms, config.coeff))
+    if not outside.all():
+        try:
+            p0 = fitter.seed_from_fit(fitter.fit(time, flux, ferr, runs[free].params,
+                                                 mask=~outside))
+            runs["fixed"] = fit_atoms(fitter, finder, time, flux, ferr, p0, anomaly=anomaly,
+                                      config=config, fix_host=True, _host=host)
+            seen["fixed"] = _host_seen(host, flux, ferr, runs["fixed"], config.coeff)
+            J["fixed"] = _J(runs["fixed"], n, config)
+        except Exception as exc:
+            errors[f"{name}/fixed"] = repr(exc)
+    margin = (config.free_host_margin if config.free_host_margin is not None
+              else runs[free].params.size * np.log(n))
+    rank = {k: v - margin * (k == "fixed") for k, v in J.items()}
+    # a start whose host the samples outside its windows do not see is not a host
+    identified = any(seen.values())
+    start = min(rank, key=lambda k: (identified and not seen[k], rank[k]))
+    r = runs[start]
+    windows = atom_windows(r.atoms, config.coeff)
+    inside = _inside(time, windows)
+    # windows over (nearly) all samples: nothing outside to score, evaluate on all
+    few = np.count_nonzero(~inside) < r.params.size + 3
+    fit = fitter.evaluate_fixed(time, flux, ferr, r.params,
+                                mask=None if few or not inside.any() else inside)
+    # the host the atoms sit on: the atom fit's fs, fb, not refit outside the windows
+    model = r.fs * host.magnification(r.params) + r.fb
+    z = ((flux - model) / ferr)[~inside]
+    fit = replace(fit, fs=r.fs, fb=r.fb, model_flux=model, residual=flux - model,
+                  chi2=float(z @ z), chi2_dof=float(z @ z) / max(z.size - r.params.size, 1))
+    return ModelFit(
+        name=name, start=start, atom_fit=r, J=float(J[start]),
+        rank=float(rank[start]),
+        J_starts={k: float(v) for k, v in J.items()},
+        sigma=_sigma(host, flux, ferr, r.params, [(a.t0, a.teff) for a in r.atoms], config.coeff),
+        windows=windows, fit=fit,
+        features=measure_features(
+            time, flux, ferr, r.fs * host.magnification(r.params) + r.fb,
+            _atom_flux(time, [0.0, 0.0] + [x for a in r.atoms for x in (a.a, a.b)],
+                       [(a.t0, a.teff) for a in r.atoms], config.coeff),
+            windows, config=FeatureConfig(coeff=config.coeff)) if windows else None,
+        base=base, host_identified=identified)
+
+
 def robust_fit(
     fitters: Mapping[str, object],
     finder,
@@ -457,62 +522,13 @@ def robust_fit(
             starts = {}
         if base is not None:
             starts["base"] = fitter.seed_from_fit(base)
-        runs = {}
-        for key, p0 in starts.items():
-            try:
-                runs[key] = fit_atoms(fitter, finder, time, flux, ferr, p0, anomaly=anomaly,
-                                      config=config, _host=host)
-            except Exception as exc:  # one failed start leaves the others
-                errors[f"{name}/{key}"] = repr(exc)
-        if not runs:
+        m = _fit_model(name, fitter, finder, time, flux, ferr, starts, base, anomaly, config,
+                       errors, _host=host)
+        if m is None:
             continue
-        seen = {k: _host_seen(host, flux, ferr, r, config.coeff) for k, r in runs.items()}
-        J = {k: _J(r, n, config) for k, r in runs.items()}
-        # "fixed": the host the samples outside the best free start's windows give, held
-        free = min(runs, key=lambda k: (not seen[k], J[k]))
-        outside = ~_inside(time, atom_windows(runs[free].atoms, config.coeff))
-        if not outside.all():
-            try:
-                p0 = fitter.seed_from_fit(fitter.fit(time, flux, ferr, runs[free].params,
-                                                     mask=~outside))
-                runs["fixed"] = fit_atoms(fitter, finder, time, flux, ferr, p0, anomaly=anomaly,
-                                          config=config, fix_host=True, _host=host)
-                seen["fixed"] = _host_seen(host, flux, ferr, runs["fixed"], config.coeff)
-                J["fixed"] = _J(runs["fixed"], n, config)
-            except Exception as exc:
-                errors[f"{name}/fixed"] = repr(exc)
-        margin = (config.free_host_margin if config.free_host_margin is not None
-                  else runs[free].params.size * np.log(n))
-        rank = {k: v - margin * (k == "fixed") for k, v in J.items()}
-        # a start whose host the samples outside its windows do not see is not a host
-        identified = any(seen.values())
-        start = min(rank, key=lambda k: (identified and not seen[k], rank[k]))
-        r = runs[start]
         if name == names[0]:
-            pspl_best = r.params[:3]
-        windows = atom_windows(r.atoms, config.coeff)
-        inside = _inside(time, windows)
-        # windows over (nearly) all samples: nothing outside to score, evaluate on all
-        few = np.count_nonzero(~inside) < r.params.size + 3
-        fit = fitter.evaluate_fixed(time, flux, ferr, r.params,
-                                    mask=None if few or not inside.any() else inside)
-        # the host the atoms sit on: the atom fit's fs, fb, not refit outside the windows
-        model = r.fs * host.magnification(r.params) + r.fb
-        z = ((flux - model) / ferr)[~inside]
-        fit = replace(fit, fs=r.fs, fb=r.fb, model_flux=model, residual=flux - model,
-                      chi2=float(z @ z), chi2_dof=float(z @ z) / max(z.size - r.params.size, 1))
-        models[name] = ModelFit(
-            name=name, start=start, atom_fit=r, J=float(J[start]),
-            rank=float(rank[start]),
-            J_starts={k: float(v) for k, v in J.items()},
-            sigma=_sigma(host, flux, ferr, r.params, [(a.t0, a.teff) for a in r.atoms], config.coeff),
-            windows=windows, fit=fit,
-            features=measure_features(
-                time, flux, ferr, r.fs * host.magnification(r.params) + r.fb,
-                _atom_flux(time, [0.0, 0.0] + [x for a in r.atoms for x in (a.a, a.b)],
-                           [(a.t0, a.teff) for a in r.atoms], config.coeff),
-                windows, config=FeatureConfig(coeff=config.coeff)) if windows else None,
-            base=base, host_identified=identified)
+            pspl_best = m.params[:3]
+        models[name] = m
     if not models:
         raise RuntimeError(f"no host model could be fitted: {errors}")
     selected = min(models, key=lambda k: (not models[k].host_identified, models[k].J))

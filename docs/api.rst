@@ -5,8 +5,20 @@ This page is the reference layer for the user guide. For narrative
 documentation, start with :doc:`quickstart`, :doc:`method`, and
 :doc:`configuration`.
 
-Main workflow
--------------
+Event
+-----
+
+.. autosummary::
+   :toctree: generated
+
+   jacscanomaly.Event
+   jacscanomaly.Fit
+   jacscanomaly.Scan
+   jacscanomaly.Atoms
+   jacscanomaly.write_json
+
+Earlier workflow
+----------------
 
 .. autosummary::
    :toctree: generated
@@ -22,7 +34,6 @@ Main workflow
    jacscanomaly.AtomConfig
    jacscanomaly.RobustFit
    jacscanomaly.ModelFit
-   jacscanomaly.write_json
    jacscanomaly.measure_features
    jacscanomaly.FeatureConfig
    jacscanomaly.Feature

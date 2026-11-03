@@ -1,136 +1,102 @@
 Quickstart
 ==========
 
-Run the anomaly finder
-----------------------
-
-The main inputs are one-dimensional arrays of time, flux, and flux error:
+One light curve is one :class:`jacscanomaly.Event`. Its steps are methods,
+called in the order the analysis reads; every result stays on the event.
 
 .. code-block:: python
 
    import numpy as np
 
-   from jacscanomaly import Finder, FinderConfig
+   from jacscanomaly import Event, FinderConfig
 
-   data = np.load("example/example_data.npy")
-   time = data[:, 0]
-   flux = data[:, 1]
-   ferr = data[:, 2]
+   time, flux, ferr = np.load("example/example_data.npy").T
 
-   config = FinderConfig(fitter_kind="pspl", gap=50.0)
+   ev = Event(time, flux, ferr, config=FinderConfig(gap=50.0))
+   ev.fit("pspl")
+   scan = ev.scan()          # the residual of the last fit
+   print(scan.detected, scan.detections)
 
-   finder = Finder(config)
-   result = finder.run(time, flux, ferr)
-   result.print_summary()
-
-Magnitude input
----------------
-
-Flux is the default input representation. To provide magnitudes and magnitude
-errors instead, pass them in the same positions and set ``data_kind="mag"``.
-The finder converts them to a relative flux scale internally before fitting and
-scanning:
+Magnitudes are taken as they are (the zero point does not matter):
 
 .. code-block:: python
 
-   result = finder.run(time, mag, magerr, data_kind="mag")
+   ev = Event(time, mag, magerr, kind="mag")
 
-The returned :class:`jacscanomaly.AnomalyResult` contains the original data,
-the single-lens fit, residuals, per-season grid summaries, extracted clusters,
-and the best anomaly candidate.
+The data are kept on a scale of order one inside; ``fs``, ``fb`` and the plots
+are on the input scale.
 
-This is the default fitted-baseline workflow. For a fixed baseline,
-residual-only template-free search, or iterative signal extraction, see
+The full pipeline
+-----------------
+
+Fit, scan; if something is found, refit with a finite source and with
+parallax and scan again; what neither explains is fitted with atoms.
+
+.. code-block:: python
+
+   ev = Event(time, flux, ferr, ra_deg=268.4, dec_deg=-29.2, ephemeris="roman.txt")
+
+   ev.fit("pspl")
+   if ev.scan().detected:                  # the PSPL host is relocked here if needed
+       ev.fit("fspl", start="pspl")
+       fspl_scan = ev.scan()
+       ev.fit("parallax", start="pspl")
+       parallax_scan = ev.scan()
+       if fspl_scan.detected and parallax_scan.detected:
+           ev.fit_atoms("pspl")
+           ev.fit_atoms("fspl")
+           ev.fit_atoms("parallax")
+
+   ev.write_json("event.json")
+
+Models: ``"pspl"``, ``"fspl"``, ``"parallax"``, ``"fspl_parallax"``. The
+parallax models need ``ra_deg``, ``dec_deg`` (and ``ephemeris`` for a
+spacecraft).
+
+Rules
+-----
+
+* ``ev.fit(model)`` starts from the last fit (its ``t0, tE, u0``, and ``rho``
+  or ``piE`` when both models have them); ``start="pspl"`` names the fit to
+  start from, ``x0=`` gives the start itself. The first fit uses the
+  automatic multistart. Parallax ``tref``: the time of maximum flux unless
+  given.
+* ``ev.scan(model=None)`` and ``ev.fit_atoms(model=None)`` act on the last
+  fit; a model not fitted yet is an error.
+* Refitting a model drops its own scan and atoms; the other models' results
+  stay.
+* A PSPL scan that detects something checks whether the PSPL sits on the
+  anomaly instead of the event; if so the PSPL fit is replaced, scanned again,
+  and ``scan.relocked`` is ``True``.
+
+Results
+-------
+
+.. code-block:: python
+
+   ev.fits["fspl"].params        # {"t0": ..., "tE": ..., "u0": ..., "rho": ...}
+   ev.scans["pspl"].detections   # every candidate with score >= detection_score
+   ev.atoms["pspl"].features     # one per anomaly window: kind, time, FWHM, dchi2
+   ev.summary()                  # one row per model (a DataFrame with pandas)
+   ev.release()                  # drop the scan grids and model arrays
+
+Several events go into one file with
+:func:`jacscanomaly.write_json` ``("results.json", {"evt1": ev1, "evt2": ev2})``.
+
+Plots
+-----
+
+.. code-block:: python
+
+   ev.plot_result("pspl")
+   ev.plot_anomaly_window("pspl")
+
+They show a scan (``ev.scan(model)`` first), in flux.
+
+Earlier API
+-----------
+
+:class:`jacscanomaly.Finder` and :meth:`jacscanomaly.Finder.run` (fit and scan
+in one call), the fitters, :func:`jacscanomaly.robust_fit`, the
+template-free scan and the effect scores stay as they were; see
 :doc:`workflows`.
-
-Use quality criteria
---------------------
-
-Large ``dchi2`` values can be caused by a single high-weight point. Use
-:class:`jacscanomaly.CandidateCriteria` to reject candidates before best
-candidate selection:
-
-.. code-block:: python
-
-   from jacscanomaly import CandidateCriteria, FinderConfig
-
-   config = FinderConfig(
-       candidate_criteria=CandidateCriteria(
-           min_dchi2=20.0,
-           min_n_eff=2.0,
-       )
-   )
-
-Here ``n_eff`` is the effective number of contributing points. Candidates with
-``n_eff`` below the threshold are ignored by the best-candidate selection.
-
-Inspect the result
-------------------
-
-.. code-block:: python
-
-   summary = result.summary_dict()
-   print(summary["best_score"])
-   print(summary["best_n_eff"])
-
-   if result.best is not None:
-       best = result.best
-       print(best.t0, best.teff, best.dchi2)
-       print(best.quality.n_eff, best.quality.peak_frac)
-
-In notebooks:
-
-.. code-block:: python
-
-   display(result.summary_table())
-
-Plot the result
----------------
-
-The high-level plotting methods use the latest result stored on the finder:
-
-.. code-block:: python
-
-   import matplotlib.pyplot as plt
-
-   finder.plot_result()
-   finder.plot_anomaly_window()
-   plt.show()
-
-The summary plot shows the light curve, residuals, and scan statistic. The
-window plot focuses on the best anomaly candidate.
-
-Fit only the single-lens model
-------------------------------
-
-If you only need the baseline fit:
-
-.. code-block:: python
-
-   fit = finder.fit_single_lens(time, flux, ferr)
-   print(fit.params)
-   print(fit.chi2)
-
-You can also provide an explicit nonlinear initial guess:
-
-.. code-block:: python
-
-   x0 = np.array([2459000.0, 30.0, 0.1])  # t0, tE, u0
-   fit = finder.fit_single_lens(time, flux, ferr, x0=x0)
-
-Run the scan with fixed baseline parameters
--------------------------------------------
-
-By default, :meth:`jacscanomaly.Finder.run` treats ``x0`` as an initial guess
-and refits the selected single-lens model before scanning residuals. If you
-already have baseline nonlinear parameters and want to scan without optimizing
-them, pass ``refit=False``:
-
-.. code-block:: python
-
-   x0 = np.array([2459000.0, 30.0, 0.1])  # t0, tE, u0
-   result = finder.run(time, flux, ferr, x0=x0, refit=False)
-
-In this mode, the nonlinear parameters in ``x0`` are fixed. The linear flux
-parameters ``fs`` and ``fb`` are still solved for the supplied light curve.
-This is the intended find-only mode when the PSPL geometry is already known.

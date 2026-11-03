@@ -54,71 +54,57 @@ pip install jacscanomaly
 
 ## Quick Example
 
+One light curve is one `Event`; the steps are its methods and the results stay on it.
+
 ```python
 import numpy as np
-import matplotlib.pyplot as plt
-from jacscanomaly import CandidateCriteria, Finder, FinderConfig
+from jacscanomaly import Event, FinderConfig
 
-# load data (time, flux, flux_err)
-data = np.load("example_data.npy")
-time, flux, ferr = data[:, 0], data[:, 1], data[:, 2]
+time, flux, ferr = np.load("example_data.npy").T
+ev = Event(time, flux, ferr, ra_deg=268.4, dec_deg=-29.2, ephemeris="roman.txt",
+           config=FinderConfig())
+# magnitudes: Event(time, mag, magerr, kind="mag")
 
-# run anomaly finder
-config = FinderConfig(
-    fitter_kind="pspl",
-    candidate_criteria=CandidateCriteria(min_n_eff=2.0),
-)
-finder = Finder(config)
-result = finder.run(time, flux, ferr)
+ev.fit("pspl")
+if ev.scan().detected:                  # the PSPL host is relocked here if needed
+    ev.fit("fspl", start="pspl")
+    fspl_scan = ev.scan()               # the residual of the last fit
+    ev.fit("parallax", start="pspl")
+    parallax_scan = ev.scan()
+    if fspl_scan.detected and parallax_scan.detected:
+        ev.fit_atoms("pspl")            # host + atoms, features come with it
+        ev.fit_atoms("fspl")
+        ev.fit_atoms("parallax")
 
-# For magnitude data, pass mag and magerr in the same positions and select it:
-# result = finder.run(time, mag, magerr, data_kind="mag")
-
-# You can still pass an explicit initial guess if desired:
-# p0 = np.array([10000, 10, 0.3])
-# result = finder.run(time, flux, ferr, p0)
-
-result.print_summary()
-
-# In notebooks, get a one-row table:
-# display(result.summary_table())
+ev.summary()                            # one row per model
+ev.write_json("event.json")
 ```
 
-### After the scan: host fit and JSON
-
-```python
-from jacscanomaly import FSPLFitter, write_json
-
-result = finder.run(time, flux, ferr)
-result.detections    # every candidate with score >= config.detection_score (10)
-if result.detected:
-    # host + anomalies fitted jointly, so the anomalies do not pull the host;
-    # PSPL is always fitted, other models are compared with it by J
-    host = finder.fit_host(result, {"fspl": FSPLFitter()})
-    print(host.selected)
-write_json("event.json", {"scan": result, "host": host if result.detected else None})
-```
+`fit` starts from the last fit unless `start=` or `x0=` is given; `scan` and
+`fit_atoms` act on the last fit unless a model is named, and a model not
+fitted yet is an error. Refitting a model drops its own scan and atoms.
+`Finder.run` (fit and scan in one call) stays for existing scripts.
 
 ---
 
 ## Visualization
 
 ```python
-finder.plot_result()
-finder.plot_anomaly_window()
+ev.plot_result("pspl")
+ev.plot_anomaly_window("pspl")
 plt.show()
 ```
 
 These commands produce two complementary visualizations:
 
-1. **Three-panel summary plot (`finder.plot_result`)**
+1. **Three-panel summary plot (`ev.plot_result`)**
 
    * **Top:** Observed light curve with the best-fit baseline model (PSPL)
    * **Middle:** Residuals after baseline fitting
    * **Bottom:** Anomaly scan result (Δχ² vs. time), showing where localized
      deviations from the baseline model are detected
 
-2. **Focused anomaly window plot (`finder.plot_anomaly_window`)**
+2. **Focused anomaly window plot (`ev.plot_anomaly_window`)**
 
    * A zoomed-in view around the best anomaly candidate
    * Residuals are shown together with the anomaly template and the flat model
@@ -131,7 +117,7 @@ Example notebooks are available in `example/`:
 Each anomaly of the robust fit is described directly:
 
 ```python
-for f in fits.best.features.features:
+for f in ev.atoms["pspl"].features:
     print(f.kind, f.caustic, f.time, f.timescale, f.dchi2)  # e.g. "bump+dip", False, ...
 ```
 
@@ -234,16 +220,11 @@ candidate has `n_eff` close to 1 and a large `peak_frac`.
 
 ## Result Summaries
 
-`AnomalyResult` provides both CLI-friendly and notebook-friendly summaries:
-
 ```python
-result.print_summary()       # print formatted text
-text = result.summary_text() # return formatted text
-row = result.summary_dict()  # return a plain dictionary
-table = result.summary_table()  # pandas.DataFrame when pandas is installed
+ev.summary()   # one row per model: chi2, J, detected, n_detections, best_score,
+               # atoms_J, n_atoms, host_identified (a DataFrame with pandas)
+ev.to_dict()   # every stored result, as written by ev.write_json
 ```
-
-`print(result)` also shows the formatted summary text.
 
 ---
 

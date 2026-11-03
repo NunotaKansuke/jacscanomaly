@@ -23,18 +23,19 @@ What it does
 * a host fit the anomalies do not pull (host + "atoms"), with each anomaly
   described as bump / dip / caustic, its time and FWHM,
 * every detection above one score, and one JSON record per event
-  (:meth:`jacscanomaly.Finder.fit_host`, :func:`jacscanomaly.write_json`),
+  (:class:`jacscanomaly.Event`, :func:`jacscanomaly.write_json`),
 * low-memory C++ backends for large PSPL survey scans.
 
-The high-level entry point is :class:`jacscanomaly.Finder`. A typical workflow
-is:
+The entry point is :class:`jacscanomaly.Event`, one light curve whose steps
+are its methods. A typical workflow is:
 
 1. fit a single-lens baseline model to a light curve,
 2. scan the residuals over local anomaly templates,
 3. extract non-overlapping anomaly candidates,
 4. inspect candidate quality diagnostics such as ``score`` and ``n_eff``,
-5. fit the host jointly with the anomalies and describe them
-   (:func:`jacscanomaly.robust_fit`).
+5. refit with finite source or parallax and scan again,
+6. fit the host jointly with the anomalies and describe them
+   (:meth:`jacscanomaly.Event.fit_atoms`).
 
 Start here
 ----------

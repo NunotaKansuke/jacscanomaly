@@ -34,6 +34,7 @@ from .robust import (
     Atom, AtomConfig, AtomFit, ModelFit, RobustFit, atom_basis, atom_windows, fit_atoms, robust_fit,
 )
 from .output import write_json
+from .event import Atoms, Event, Fit, Scan
 from .features import (
     Crossing,
     Feature,
@@ -126,6 +127,10 @@ __all__ = [
     
     
     "write_json",
+    "Event",
+    "Fit",
+    "Scan",
+    "Atoms",
     "Crossing",
     "Feature",
     "FeatureConfig",
