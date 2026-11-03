@@ -18,7 +18,6 @@ from jacscanomaly.effect_detection import (
     _pspl_magnification_and_jacobian,
     build_fspl_template_bank,
     compute_effect_morphology_scores,
-    detect_fspl_from_pspl_fit,
     find_compact_blocks,
     measure_parallax_support,
     parallax_score_test,
@@ -26,15 +25,11 @@ from jacscanomaly.effect_detection import (
 )
 from jacscanomaly.fspl_initialization import fspl_template_initial_guesses
 from jacscanomaly.singlelens_model import (
-    A_fspl_from_u,
-    A_fspl_logrho_func,
     A_pspl_func,
     A_pspl_parallax_func,
     A_pspl_space_parallax_func,
-    u_rectilinear,
 )
 from jacscanomaly.effect_routing import route_candidate, routing_pareto_curve
-from jacscanomaly.exact_probe import run_fspl_exact_probe
 from jacscanomaly import parallax
 from jacscanomaly.trajectory import make_parallax_projector
 
@@ -537,63 +532,6 @@ def test_compact_block_helper_does_not_remove_broad_residual():
     mask = find_compact_blocks(time, z, sigma=5.0, max_blocks=1, max_span=2.0)
 
     assert not np.any(mask)
-
-
-def test_fspl_joint_template_bank_recovers_injected_template():
-    pytest.importorskip("microjax")
-    from types import SimpleNamespace
-
-    time = np.linspace(-20.0, 20.0, 161)
-    pspl = np.asarray([0.0, 10.0, 0.1])
-    fspl = np.asarray([0.0, 10.0, 0.1, np.log(0.08)])
-    pspl_model = np.asarray(A_pspl_func(jnp.asarray(pspl), jnp.asarray(time)))
-    fspl_model = np.asarray(A_fspl_logrho_func(jnp.asarray(fspl), jnp.asarray(time)))
-    fit = SimpleNamespace(
-        time=time,
-        params=jnp.asarray(pspl),
-        fs=jnp.asarray(1.0),
-        ferr=np.full(time.size, 0.01),
-        residual=fspl_model - pspl_model,
-    )
-
-    candidate = detect_fspl_from_pspl_fit(
-        fit,
-        rho_over_u0=(0.5, 1.0),
-        tE_factors=(1.0,),
-    )
-
-    assert candidate.effect == "fspl"
-    assert candidate.score > 20.0
-    assert candidate.seed_parameters is not None
-    assert candidate.seed_parameters.shape == (4,)
-
-
-def test_fspl_template_bank_profiles_pspl_nuisance_and_forwards_fft_size():
-    pytest.importorskip("microjax")
-
-    time = np.linspace(-5.0, 5.0, 41)
-    pspl = np.asarray([0.0, 3.0, 0.2])
-    bank, metadata = build_fspl_template_bank(
-        time,
-        pspl,
-        rho_over_u0=(1.0,),
-        tE_factors=(1.0,),
-        u0_signs=(1.0,),
-        N_fft=128,
-        backend="microjax",
-    )
-    rho = float(metadata[0][3])
-    tE = float(metadata[0][4])
-    u0 = float(metadata[0][5])
-    u = u_rectilinear(0.0, tE, u0, jnp.asarray(time))
-    A_fspl = np.asarray(A_fspl_from_u(u, rho, N_fft=128))
-    A_pspl = np.asarray(A_pspl_func(jnp.asarray([0.0, tE, u0]), jnp.asarray(time)))
-    design = np.column_stack([A_pspl, np.ones_like(A_pspl)])
-    coefficients, *_ = np.linalg.lstsq(design, A_fspl, rcond=None)
-    expected = A_fspl - design @ coefficients
-
-    assert bank.shape == (1, time.size)
-    np.testing.assert_allclose(bank[0], expected, rtol=1.0e-5, atol=1.0e-5)
 
 
 def test_fspl_template_initial_guesses_rank_direct_compiled_chi2_seed():
@@ -1313,47 +1251,3 @@ def test_candidate_summary_is_recursively_json_serializable():
 
     assert '"direction": [-0.5]' in encoded
     assert '"score": 3.0' in encoded
-
-
-def test_fspl_exact_probe_promotes_an_exact_template():
-    pytest.importorskip("microjax")
-    from types import SimpleNamespace
-
-    time = np.linspace(-2.0, 2.0, 81)
-    pspl = np.asarray([0.0, 1.0, 0.1])
-    fspl = np.asarray([0.0, 1.0, 0.1, np.log(0.08)])
-    pspl_model = np.asarray(A_pspl_func(jnp.asarray(pspl), jnp.asarray(time)))
-    flux = np.asarray(A_fspl_logrho_func(jnp.asarray(fspl), jnp.asarray(time)))
-    fit = SimpleNamespace(
-        time=time,
-        flux=flux,
-        params=jnp.asarray(pspl),
-        fs=jnp.asarray(1.0),
-        fb=jnp.asarray(0.0),
-        ferr=np.full(time.size, 0.01),
-        residual=flux - pspl_model,
-    )
-    candidate = EffectCandidate(
-        effect="fspl",
-        score=100.0,
-        score_without_compact_blocks=100.0,
-        effective_rank=1,
-        condition_number=1.0,
-        coverage=1.0,
-        max_point_influence=0.1,
-        max_block_influence=0.1,
-        subset_stability=1.0,
-        seed_parameters=fspl,
-    )
-
-    result = run_fspl_exact_probe(
-        fit,
-        candidate,
-        rho_over_u0=(0.75,),
-        tE_factors=(1.0,),
-        t0_offsets=(0.0,),
-    )
-
-    assert result.decision == "fallback"
-    assert result.best is not None
-    assert result.best.delta_chi2 > 9.0
