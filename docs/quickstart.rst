@@ -174,6 +174,9 @@ Settings
 ``parallax_geometry``, ``parallax_observer_convention``, ``max_piE``
    The parallax model: ``"annual"`` or ``"space"`` geometry, the ephemeris
    convention, and the largest ``piE`` allowed.
+``parallax_time_offset`` (0)
+   Added to ``time`` to get JD for the parallax ephemeris, e.g. 2450000 for
+   HJD - 2450000.
 
 :class:`jacscanomaly.AtomConfig` (``ev.fit_atoms(config=...)``) sets the atom
 search.

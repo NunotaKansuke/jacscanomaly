@@ -6,7 +6,7 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
-## [Unreleased]
+## [1.0.2] - 2026-11-04
 
 ### Fixed
 - FSPL `log rho` is clipped at `ln 100`, the edge of VBM's ESPL table (was
