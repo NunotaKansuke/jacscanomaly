@@ -36,7 +36,8 @@ def test_summary_dict_without_best_candidate():
     assert summary["n_grid_total"] == 7
     assert summary["chi2_dof"] == 1.25
     assert summary["has_best"] is False
-    assert "best_t0" not in summary
+    assert np.isnan(summary["best_t0"])
+    assert np.isnan(summary["best_score"])
 
 
 def test_summary_dict_with_best_candidate_includes_quality():
@@ -85,3 +86,4 @@ def test_summary_table_falls_back_or_returns_dataframe():
         assert table[0]["n_points"] == 2
     else:
         assert table.loc[0, "n_points"] == 2
+        assert np.isnan(table.loc[0, "best_score"])

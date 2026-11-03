@@ -181,6 +181,9 @@ class AnomalyResult:
     def summary_dict(self) -> Dict[str, Any]:
         """
         Return a compact summary dictionary suitable for logging/serialization.
+
+        The ``best_*`` keys are always present (``nan`` without a best
+        candidate), so tables of many events share one set of columns.
         """
         out: Dict[str, Any] = {
             "n_points": int(self.time.size),
@@ -196,24 +199,21 @@ class AnomalyResult:
                 else self.observed_signal_scale.summary_dict()
             ),
         }
-        if self.best is None:
-            return out
-
         b = self.best
-        q = b.quality
+        q = None if b is None else b.quality
         out.update(
             {
-                "best_t0": float(b.t0),
-                "best_teff": float(b.teff),
-                "best_dchi2": float(b.dchi2),
-                "best_score": float(b.score),
-                "best_score_n_reference": int(b.n_score_reference),
-                "best_n_window": int(q.n_window),
-                "best_n_contrib": int(q.n_contrib),
-                "best_n_eff": float(q.n_eff),
-                "best_peak_frac": float(q.peak_frac),
-                "best_rho1": float(q.rho1),
-                "best_longest_run": int(q.longest_run),
+                "best_t0": np.nan if b is None else float(b.t0),
+                "best_teff": np.nan if b is None else float(b.teff),
+                "best_dchi2": np.nan if b is None else float(b.dchi2),
+                "best_score": np.nan if b is None else float(b.score),
+                "best_score_n_reference": np.nan if b is None else int(b.n_score_reference),
+                "best_n_window": np.nan if q is None else int(q.n_window),
+                "best_n_contrib": np.nan if q is None else int(q.n_contrib),
+                "best_n_eff": np.nan if q is None else float(q.n_eff),
+                "best_peak_frac": np.nan if q is None else float(q.peak_frac),
+                "best_rho1": np.nan if q is None else float(q.rho1),
+                "best_longest_run": np.nan if q is None else int(q.longest_run),
             }
         )
         return out
