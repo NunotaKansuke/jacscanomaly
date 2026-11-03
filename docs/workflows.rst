@@ -190,7 +190,9 @@ The record holds every step that was run:
                        "anomalies": [{"kind", "caustic", "t_center", "fwhm", "dchi2"}]}}}
 
 Parameters are named and in the physical convention (``rho``, not
-``log rho``); ``fs``, ``fb`` are on the input flux scale. ``write_json`` takes
+``log rho``); ``fs``, ``fb`` are on the input flux scale. Rounding: times
+(``t0``, ``t_center``) to ``1e-5`` d, ``chi2``, ``J``, ``dchi2`` to ``0.01``,
+``score`` to ``0.1``, the rest to 6 significant digits. ``write_json`` takes
 any nesting of dicts, lists and objects with ``to_dict()``, and writes
 ``nan`` as ``null``.
 

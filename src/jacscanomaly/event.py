@@ -35,6 +35,25 @@ _EXTRA = {"pspl": (), "fspl": ("rho",), "parallax": ("piEN", "piEE"),
           "fspl_parallax": ("rho", "piEN", "piEE")}
 
 
+def _sig(x) -> float:
+    """6 significant digits: shapes and fluxes."""
+    return float(f"{float(x):.6g}")
+
+
+def _t(x) -> float:
+    """Times to 1e-5 d (about 1 s), whatever the epoch."""
+    return round(float(x), 5)
+
+
+def _chi2(x) -> float:
+    """chi2, J and dchi2 to 0.01: their differences stay readable."""
+    return round(float(x), 2)
+
+
+def _params(p: Mapping[str, float]) -> dict:
+    return {k: _t(v) if k == "t0" else _sig(v) for k, v in p.items()}
+
+
 @dataclass(frozen=True)
 class Fit:
     """A single-lens fit: named physical parameters, ``fs, fb`` on the input scale."""
@@ -47,8 +66,8 @@ class Fit:
     J: float
 
     def to_dict(self) -> dict:
-        return {"params": dict(self.params), "fs": self.fs, "fb": self.fb,
-                "chi2": self.chi2, "J": self.J}
+        return {"params": _params(self.params), "fs": _sig(self.fs), "fb": _sig(self.fb),
+                "chi2": _chi2(self.chi2), "J": _chi2(self.J)}
 
 
 @dataclass(frozen=True)
@@ -70,8 +89,8 @@ class Scan:
 
     def to_dict(self) -> dict:
         return {"detected": self.detected, "relocked": self.relocked,
-                "detections": [{"t0": float(c.t0), "teff": float(c.teff),
-                                "dchi2": float(c.dchi2), "score": float(c.score)}
+                "detections": [{"t0": _t(c.t0), "teff": _sig(c.teff),
+                                "dchi2": _chi2(c.dchi2), "score": round(float(c.score), 1)}
                                for c in self.detections]}
 
 
@@ -97,12 +116,13 @@ class Atoms:
     features: tuple = ()
 
     def to_dict(self) -> dict:
-        return {"params": dict(self.params), "fs": self.fs, "fb": self.fb,
-                "chi2": self.chi2, "J": self.J, "host_identified": self.host_identified,
-                "n_atoms": self.n_atoms, "dchi2": self.dchi2,
+        return {"params": _params(self.params), "fs": _sig(self.fs), "fb": _sig(self.fb),
+                "chi2": _chi2(self.chi2), "J": _chi2(self.J),
+                "host_identified": self.host_identified,
+                "n_atoms": self.n_atoms, "dchi2": _chi2(self.dchi2),
                 "anomalies": [{"kind": f.kind, "caustic": bool(f.caustic),
-                               "t_center": float(f.time), "fwhm": float(f.timescale),
-                               "dchi2": float(f.dchi2)} for f in self.features]}
+                               "t_center": _t(f.time), "fwhm": _sig(f.timescale),
+                               "dchi2": _chi2(f.dchi2)} for f in self.features]}
 
 
 def _scaled(time, flux, ferr, kind):
