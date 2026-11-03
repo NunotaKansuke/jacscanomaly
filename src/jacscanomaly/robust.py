@@ -60,7 +60,7 @@ from . import _cpp_grid
 from .candidate import Candidate, _merged
 from .features import FeatureConfig, FeatureResult, measure_features
 from .models import named_params
-from .fitters import FSPLFitter, PSPLFitter, _pspl_magnification
+from .fitters import FSPLFitter, PSPLFitter, _pspl_magnification, _solve_fs_fb_numpy
 from .parallax_backend import _ParallaxFitter
 from .relock import HostRelock, _detected, relock_host
 from .singlelens_fit import SingleLensFitResult
@@ -73,6 +73,9 @@ class AtomConfig:
     ``free_host_margin``: the ``J`` by which a fit that moved the host must beat
     the held host (start ``"fixed"``) to be selected; ``None`` is
     ``n_host ln n``, the host's own price.
+    ``scan_reuse_tol``: a season of an atom scan whose normalised residual
+    moved by at most this (a constant aside) since a recent scan keeps that
+    scan's clusters; ``dchi2`` then moves by at most ``2 tol sqrt(dchi2) + tol**2``.
     """
 
     coeff: float = 3.0
@@ -81,6 +84,7 @@ class AtomConfig:
     max_atoms: int = 15
     k_atom: float = 4.0
     free_host_margin: Optional[float] = None
+    scan_reuse_tol: float = 1e-3
 
 
 @dataclass(frozen=True)
@@ -285,8 +289,8 @@ def fit_atoms(
 ) -> AtomFit:
     """Grow and prune atoms on the host model of ``fitter`` from the start ``p0``.
 
-    ``finder`` scans the residual (its PSPL host is given the data minus the
-    atoms minus ``fs (A_host - A_pspl)``, the PSPL-shaped remainder).
+    ``finder`` scans the residual of the PSPL at ``p[:3]`` (``fs, fb`` fitted)
+    on the data minus the atoms minus ``fs (A_host - A_pspl)``.
     ``anomaly`` (``True`` = anomaly) exempts atoms centred there from the
     ``tE`` cap; pass :attr:`HostRelock.mask` of a relocked host.
     ``fix_host``: the host stays at ``p0`` (``fs, fb`` and the atoms linear only).
@@ -321,13 +325,15 @@ def fit_atoms(
     coef, z = _linear(host, flux, ferr, p, atoms, config.coeff)
     chi2 = chi2_0 = float(z @ z)
     for _ in range(config.max_atoms):
+        pspl = _pspl_magnification(time, *p[:3])
         rest = (flux - _atom_flux(time, coef, atoms, config.coeff)
-                - coef[0] * (host.magnification(p) - _pspl_magnification(time, *p[:3])))
-        scan = finder.run(time, rest, ferr, x0=p[:3], data_kind="flux", refit=False, verbose=False)
-        ok = [c for c in scan.scored_candidates if allowed(c)]
-        if not ok:
+                - coef[0] * (host.magnification(p) - pspl))
+        fs, fb = _solve_fs_fb_numpy(pspl, rest, ferr)
+        candidates = finder._residual_candidates(time, rest - (fs * pspl + fb), ferr,
+                                                 reuse_tol=config.scan_reuse_tol)
+        best = next((c for c in candidates if allowed(c)), None)  # the largest dchi2
+        if best is None:
             break
-        best = max(ok, key=lambda c: float(c.dchi2))
         trial = atoms + [(float(best.t0), float(best.teff))]
         p1, coef1, chi2_1 = refit(p, trial)
         if chi2 - chi2_1 <= price:

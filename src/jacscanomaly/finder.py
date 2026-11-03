@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional, Sequence
+from typing import Iterator, Literal, Optional, Sequence
 import logging
 
 import numpy as np
@@ -526,6 +526,22 @@ class Finder:
         )
 
         return result
+
+    def _residual_candidates(self, time_np, residual_np, ferr_np, *,
+                             reuse_tol: float = 0.0) -> Iterator[ScoredCandidate]:
+        """Scored candidates of a residual by descending ``dchi2``, each built when read.
+
+        No result object (see ``cluster_rows``). The scores are those of
+        :meth:`_score_candidates`; a caller after the first accepted candidate
+        scores only the ones before it.
+        """
+        rows = self.runner.cluster_rows(time_np, residual_np, ferr_np, reuse_tol=reuse_tol)
+        rows = rows[np.lexsort((rows[:, 0], rows[:, 1]))]
+        clusters = rows[:, :3]
+        stats = self._indexed_score_backgrounds(clusters)
+        for i in np.argsort(-clusters[:, 2], kind="stable"):
+            # the quality is the candidate's own row (the nearest-row lookup finds it)
+            yield self._score_candidate(clusters[i], clusters, rows, background_stats=stats[i])
 
     def _to_arrays(self, time, flux, ferr, x0, *, data_kind: Literal["flux", "mag"] = "flux"):
         """

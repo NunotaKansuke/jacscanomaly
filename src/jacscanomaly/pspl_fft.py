@@ -494,8 +494,9 @@ class PSPLFFTScanner:
             minlength=n_grid,
         ).astype(float, copy=False)
 
-        convolution_size = 3 * n_grid - 2
-        nfft = self._next_power_of_two(convolution_size)
+        # Only the n_grid lags of the crop are read: a circular correlation of
+        # length >= 2 n_grid - 1 leaves them free of wrap-around.
+        nfft = scipy_fft.next_fast_len(2 * n_grid - 1, real=True)
         fft_weights = np.fft.rfft(weights, n=nfft)
         fft_weighted_centered_flux = np.fft.rfft(weighted_centered_flux, n=nfft)
 
@@ -573,13 +574,18 @@ class PSPLFFTScanner:
         """Return all source-plane ``u0`` rows for one ``tE`` in one FFT batch."""
         tE_value = self._positive_scalar(tE, "tE")
         u0_rows = np.asarray(u0_values, dtype=float).reshape(-1, 1)
-        source_x = prepared.lags.reshape(1, -1) / tE_value
+        # the lags are -(n-1)..(n-1) grid steps and the template is even in the
+        # lag: evaluate the lags >= 0 and mirror them (so the template is its own
+        # reverse)
+        n_grid = prepared.t0_grid.size
+        source_x = prepared.lags[n_grid - 1:].reshape(1, -1) / tE_value
         u = np.hypot(u0_rows, source_x)
         u2 = np.square(u)
         root = np.hypot(u, 2.0)
         with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            templates = 4.0 / (u * root * (u2 + 2.0 + u * root))
-        templates = np.nan_to_num(templates, nan=0.0, posinf=0.0, neginf=0.0)
+            half = 4.0 / (u * root * (u2 + 2.0 + u * root))
+        half = np.nan_to_num(half, nan=0.0, posinf=0.0, neginf=0.0)
+        templates = np.concatenate((half[:, :0:-1], half), axis=1)
 
         # Thread-pool dispatch costs more than the FFT itself for small grids.
         # Keep the default ``-1`` adaptive, while honoring an explicit positive
@@ -590,13 +596,13 @@ class PSPLFFTScanner:
             else self.fft_workers
         )
         fft_templates_reversed = scipy_fft.rfft(
-            templates[:, ::-1],
+            templates,
             n=prepared.nfft,
             axis=-1,
             workers=workers,
         )
         fft_templates2_reversed = scipy_fft.rfft(
-            np.square(templates[:, ::-1]),
+            np.square(templates),
             n=prepared.nfft,
             axis=-1,
             workers=workers,
@@ -626,10 +632,9 @@ class PSPLFFTScanner:
         valid = np.isfinite(sxx) & np.isfinite(sxy) & (sxx > self.singular_rtol * scale)
         source_numerator = np.maximum(sxy, 0.0) if self.positive_source else sxy
 
-        fs = np.zeros_like(sxx)
-        delta_chi2 = np.zeros_like(sxx)
-        fs[valid] = source_numerator[valid] / sxx[valid]
-        delta_chi2[valid] = np.square(source_numerator[valid]) / sxx[valid]
+        fs = np.divide(source_numerator, sxx, out=np.zeros_like(sxx), where=valid)
+        delta_chi2 = np.divide(np.square(source_numerator), sxx, out=np.zeros_like(sxx),
+                               where=valid)
         delta_chi2 = np.clip(delta_chi2, 0.0, max(prepared.null_chi2, 0.0))
         f0 = prepared.mean_flux - fs * qx / prepared.total_weight
         fb = f0 - fs
@@ -689,6 +694,3 @@ class PSPLFFTScanner:
             raise ValueError(f"{name} must contain only positive finite values.")
         return result
 
-    @staticmethod
-    def _next_power_of_two(value: int) -> int:
-        return 1 << (int(value) - 1).bit_length()
