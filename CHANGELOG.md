@@ -6,24 +6,25 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
-## Unreleased
+## [1.0.0] - 2026-11-03
 
 ### Added
+- `Event`: one light curve; `fit`, `scan` and `fit_atoms` are its steps and
+  keep their results (`fits`, `scans`, `atoms`). `write_json` writes one
+  record per event, `Event.summary` one row per model. Every detection with
+  `score >= detection_score` is listed.
 - `robust_fit`: the host fitted jointly with the anomalies ("atoms", the
   scan's templates), so they do not pull it; PSPL, FSPL and parallax hosts,
   compared by a BIC (`J`).
 - `measure_features`: each anomaly window described by the extrema of the
-  atoms model (bump / dip parts, time, FWHM), the fraction explained by named
-  shape families, and a caustic flag from the edge sharpness.
+  atoms model (bump / dip parts, time, FWHM) and a caustic flag from the edge
+  sharpness.
 - `relock_host`: moves a host fit off a short anomaly it sits on.
-- `LightCurve`, `EventResult`, `write_results`: one JSON record per event
-  (scan decision, best model without and with atoms, every model's
-  parameters, chi2 and features), events without an anomaly included.
 
 ### Changed
 - `robust_fit` adds a start `"fixed"` (the plain host held fixed, atoms
   only) and keeps it unless a fit that moved the host wins by
-  `AtomConfig.free_host_margin` (500) in `J`. A moved host plus one broad
+  `AtomConfig.free_host_margin` (default `n_host ln n`) in `J`. A moved host plus one broad
   atom no longer replaces the plain host plus a small atom for a small
   `chi2` gain. `ModelFit.rank` is what the selection compares.
 - Score every extracted anomaly cluster against an all-season,
@@ -31,6 +32,11 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
   `AnomalyResult.scored_candidates`.
 - Keep `AnomalyResult.best` as the maximum-`dchi2` quality-accepted candidate
   for backward compatibility.
+- Faster: atom scans rescan only the seasons whose residual changed
+  (`AtomConfig.scan_reuse_tol`), and the PSPL FFT seed search evaluates half
+  of its even template. Results unchanged.
+- Documentation cut to the `Event` workflow: installation, quickstart, method
+  and API.
 
 ### Fixed
 - FSPL and parallax fits given `pspl_params` also start from the PSPL

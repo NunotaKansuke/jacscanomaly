@@ -1,195 +1,88 @@
-Method overview
-===============
+Method
+======
 
-``jacscanomaly`` searches for localized deviations from a baseline model. The
-default microlensing workflow uses a PSPL single-lens model as the baseline.
+Scan
+----
 
-Pipeline
+The residual ``r = flux - model`` of a single-lens fit is split into seasons
+(at gaps longer than ``gap``). In each season, at every trial centre ``t0``
+and timescale ``teff``, the window ``|t - t0| < teff_coeff * teff`` is fitted
+with a constant, and with a constant plus a linear amplitude times one of two
+templates (``Q = 1 + ((t - t0) / teff)^2``):
+
+.. math::
+
+   A_0 = Q^{-1/2}, \qquad A_1 = \frac{Q + 2}{\sqrt{Q (Q + 4)}}.
+
+The better template gives
+
+.. math::
+
+   \Delta\chi^2 = \chi^2_\mathrm{flat} - \chi^2_\mathrm{template}.
+
+The amplitude may be negative, so dips are found as well as bumps.
+Neighbouring grid points that see one feature are merged into one candidate.
+
+Score
+-----
+
+A candidate is compared with all other candidates of a similar timescale
+(in every season):
+
+.. math::
+
+   \mathrm{score} = \frac{\Delta\chi^2 - \mathrm{median}(\Delta\chi^2_\mathrm{others})}
+                         {\mathrm{MAD\ scale}(\Delta\chi^2_\mathrm{others})},
+
+with the strong others clipped from above. A detection is a candidate with
+``score >= detection_score``. Each candidate also carries ``n_eff``, the
+number of points that carry its ``dchi2``: ``(sum u_i)^2 / sum u_i^2`` with
+``u_i`` the per-point improvement. A candidate made by one point has
+``n_eff`` near 1.
+
+Relock
+------
+
+A PSPL fit may sit on the anomaly instead of the event. When a PSPL scan
+detects something, the anomaly segment and a masked refit are alternated,
+from the fit and from a fit with its own core masked. The masked host is kept
+when it lowers ``J = chi2_kept + 2 n_masked`` and the kept samples still see
+it.
+
+Atoms
+-----
+
+The host is fitted jointly with "atoms". Each atom is a detection of the
+residual scan, ``a A_0 + b A_1`` cut to zero at
+``|t - t0| = teff_coeff * teff``. Atoms are added one at a time (the largest
+``dchi2`` first) and dropped again while each lowers
+
+.. math::
+
+   J = \chi^2 + (n_\mathrm{host} + 2 + 4 n_\mathrm{atoms}) \ln n.
+
+So the host is fitted with the anomalies modelled, not pulled by them.
+Several starts are tried (the plain fit, the PSPL host nested, the host fitted
+outside the atom windows); the lowest ``J`` is kept.
+
+Features
 --------
 
-The high-level pipeline is:
+Each anomaly window is described from the atoms model ``y`` (the host held):
 
-1. Convert inputs to arrays and fit a single-lens model.
-2. Compute residuals:
+``kind``
+   The parts of ``y`` in time order: ``bump``, ``dip``, ``bump+dip``, ...
+``time``, ``timescale``
+   Peak time and FWHM of the strongest part.
+``dchi2``
+   ``chi2(host) - chi2(host + atoms)`` in the window.
+``caustic``
+   ``W / tau >= 4``, with ``W`` the equivalent width of ``|y|`` and ``tau``
+   its fastest rise or fall. One smooth part has about 1.5, two about 3; a
+   caustic crossing is sharper. It is a rough guide.
 
-   .. math::
-
-      r_i = f_i - f_{\mathrm{single}}(t_i)
-
-3. Split the time series into observing seasons using large time gaps.
-4. For each season, scan a grid of anomaly centers ``t0`` and effective
-   durations ``teff``.
-5. At each grid point, evaluate a local window around ``t0``.
-6. Compare a flat residual model against an anomaly-template residual model.
-7. Extract non-overlapping clusters and keep one representative per cluster.
-8. Select the best candidate after optional quality criteria.
-
-The following pages document the later stages in detail:
-
-* :doc:`template_free_method` explains the residual-only zero-crossing search.
-* :ref:`post-fit-components` explains signal masking and masked refits.
-* :doc:`planet_features` explains the anomaly descriptions.
-
-Detection statistic
+What it does not do
 -------------------
 
-For each grid point, the package computes:
-
-.. math::
-
-   \Delta\chi^2 = \chi^2_{\mathrm{flat}} - \chi^2_{\mathrm{anom}}
-
-Large positive ``dchi2`` means that a localized anomaly template improves the
-fit relative to a flat residual model.
-
-Local anomaly templates
------------------------
-
-The standard grid scan is a fast local detector, not a binary-lens fit. At
-every ``(t0, teff)`` grid point it compares a constant residual level with the
-better of two linear-amplitude templates:
-
-.. math::
-
-   A_0(t) = \left[1 + \left(\frac{t-t_0}{t_\mathrm{eff}}\right)^2\right]^{-1/2}
-
-and
-
-.. math::
-
-   A_1(t) =
-   \frac{Q + 2}{\sqrt{Q(Q+4)}},
-   \qquad
-   Q = 1 + \left(\frac{t-t_0}{t_\mathrm{eff}}\right)^2.
-
-For each template, the amplitude and constant term are solved by weighted
-linear least squares in the local window. The lower-:math:`\chi^2` template is
-used to form ``dchi2``. The fitted local amplitude may be positive or negative,
-so the scan can identify bumps and dips.
-
-``t0`` is the trial anomaly center. ``teff`` is a detector timescale that sets
-both the template width and, through ``teff_coeff``, the local evaluation half
-window:
-
-.. math::
-
-   [t_0 - \mathtt{teff\_coeff}\,t_\mathrm{eff},
-    t_0 + \mathtt{teff\_coeff}\,t_\mathrm{eff}].
-
-It is useful for locating and ranking a residual feature; it is not itself a
-physical planet parameter. Use the planet-signal workflow to refine a baseline
-and measure local physical constraints after detection.
-
-Candidate score
----------------
-
-The candidate ``score`` measures how strongly an extracted cluster stands out
-relative to other extracted clusters:
-
-.. math::
-
-   \mathrm{score}
-   =
-   \frac{\Delta\chi^2_{c} - \mathrm{median}(\Delta\chi^2_{\mathrm{others}})}
-        {\mathrm{MAD\ scale}(\Delta\chi^2_{\mathrm{others}})}
-
-The background contains raw cluster peaks from all observing seasons and a
-comparable ``teff`` range for the candidate ``c``. Candidate-quality cuts are
-applied after clustering and therefore do not censor this background
-population. The reported ``std_others`` is a robust MAD-based scale retained
-under its historical field name. A one-sided, MAD-based upper clip removes
-strong secondary candidates without discarding a fixed percentile of ordinary
-background clusters.
-
-The finder applies this calculation independently to every extracted cluster
-and exposes the results through ``AnomalyResult.scored_candidates``. The
-backward-compatible ``AnomalyResult.best`` remains the candidate with the
-largest ``dchi2`` after candidate-quality criteria are applied; it is not
-necessarily the candidate with the largest score.
-
-This makes the score an event-wide, timescale-matched comparison. Efficiency
-thresholds calibrated with the previous same-season score definition must be
-regenerated.
-
-Effective number of points
---------------------------
-
-``dchi2`` alone can be misleading when one point dominates the improvement. For
-each candidate, ``jacscanomaly`` computes per-point positive improvements:
-
-.. math::
-
-   u_i = \max(0, \chi^2_{\mathrm{flat}, i} - \chi^2_{\mathrm{anom}, i})
-
-The effective number of contributing points is:
-
-.. math::
-
-   n_{\mathrm{eff}} = \frac{(\sum_i u_i)^2}{\sum_i u_i^2}
-
-This behaves like a participation ratio. A one-point-dominated candidate has
-``n_eff`` close to 1. A candidate supported by many comparable points has larger
-``n_eff``.
-
-Other quality diagnostics
--------------------------
-
-Each candidate also stores:
-
-``n_window``
-   Number of data points in the local evaluation window.
-
-``n_contrib``
-   Number of points above the configured per-point improvement threshold.
-
-``peak_frac``
-   Fraction of the total positive improvement carried by the strongest point.
-
-``rho1``
-   Lag-1 autocorrelation of signed per-point improvements.
-
-``longest_run``
-   Longest consecutive run of above-threshold contributing points.
-
-Season splitting
-----------------
-
-The data are sorted by time and split whenever the gap between consecutive
-points is larger than ``FinderConfig.gap``. The default is 100 days. For survey
-light curves with yearly observing seasons, a smaller value such as 50 days can
-separate seasons while still scanning all seasons.
-
-Backends
---------
-
-``grid_backend="cpp"``
-   Uses the C++ for-loop grid backend. This is the default for PSPL survey
-   scans and is useful for large light curves because it has lower peak memory
-   use.
-
-``grid_backend="jax"``
-   Uses JAX vectorized or chunked grid evaluation. This remains available for
-   development and comparison.
-
-The four public single-lens model families use the same SciPy LM fitting
-orchestration. FSPL magnification and parallax trajectories are evaluated by
-the compiled numerical backend; ``parallax_geometry`` selects annual or space
-observer geometry, and ``parallax_observer_convention`` selects the observer
-coordinate convention.
-
-What the standard scan does not do
-----------------------------------
-
-The standard scan does not choose a 2L1S or 1L2S model, fit caustic geometry,
-or estimate a planet mass ratio. It reports local residual candidates.
-:doc:`planet_features` describes each anomaly of the host + atoms fit:
-bump / dip parts, their times and FWHMs, and a caustic flag from the edge
-sharpness.
-
-Method details
---------------
-
-.. toctree::
-   :maxdepth: 1
-
-   template_free_method
+No binary-lens model is fitted: ``s``, ``q`` and ``alpha`` are not
+estimated. Widths shorter than the cadence are not resolved.
