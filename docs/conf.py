@@ -24,7 +24,7 @@ extensions = [
 autosummary_generate = True
 autodoc_typehints = "description"
 autodoc_member_order = "bysource"
-autodoc_mock_imports = ["microjax"]
+autodoc_mock_imports = ["microjax", "jacscanomaly._cpp_grid"]
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 

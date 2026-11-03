@@ -26,21 +26,20 @@ from jacscanomaly import Event
 
 time, flux, ferr = np.load("example/example_data.npy").T
 ev = Event(time, flux, ferr, ra_deg=268.4, dec_deg=-29.2, ephemeris="roman.txt")
-# magnitudes: Event(time, mag, magerr, kind="mag")
 
 ev.fit("pspl")
-pspl_scan = ev.scan()                   # the residual of the last fit
+pspl_scan = ev.scan()
 if pspl_scan.detected:
     ev.fit("fspl", start="pspl")
     fspl_scan = ev.scan()
     ev.fit("parallax", start="pspl")
     parallax_scan = ev.scan()
     if fspl_scan.detected and parallax_scan.detected:
-        ev.fit_atoms("pspl")            # host + atoms, features come with it
+        ev.fit_atoms("pspl")
         ev.fit_atoms("fspl")
         ev.fit_atoms("parallax")
 
-ev.summary()                            # one row per model
+ev.summary()
 ev.write_json("event.json")
 ev.plot_result("pspl")
 ```
