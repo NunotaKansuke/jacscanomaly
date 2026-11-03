@@ -199,6 +199,7 @@ def _run_scipy_lm(
     kwargs = {
         "jac": jac,
         "method": "lm",
+        "x_scale": 1.0,  # scipy >= 1.16 defaults to "jac" for lm
         "max_nfev": max(1, int(maxiter)),
         "xtol": tolerance,
         "ftol": tolerance,
