@@ -6,6 +6,17 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- FSPL magnification clamps `rho` at 100, the edge of VBM's ESPL table. A fit
+  that wandered past it read the table out of range and printed
+  `Source too large!` per point, which hung Jupyter kernels.
+
+### Changed
+- `example/` holds a quickstart notebook and a batch script on the `Event`
+  API; the older scripts and notebooks are removed.
+
 ## [1.0.1] - 2026-11-03
 
 ### Fixed

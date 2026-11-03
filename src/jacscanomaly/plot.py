@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 
 from .anomaly_models import get_flat_plot_model_masked, get_anom_plot_model_masked
+from .magnification import ESPL_MAX_RHO
 from .singlelens_model import (
     A_pspl_func,
     A_fspl_func,
@@ -124,7 +125,7 @@ def _gulls_vbm_model_flux(fit, time) -> np.ndarray:
     vbm = VBMicrolensing.VBMicrolensing()
     vbm.Tol = 1e-4
     vbm.RelTol = 1e-4
-    rho_safe = max(float(rho), 1e-12)
+    rho_safe = min(max(float(rho), 1e-12), ESPL_MAX_RHO)
     A = np.asarray([vbm.ESPLMag(float(ui), rho_safe) for ui in u], dtype=float)
     return float(np.asarray(fit.fs)) * A + float(np.asarray(fit.fb))
 

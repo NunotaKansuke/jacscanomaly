@@ -3,6 +3,10 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import jit
 
+# VBM's ESPL table spans rho <= 100 (see cpp/vbm_magnification.hpp); beyond it
+# A ~ 1, so the VBM paths clamp rho there.
+ESPL_MAX_RHO = 100.0
+
 _mag_fspl = {}
 
 

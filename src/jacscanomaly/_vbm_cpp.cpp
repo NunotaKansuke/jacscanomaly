@@ -103,7 +103,7 @@ PyObject* finite_source_magnification(
                 );
             }
             values[index] = magnifier.ESPLMag2(
-                std::abs(input[index]), rho
+                std::abs(input[index]), jacscanomaly::espl_rho(rho)
             );
             if (!std::isfinite(values[index]) || values[index] <= 0.0) {
                 throw std::runtime_error(
@@ -332,7 +332,7 @@ PyObject* score_finite_source_seeds(
                 || seed[1] == 0.0) {
                 continue;
             }
-            const double rho = std::exp(std::max(-50.0, std::min(10.0, seed[3])));
+            const double rho = jacscanomaly::espl_rho(std::exp(std::max(-50.0, std::min(10.0, seed[3]))));
             const double tE = std::abs(seed[1]);
             double weight_sum = 0.0;
             double weighted_magnification = 0.0;

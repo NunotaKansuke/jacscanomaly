@@ -25,6 +25,7 @@ import numpy as np
 import jax.numpy as jnp
 
 from .auto_init import automatic_seeds, best_fit_over_seeds
+from .magnification import ESPL_MAX_RHO
 from .plot import SingleLensPlotter
 from .singlelens_fit import SingleLensFitResult
 from .parallax_backend import (
@@ -231,7 +232,7 @@ def _cpp_fspl_magnification(
 ) -> np.ndarray:
     """Evaluate FSPL magnification in the compiled VBM-backed extension."""
     u_np = np.asarray(u, dtype=float)
-    rho_safe = max(float(rho), 1.0e-12)
+    rho_safe = min(max(float(rho), 1.0e-12), ESPL_MAX_RHO)
     if _vbm_cpp is not None and hasattr(_vbm_cpp, "fspl_magnification"):
         values = _vbm_cpp.fspl_magnification(
             u_np,

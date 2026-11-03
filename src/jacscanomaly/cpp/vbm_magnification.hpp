@@ -12,6 +12,13 @@
 
 namespace jacscanomaly {
 
+// VBM's ESPL table spans rho <= 100; past it ESPLMag indexes the table out of
+// range (and prints "Source too large!").  There A = sqrt(1 + 4/rho^2) ~ 1, so
+// clamping rho changes the magnification by less than 2e-4.
+constexpr double kEsplMaxRho = 100.0;
+
+inline double espl_rho(double rho) { return std::min(std::max(rho, 1e-12), kEsplMaxRho); }
+
 class VbmMagnification {
 public:
     VbmMagnification(bool finite_source, const std::string& espl_table, double tol, double reltol)
@@ -26,7 +33,7 @@ public:
 
     double operator()(double u, double rho) {
         if (!std::isfinite(u) || u < 0.0) throw std::runtime_error("invalid lens separation");
-        const double value = finite_source_ ? vbm_->ESPLMag2(u, std::max(rho, 1e-12)) : vbm_->PSPLMag(u);
+        const double value = finite_source_ ? vbm_->ESPLMag2(u, espl_rho(rho)) : vbm_->PSPLMag(u);
         if (!std::isfinite(value) || value <= 0.0) throw std::runtime_error("VBMicrolensing returned an invalid magnification");
         return value;
     }
@@ -53,11 +60,12 @@ public:
             d_du = point_du;
             return;
         }
-        const double r = std::max(rho, 1e-12);
+        const double r = espl_rho(rho);
+        const bool clamped = r != rho;
         const double quad = 4.0 * (u2 + 1.0) * r * r / (u2 * u * u2_4 * u2_4 * s_u2_4);
         if (quad * 10.0 < vbm_->Tol) {
             d_du = point_du + quad * (2.0 * u / (u2 + 1.0) - 3.0 / u - 5.0 * u / u2_4);
-            d_drho = 2.0 * quad / r;
+            d_drho = clamped ? 0.0 : 2.0 * quad / r;
             return;
         }
         constexpr double fr_scale = 10.857362047581296;
@@ -99,7 +107,7 @@ public:
             dpref_du = point_du;
         }
         d_du = dpref_du * corr + pref * dcorr_dzf * dzz_du;
-        d_drho = dpref_drho * corr + pref * (dcorr_dfr * dfr_drho + dcorr_dzf * dzz_drho);
+        d_drho = clamped ? 0.0 : dpref_drho * corr + pref * (dcorr_dfr * dfr_drho + dcorr_dzf * dzz_drho);
     }
 
 private:

@@ -20,6 +20,7 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
+from .magnification import ESPL_MAX_RHO
 from .signal_scale import (
     ObservedSignalScale,
     measure_observed_magnification_fwhm,
@@ -2805,7 +2806,7 @@ def _native_fspl_magnifier():
 def _native_fspl_magnification(u: np.ndarray, rho: float) -> np.ndarray:
     """Evaluate an exact uniform-source curve through the native C++ backend."""
     magnifier = _native_fspl_magnifier()
-    rho_safe = max(float(rho), 1.0e-12)
+    rho_safe = min(max(float(rho), 1.0e-12), ESPL_MAX_RHO)
     values = np.asarray(
         [magnifier.ESPLMag(float(value), rho_safe) for value in np.abs(u)],
         dtype=float,
