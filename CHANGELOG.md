@@ -6,6 +6,13 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- `ModelFit.params` and `ModelFit.sigma` report the host parameters as
+  `fit.param_names` names them: FSPL and parallax give `rho` and its error,
+  not the atom fit's seed `log rho` (still in `atom_fit.params`).
+
 ## [1.0.3] - 2026-11-04
 
 ### Fixed

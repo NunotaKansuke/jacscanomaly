@@ -147,3 +147,12 @@ def test_a_needle_host_under_atoms_is_not_a_host():
     m = robust_fit({"pspl": PSPLFitter()}, _finder(), time, flux, ferr, [0.0, 1000.0, 1e-4]).best
     assert m.J_starts["scan"] < m.J and m.start != "scan" and m.host_identified
 
+
+
+def test_model_fit_params_and_sigma_are_in_rho_not_log_rho():
+    time, flux, ferr = _event([(-8.0, 0.3)], n=3000)
+    m = robust_fit({"pspl": PSPLFitter(), "fspl": FSPLFitter()}, _finder(), time, flux, ferr,
+                   [0.0, 20.0, 0.3]).models["fspl"]
+    log_rho = m.atom_fit.params[3]
+    assert np.isclose(m.params[3], np.exp(log_rho)) and np.allclose(m.params, m.fit.params)
+    assert m.params[3] > 0 and np.isfinite(m.sigma[3])

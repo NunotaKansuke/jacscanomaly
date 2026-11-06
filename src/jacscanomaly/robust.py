@@ -122,8 +122,9 @@ class ModelFit:
     ``fit`` is the host alone with the atom fit's ``fs, fb``, the samples
     inside ``windows`` (the merged atom supports) masked. ``features`` characterize every
     window against the host + atoms of the atom fit (its own ``fs, fb``).
-    ``sigma`` are the 1-sigma host parameter errors with fluxes and atom
-    amplitudes profiled. ``base`` is the plain fit without atoms. ``rank`` is
+    ``params`` and ``sigma`` are the host parameters and their 1-sigma errors
+    (fluxes and atom amplitudes profiled) as ``fit`` names them: ``rho``, not
+    the seed's ``log rho`` that ``atom_fit.params`` holds. ``base`` is the plain fit without atoms. ``rank`` is
     what the start selection compares: ``J``, less the margin for the start
     ``"fixed"``. ``host_identified``: the host (``fs A + fb``) beats a constant
     flux on the samples outside ``windows``; ``False`` when no start's host
@@ -145,7 +146,7 @@ class ModelFit:
 
     @property
     def params(self) -> np.ndarray:
-        return self.atom_fit.params
+        return np.asarray(self.fit.params, dtype=float).reshape(-1)[:self.atom_fit.params.size]
 
     @property
     def atoms(self) -> tuple[Atom, ...]:
@@ -447,13 +448,17 @@ def _fit_model(name, fitter, finder, time, flux, ferr, starts, base, anomaly, co
     # the host the atoms sit on: the atom fit's fs, fb, not refit outside the windows
     model = r.fs * host.magnification(r.params) + r.fb
     z = ((flux - model) / ferr)[~inside]
+    sigma = _sigma(host, flux, ferr, r.params, [(a.t0, a.teff) for a in r.atoms], config.coeff)
+    if "rho" in fit.param_names:  # seed log rho -> rho: d rho = rho d log rho
+        k = list(fit.param_names).index("rho")
+        sigma[k] *= float(np.asarray(fit.params, dtype=float).reshape(-1)[k])
     fit = replace(fit, fs=r.fs, fb=r.fb, model_flux=model, residual=flux - model,
                   chi2=float(z @ z), chi2_dof=float(z @ z) / max(z.size - r.params.size, 1))
     return ModelFit(
         name=name, start=start, atom_fit=r, J=float(J[start]),
         rank=float(rank[start]),
         J_starts={k: float(v) for k, v in J.items()},
-        sigma=_sigma(host, flux, ferr, r.params, [(a.t0, a.teff) for a in r.atoms], config.coeff),
+        sigma=sigma,
         windows=windows, fit=fit,
         features=measure_features(
             time, flux, ferr, r.fs * host.magnification(r.params) + r.fb,
