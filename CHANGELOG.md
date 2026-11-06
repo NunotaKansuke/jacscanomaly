@@ -6,7 +6,7 @@ This project follows a loose interpretation of [Semantic Versioning](https://sem
 
 ---
 
-## [Unreleased]
+## [1.0.4] - 2026-11-06
 
 ### Fixed
 - `ModelFit.params` and `ModelFit.sigma` report the host parameters as
